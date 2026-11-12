@@ -1,0 +1,40 @@
+# Data never enters the tree: download scripts and checksums do. A sample whose licence is
+# confirmed is added with `git add -f`.
+data/
+downloads/
+landing/
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.parquet
+*.zip
+*.gz
+*.json.gz
+*.db
+*.sqlite
+*.duckdb
+
+# Environment and credentials: configuration comes from the environment.
+.env
+.env.*
+*.tfvars
+*credentials*.json
+*-key.json
+service-account*.json
+
+# Build output and tool state.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+target/
+dbt_packages/
+logs/
+.terraform/
+*.tfstate
+*.tfstate.*

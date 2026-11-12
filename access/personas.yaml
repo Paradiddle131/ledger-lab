@@ -1,0 +1,116 @@
+# Who may see what: the persona set and the persona -> entity -> data product mapping.
+# A persona becomes a service identity whose account id is its `id`; the project comes from the
+# environment, so no identifier is written here. Tests act as a persona and assert what it sees.
+# This mapping plays the role a group directory would. Shape: access/schema.json.
+
+entities:
+  - id: chicago
+    name: City of Chicago
+    currency: USD
+    brings: Contracts and the payments made against them, the real contract to voucher to payment chain.
+  - id: uk-transport
+    name: UK Department for Transport
+    currency: GBP
+    brings: Published spend on an April to March year, in its own file layout, with provisional figures revised later.
+  - id: nl-government
+    name: Dutch central government
+    currency: EUR
+    brings: Budget and outturn, with several budget moments in one year.
+
+data_products:
+  - id: payments
+    scope: entity
+    holds: Contracts, vouchers and payments of one entity.
+  - id: ledger
+    scope: entity
+    holds: Journal entries of one entity, posted in the ERP from its real documents.
+  - id: group-totals
+    scope: group
+    holds: Figures summed across all entities in one currency.
+  - id: metric-definitions
+    scope: group
+    holds: The governed metric definitions and their owners.
+  - id: audit-log
+    scope: group
+    holds: One record per agent answer and per approval.
+
+# read: rows in clear (masking rules still apply); aggregate: only aggregates above the minimum group;
+# edit: change definitions; draft: propose an entry, never post it; post: post an approved entry.
+personas:
+  - id: accountant-chicago
+    name: Entity accountant, City of Chicago
+    kind: human
+    duties: Books and reconciles one entity.
+  - id: accountant-uk-transport
+    name: Entity accountant, UK Department for Transport
+    kind: human
+    duties: Books and reconciles one entity.
+  - id: accountant-nl-government
+    name: Entity accountant, Dutch central government
+    kind: human
+    duties: Books and reconciles one entity.
+  - id: group-controller
+    name: Group controller
+    kind: human
+    duties: Owns the group figures across every entity.
+  - id: payables-clerk
+    name: Payables clerk
+    kind: human
+    duties: Processes vouchers and payments for the entity with the full payment chain.
+  - id: approver
+    name: Approver
+    kind: human
+    duties: Approves and posts entries the agent drafts, never ones they prompted.
+  - id: auditor
+    name: Auditor
+    kind: human
+    duties: Reads everything, changes nothing.
+  - id: metric-owner
+    name: Metric owner
+    kind: human
+    duties: Defines and versions the governed metrics.
+  - id: agent-operator
+    name: Agent operator
+    kind: human
+    duties: Runs the agents and reads their audit log, never their data.
+  - id: proposer
+    name: Proposer identity
+    kind: agent
+    duties: The acting agent; drafts entries and holds no data role.
+
+grants:
+  - {persona: accountant-chicago, entity: chicago, product: payments, access: read}
+  - {persona: accountant-chicago, product: group-totals, access: aggregate}
+  - {persona: accountant-chicago, product: metric-definitions, access: read}
+  - {persona: accountant-uk-transport, entity: uk-transport, product: payments, access: read}
+  - {persona: accountant-uk-transport, product: group-totals, access: aggregate}
+  - {persona: accountant-uk-transport, product: metric-definitions, access: read}
+  - {persona: accountant-nl-government, entity: nl-government, product: payments, access: read}
+  - {persona: accountant-nl-government, product: group-totals, access: aggregate}
+  - {persona: accountant-nl-government, product: metric-definitions, access: read}
+  - {persona: group-controller, entity: chicago, product: payments, access: read}
+  - {persona: group-controller, entity: uk-transport, product: payments, access: read}
+  - {persona: group-controller, entity: nl-government, product: payments, access: read}
+  - {persona: group-controller, product: group-totals, access: read}
+  - {persona: group-controller, product: metric-definitions, access: read}
+  - {persona: payables-clerk, entity: chicago, product: payments, access: read}
+  - {persona: payables-clerk, product: metric-definitions, access: read}
+  - {persona: approver, entity: chicago, product: payments, access: read}
+  - {persona: approver, entity: chicago, product: ledger, access: post}
+  - {persona: approver, product: group-totals, access: aggregate}
+  - {persona: approver, product: metric-definitions, access: read}
+  - {persona: auditor, entity: chicago, product: payments, access: read}
+  - {persona: auditor, entity: uk-transport, product: payments, access: read}
+  - {persona: auditor, entity: nl-government, product: payments, access: read}
+  - {persona: auditor, entity: chicago, product: ledger, access: read}
+  - {persona: auditor, product: group-totals, access: read}
+  - {persona: auditor, product: metric-definitions, access: read}
+  - {persona: auditor, product: audit-log, access: read}
+  - {persona: metric-owner, entity: chicago, product: payments, access: aggregate}
+  - {persona: metric-owner, entity: uk-transport, product: payments, access: aggregate}
+  - {persona: metric-owner, entity: nl-government, product: payments, access: aggregate}
+  - {persona: metric-owner, product: group-totals, access: read}
+  - {persona: metric-owner, product: metric-definitions, access: edit}
+  - {persona: agent-operator, product: metric-definitions, access: read}
+  - {persona: agent-operator, product: audit-log, access: read}
+  - {persona: proposer, entity: chicago, product: ledger, access: draft}

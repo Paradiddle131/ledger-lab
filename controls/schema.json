@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Controls catalogue",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["layers", "controls"],
+  "properties": {
+    "layers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "controls": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "layer", "owner", "asserts", "proven_by", "status"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]*[a-z0-9]$"},
+          "layer": {"type": "string"},
+          "owner": {"description": "The id of the persona accountable for the control.", "type": "string"},
+          "asserts": {"type": "string", "minLength": 1},
+          "proven_by": {
+            "description": "The test that proves it, as tests/<path>.py::<test name>.",
+            "type": "string",
+            "pattern": "^tests/[a-z0-9_/]+\\.py::test_[a-z0-9_]+$"
+          },
+          "status": {"enum": ["not-implemented", "implemented"]}
+        }
+      }
+    }
+  }
+}

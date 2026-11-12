@@ -1,0 +1,70 @@
+# The controls catalogue: each control, its owner, what it asserts and the test that proves it.
+# A control is `implemented` only when its test exists; tests/test_controls.py checks it.
+# Shape: controls/schema.json. Owners are persona ids from access/personas.yaml.
+
+layers:
+  - Identity and delegation
+  - Data access
+  - The conversation
+  - Injection and tool authorisation
+  - Answer integrity
+  - Evaluation and monitoring
+  - Change management
+  - Accountability
+  - Cost and abuse
+
+controls:
+  - id: queries-run-as-the-asker
+    layer: Identity and delegation
+    owner: agent-operator
+    asserts: Every agent query runs on the asking persona's identity; two personas asking the same question get different rows, and a question without a user identity gets no answer.
+    proven_by: tests/agent/test_identity.py::test_two_personas_same_question_different_rows
+    status: not-implemented
+  - id: warehouse-enforces-visibility
+    layer: Data access
+    owner: group-controller
+    asserts: The warehouse, never the prompt, decides what each persona sees; every persona against every entity and sensitive column is clear, masked, aggregate only or denied as access/personas.yaml says.
+    proven_by: tests/access/test_visibility.py::test_every_persona_sees_its_matrix
+    status: not-implemented
+  - id: one-person-one-session
+    layer: The conversation
+    owner: agent-operator
+    asserts: No answer recalls another session, and the purge removes transcripts past their retention.
+    proven_by: tests/agent/test_sessions.py::test_no_cross_session_recall
+    status: not-implemented
+  - id: untrusted-content-cannot-instruct
+    layer: Injection and tool authorisation
+    owner: agent-operator
+    asserts: An instruction planted in a cell, a column description or a glossary entry changes no tool call; tools are read-only and denied by default.
+    proven_by: tests/agent/test_injection.py::test_planted_instructions_are_ignored
+    status: not-implemented
+  - id: answers-cite-and-re-execute
+    layer: Answer integrity
+    owner: metric-owner
+    asserts: Every number in an answer cites its metric version, query and freshness, and re-running the logged query returns it.
+    proven_by: tests/agent/test_answer_integrity.py::test_logged_query_reproduces_the_answer
+    status: not-implemented
+  - id: scored-by-execution
+    layer: Evaluation and monitoring
+    owner: metric-owner
+    asserts: Answers are scored by executing their queries against a golden set, and a metric change that moves the score is reported.
+    proven_by: tests/agent/test_evaluation.py::test_metric_change_shows_as_drift
+    status: not-implemented
+  - id: release-ships-as-one-unit
+    layer: Change management
+    owner: approver
+    asserts: Prompt, model, tools and metric definitions ship and roll back together, and a failed gate blocks the release.
+    proven_by: tests/operations/test_release.py::test_failed_gate_blocks_release
+    status: not-implemented
+  - id: answer-rebuilt-from-audit
+    layer: Accountability
+    owner: group-controller
+    asserts: One answer can be rebuilt end to end from its audit record alone, by someone who did not produce it.
+    proven_by: tests/agent/test_audit.py::test_answer_rebuilt_from_its_audit_record
+    status: not-implemented
+  - id: spend-is-capped
+    layer: Cost and abuse
+    owner: agent-operator
+    asserts: Every query and every model call has a cap, and a runaway join stops at the byte cap.
+    proven_by: tests/agent/test_cost.py::test_runaway_join_stops_at_the_cap
+    status: not-implemented
