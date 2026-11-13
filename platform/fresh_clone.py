@@ -53,11 +53,13 @@ DATA_EXTENSIONS = (
     ".sqlite",
     ".duckdb",
 )
-# The only data files the tree holds: dbt seeds, reference tables authored here, not downloaded.
+# The only data files the tree holds: dbt seeds, reference tables authored here or a licence-allowed
+# sample of real data the tests need.
 # Each is named exactly, here and in `.gitignore`, so a new seed is a reviewed change to both.
 SEEDS = {
     "models/seeds/calendars/fiscal_year_starts.csv",
     "models/seeds/calendars/period_status.csv",
+    "models/seeds/reference/fx/ecb_rates_sample.csv",
 }
 ALLOWED_EXCEPTIONS = {f"!/{seed}" for seed in SEEDS}
 
