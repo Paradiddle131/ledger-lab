@@ -1,0 +1,9 @@
+# Each source the fetch kit downloads: `uv run python -m ingest.fetch <name>`.
+# Validated by sources.schema.json. An entry, by name (also the landed file's name):
+#   <name>:
+#     url: https://...                  # a fixed file; or, for a live table:
+#     query: {url: https://..., order: {<param>: <value>}, cut_off: {<param>: <value>}}
+#     sha256: <SHA-256 of the publisher's raw response>
+#     licence: https://...              # the licence, confirmed on the source's issue
+#     publisher: <who publishes it>
+sources: {}
