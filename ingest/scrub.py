@@ -4,11 +4,9 @@ free-text cell, and writing the scrubbed rows to Parquet without them touching d
 A cell's words are its runs of letters and digits after the pseudonymiser's normalisation, so no
 punctuation (`(NAME)`, `NAME'S`, `LAST, FIRST`) can hide a name. `HashedNames` holds the names a
 step hashed, each kept only if a word of it holds a letter (a run of figures alone names no one),
-and finds one inside a cell three ways:
+and finds one inside a cell two ways:
 
 - `in_any_order`: a run of the cell's words is a name's words in some order;
-- `run_together`: a run of the cell's words, written without the breaks between them, is a name
-  written the same way (`JANEEXAMPLE`, `JANE EX AMPLE`);
 - `cut_short`: the cell ends in a name's first words, whole, and the start of its next one
   (`JANE EXAMP`), as a publisher's cut of a long description leaves it.
 
@@ -43,7 +41,6 @@ class HashedNames:
         spelt = [w for w in map(words, names) if any(LETTER.search(word) for word in w)]
         self.unordered = {tuple(sorted(w)) for w in spelt}
         self.lengths = {len(w) for w in spelt}
-        self.joined = {"".join(w) for w in spelt}
         self.longest = max(self.lengths, default=0)
         self.cut: dict[tuple[str, ...], set[str]] = {}
         for w in spelt:
@@ -55,14 +52,6 @@ class HashedNames:
         return any(
             tuple(sorted(found[i : i + n])) in self.unordered
             for n in self.lengths
-            for i in range(len(found) - n + 1)
-        )
-
-    def run_together(self, cell: str) -> bool:
-        found = words(cell)
-        return any(
-            "".join(found[i : i + n]) in self.joined
-            for n in range(1, self.longest + 2)
             for i in range(len(found) - n + 1)
         )
 

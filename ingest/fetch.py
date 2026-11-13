@@ -12,8 +12,8 @@ whose entry says it names people is refused, before any request, until it has a 
 
 A set is several sources landed together by one step, under a name of its own that prefixes each
 member's name before a dash (`<set>-<member>`): `SET_STEPS[<set>]` receives every member's verified
-bytes by URL, in the sources file's order, and returns the one file landed as `<set>`. Nothing runs
-or lands until every member has verified.
+bytes by URL, in the sources file's order, and returns the one file landed as `<set>`. Members may
+not share a URL. Nothing runs or lands until every member has verified.
 
 Holding the response in memory bounds a source: one over `MAX_BYTES` fails, as does one still
 arriving at `DEADLINE`. A download whose connection drops (cut short, closed, timed out) starts
@@ -35,6 +35,7 @@ import httpx
 import yaml
 from jsonschema import Draft202012Validator
 
+from ingest import StepError
 from ingest.chicago import contracts, payments
 from ingest.ecb import rates
 from ingest.gleif import legal_entities
@@ -163,9 +164,12 @@ def verify(name: str, entry: dict[str, Any], raw: bytes) -> None:
 
 def run_step[Raw](name: str, step: Callable[[Raw], bytes], raw: Raw) -> bytes:
     """The source's step; a failure is reported by source and kind only, since its message
-    could quote the rows, names included."""
+    could quote the rows, names included, except a step's own refusal (`StepError`), whose
+    message names a file, row or column and never a value."""
     try:
         return step(raw)
+    except StepError as error:
+        raise FetchError(f"{name}: {error}") from None
     except Exception as error:
         raise FetchError(f"{name}: its step failed ({type(error).__name__})") from None
 
@@ -210,6 +214,12 @@ def fetch_set(name: str, landing: Path) -> Path:
     members = [member for member in sources if member.startswith(f"{name}-")]
     if not members:
         raise SourcesError(f"no source named '{name}-…' in {SOURCES} for the set {name!r}")
+    urls: dict[str, str] = {}
+    for member in members:
+        url = str(request_url(sources[member]))
+        if url in urls:
+            raise SourcesError(f"{urls[url]} and {member} share one URL in the set {name!r}")
+        urls[url] = member
     files = {}
     for member in members:
         raw = download(sources[member])

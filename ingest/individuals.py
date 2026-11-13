@@ -81,6 +81,17 @@ DOUBT_WORDS = frozenset(
 # Dutch name particles, which do not count as a word of a company name before `B.V.` or `N.V.`.
 PARTICLES = frozenset({"de", "der", "den", "van", "von", "het", "te", "ter", "ten", "'t", "op"})
 
+# The forms of a person marker that introduce a person in free text, on the normalised text: the
+# estate or executors of someone, or a deceased; and a name trading as or also known as another,
+# which introduces a person only when the words before it are no company (`Ltd T/A` is a brand).
+INTRODUCERS = re.compile(
+    r"(?<![^\W_])(?:estate|executors?|executrix|exors?)\s+of\s+[^\W\d_]"
+    r"|(?<![^\W_])deceased(?![^\W_])"
+)
+ALIASES = re.compile(
+    r"(?<![^\W_])(?:t\s*/\s*a|trading\s+as|a\.?k\.?a\.?|f\.?k\.?a\.?|d\s*/?\s*b\s*/?\s*a)"
+    r"\s+[^\W\d_]"
+)
 PLAIN_WORD = re.compile(r"^[^\W_]+(?:'[^\W_]+)*$")
 FORM_WORD = re.compile(r"^[^\W\d_]+(?:\.[^\W\d_]+)*$")
 NOT_A_LETTER = re.compile(r"[\W_]")
@@ -190,11 +201,23 @@ def _marks_a_person(normalised: str) -> bool:
     return bool(_marker_spellings(normalised.split()) & PERSON_MARKERS)
 
 
-def marks_a_person(text: str) -> bool:
-    """True when the text carries one of the markers that make a name a person's wherever they
-    stand (an estate, executors, a deceased, trading as, also known as): a free-text cell that
-    does names a party who is or was a person."""
-    return _marks_a_person(normalise(text))
+def introduces_a_person(text: str) -> bool:
+    """True when free text carries a marker in the form that introduces a person: an estate or the
+    executors of someone, a deceased, or a name that is no company trading as or also known as
+    another (`T/A`, `trading as`, `aka`, `fka`, `dba` before a word, after no legal form). A marker
+    word alone does not count in free text (an office estate, a `TA` code); the single words stay
+    markers in a payee's name."""
+    normalised = normalise(text)
+    if INTRODUCERS.search(normalised):
+        return True
+    return any(
+        not _ends_in_a_legal_form(normalised[: alias.start()].split())
+        for alias in ALIASES.finditer(normalised)
+    )
+
+
+def _ends_in_a_legal_form(words: list[str]) -> bool:
+    return any(tuple(map(_bare, words[-len(suffix) :])) == suffix for suffix in LEGAL_FORM_SUFFIXES)
 
 
 def is_organisation(name: str, organisations: Iterable[str] = ()) -> bool:

@@ -43,7 +43,7 @@ What lands is the twelve files of one fiscal year in one shape, with every suppl
 
 To land a source, run its line below; a source that names people (Chicago's contracts and payments, the UK spend) also needs `LEDGER_LAB_HASH_KEY` set (see `ingest/individuals.py`).
 A set's name lands every source whose name it prefixes (`<set>-<member>`) as one file, through the set's step, once every member has verified.
-The UK spend's landed tests download its files again and read their GOV.UK pages, so they need the network:
+The landed tests need the key the files were landed with for Chicago, and the network for the UK spend, whose files they download again; the pages test reads each pinned UK month's GOV.UK page:
 
 ```bash
 uv run python -m ingest.fetch chicago-contracts   # lands landing/chicago-contracts as Parquet
@@ -52,7 +52,8 @@ uv run python -m ingest.fetch ecb-rates           # lands landing/ecb-rates as P
 uv run python -m ingest.fetch gleif-legal-entities  # lands landing/gleif-legal-entities as Parquet
 uv run python -m ingest.fetch nl-government-budget  # lands landing/nl-government-budget as Parquet
 uv run python -m ingest.fetch uk-transport-spend-2025  # lands April 2025 to March 2026 as one Parquet set
-uv run pytest -m landed                          # profiles what is landed and checks the Chicago files for names, with the same key
+uv run pytest -m landed                          # profiles what is landed and checks it for hashed names left in clear
+uv run pytest -m pages                           # fails once GOV.UK lists another file or a change note for a pinned month
 ```
 
 ## Checks
