@@ -29,6 +29,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from ingest.chicago import contracts
+from ingest.ecb import rates
 from ingest.gleif import legal_entities
 
 HERE = Path(__file__).resolve().parent
@@ -48,6 +49,7 @@ MAX_BYTES = 512 * 1024 * 1024
 # A source's own step between verification and landing, by source name.
 STEPS: dict[str, Callable[[bytes], bytes]] = {
     "chicago-contracts": contracts.step,
+    "ecb-rates": rates.step,
     "gleif-legal-entities": legal_entities.step,
 }
 

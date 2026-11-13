@@ -22,6 +22,16 @@ sources:
     licence: https://www.chicago.gov/city/en/narr/foia/data_disclaimer.html
     publisher: City of Chicago
     names_people: true
+  # The ECB's daily euro reference rates for the pound and the US dollar, from the first covered
+  # year to a fixed end date, as CSV, which carries no generated timestamp: a re-fetch serves the
+  # same bytes, and a rate the ECB changed behind the end date shows as a drift. A later end date
+  # is a new pin, with a new hash.
+  ecb-rates:
+    url: https://data-api.ecb.europa.eu/service/data/EXR/D.GBP+USD.EUR.SP00.A?startPeriod=2023-01-01&endPeriod=2026-10-31&format=csvdata&detail=dataonly
+    sha256: d1aadebbba9390aa9acda3288e3c766ce28aee2164de7f216e1b2ac37ed22077  # pragma: allowlist secret
+    licence: https://www.ecb.europa.eu/home/disclaimer/html/index.en.html
+    publisher: European Central Bank
+    names_people: false
   # The GLEIF register's golden copy published 2026-11-01 00:00 UTC (LEI-CDF 3.1, every record in
   # the world, 507,213,646 bytes): a dated file the publisher writes once and keeps serving, so a
   # re-fetch verifies; a re-pin is a later dated file and moves the hash. Its step keeps the
