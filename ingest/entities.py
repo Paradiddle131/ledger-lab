@@ -13,9 +13,12 @@ record of the register is such evidence for one name only, and only when all of 
 - its category is one the landing keeps for an organisation (`legal_entities.CATEGORIES`);
 - the payee's name carries no person marker (trading as, an estate, executors, a deceased), which
   overrides the register as it overrides a legal form;
-- the payee's name is not person-shaped (`person_shaped`): one to three words of letters, the
-  shape of a person's name, stays hashed even when a register record has exactly that name,
-  since a sole trader may share a name with a registered company.
+- the payee's name is not person-shaped (`person_shaped`), judged on the same key: up to three
+  words of letters once titles, suffixes, degrees, particles, initials, joiners and figures are
+  set aside, the shape of a person's name, stays hashed even when a register record has
+  exactly that name, since a sole trader may share a name with a registered company; a name
+  ending in a legal form no sole trader may use (`Ltd`, `Inc`, `LLC`, `B.V.`, never `Co`) is
+  exempt, as the classifier lets a company named after a person pass.
 
 So the register turns hashed organisations back into named ones, never a name a person could
 carry. The matching key is also the `vendor_match_key` macro of the dbt models, which match
@@ -41,10 +44,55 @@ from ingest.individuals import marks_a_person, normalise
 
 REGISTER = "gleif-legal-entities"
 TOKEN = re.compile(r"[^\W_]+|&")
-# A word of a person's name: letters, with an apostrophe or hyphen inside (`o'brien`, `smith-
-# jones`), or an initial with or without its dot, a comma after any of them (`example, jane`).
-NAME_WORD = re.compile(r"^[^\W\d_]+(?:['-][^\W\d_]+)*[.,]?,?$")
+# The person-shape guard reads the matching key's words, so no punctuation, spacing or Unicode form
+# changes the shape. Not counted as words of a name: titles, a person's suffixes and degrees (`m d`
+# and `ph d` lose their single letters too), name particles, initials, joiners and figures.
+TITLES = frozenset(
+    {"mr", "mrs", "ms", "miss", "mx", "dr", "prof", "sir", "dame", "lady", "lord", "rev", "hon"}
+    | {"fr", "dhr", "mevr", "mw", "drs", "ir", "ing"}
+)
+SUFFIXES = frozenset(
+    {"jr", "junior", "sr", "senior", "ii", "iii", "iv", "esq", "phd", "ph", "md", "dds", "dmd"}
+    | {"dvm", "cpa", "rn", "lpn", "np", "mba", "jd", "llm", "pe", "ra"}
+)
+PARTICLES = frozenset(
+    {"de", "del", "della", "der", "den", "di", "da", "do", "dos", "du", "la", "las", "los", "le"}
+    | {"van", "von", "het", "te", "ter", "ten", "op", "bin", "ibn", "al", "el"}
+)
+NAME_CHUNK = re.compile(r"[^\W_]+(?:['`-][^\W_]+)*|&")
+JOINERS = frozenset({"&", "and", "en", "y"})
+# A person's name, as the guard counts it, has at most this many words (`jane q example jr`).
 PERSON_WORDS = 3
+# Final words of a legal form no sole trader may trade under, in the key's spelling (`b v` for
+# `B.V.`), and the leading Dutch forms: a name with one is exempt from the shape guard, as the
+# classifier lets `Jane Doe Ltd` pass. `Co` and `Company` are not among them, since a sole trader
+# may trade as `Example & Co`.
+LEGAL_FORM_ENDINGS = (
+    ("ltd",),
+    ("limited",),
+    ("plc",),
+    ("public", "limited", "company"),
+    ("llp",),
+    ("l", "l", "p"),
+    ("cic",),
+    ("community", "interest", "company"),
+    ("bv",),
+    ("b", "v"),
+    ("nv",),
+    ("n", "v"),
+    ("inc",),
+    ("incorporated",),
+    ("corp",),
+    ("corporation",),
+    ("llc",),
+    ("l", "l", "c"),
+    ("limited", "liability", "company"),
+    ("pllc",),
+    ("pc",),
+    ("p", "c"),
+    ("nfp",),
+)
+LEGAL_FORM_BEGINNINGS = frozenset({"stichting", "vereniging", "coöperatie", "cooperatie"})
 
 # Legal-form codes (ISO 20275, as the register files them) that make a separate legal person, with
 # the form's name in GLEIF's list and its jurisdiction. Every code here is a body corporate under
@@ -173,10 +221,28 @@ def match_key(name: str) -> str:
 
 
 def person_shaped(name: str) -> bool:
-    """True when the name has the shape of a person's: one to three words, each of letters (an
-    apostrophe or hyphen inside, a dot or comma after), whatever the words are."""
-    words = normalise(name).split()
-    return 0 < len(words) <= PERSON_WORDS and all(NAME_WORD.match(w) for w in words)
+    """True when the name could be a person's (or two people's): its matching key holds a letter,
+    no word mixing letters and figures, no legal form a sole trader may not use, and at most
+    `PERSON_WORDS` words once titles, suffixes, degrees, particles, initials, joiners and figures
+    are set aside."""
+    words = match_key(name).split()
+    if not any(c.isalpha() for w in words for c in w):
+        return False
+    if any(tuple(words[-len(f) :]) == f for f in LEGAL_FORM_ENDINGS):
+        return False
+    if words[0] in LEGAL_FORM_BEGINNINGS:
+        return False
+    if any(not w.isalpha() and not w.isdigit() and w != "&" for w in words):
+        return False
+    # A hyphenated or apostrophised name is one word (`mary-ann`, `o'example`), though the key
+    # splits it.
+    chunks = NAME_CHUNK.findall(normalise(name))
+    counted = [
+        w
+        for w in chunks
+        if len(w) > 1 and not w.isdigit() and w not in TITLES | SUFFIXES | PARTICLES | JOINERS
+    ]
+    return len(counted) <= PERSON_WORDS
 
 
 def separate_legal_person(category: str, form: str) -> bool:

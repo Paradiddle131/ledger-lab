@@ -72,17 +72,90 @@ def test_the_matching_key_is_the_whole_name_word_for_word(name: str, key: str) -
     assert match_key(name) == key
 
 
-@pytest.mark.parametrize(
-    "name", ["JANE EXAMPLE", "EXAMPLE, JANE Q", "J. EXAMPLE", "MARY-ANN O'EXAMPLE", "EXAMPLE"]
-)
-def test_one_to_three_words_of_letters_are_person_shaped(name: str) -> None:
+# Invented people, spelt the ways a payee file writes a person. The shape is judged on the words the
+# register is matched on, so no punctuation, spacing or Unicode form changes it, and titles,
+# suffixes, degrees, name particles, initials and figures are not counted as words.
+PERSON_SPELLINGS = [
+    "JANE EXAMPLE",
+    "EXAMPLE, JANE Q",
+    "J. EXAMPLE",
+    "MARY-ANN O'EXAMPLE",
+    "EXAMPLE",
+    "EXAMPLE,JANE",
+    "J.Q.EXAMPLE",
+    "JANE (Q) EXAMPLE",
+    "JANE/EXAMPLE",
+    "JANE_EXAMPLE",
+    "JANE EXAMPLE-",
+    "JANE O`EXAMPLE",
+    "JANE EXAMPLE, M.D.",
+    "JANE EXAMPLE PH.D",
+    "JANE EXAMPLE D.D.S.",
+    "JANE Q EXAMPLE JR",
+    "DR. JANE Q. EXAMPLE",
+    "MS JANE EXAMPLE",
+    "JANE EXAMPLE III",
+    "JANE EXAMPLE ESQ.",
+    "JANE EXAMPLE, CPA",
+    "JANE EXAMPLE SR.",
+    "JANE EXAMPLE M D",
+    "PROF JANE EXAMPLE PHD",
+    "JANE EXAMPLE RN",
+    "J. Q. R. EXAMPLE",
+    "JANE DE LA EXAMPLE",
+    "MARIA DE LOS ANGELES EXAMPLE",
+    "JANE EXAMPLE-SAMPLE",
+    "JANE EXAMPLE 2",
+    "JANE AND JOHN EXAMPLE",
+    "DOE & ROE",
+    "EXAMPLE (UK)",
+    "JANE EXAMPLE COMPANY",
+    "EXAMPLE & SONS",
+    "MARY-ANN JANE EXAMPLE-SAMPLE",
+    "MARIA-JOSE DE LA CRUZ-EXAMPLE O'SAMPLE",
+    "JANEEXAMPLE",
+    "J\u00e4ne Ex\u00e4mple",
+    "\uff2a\uff21\uff2e\uff25 \uff25\uff38\uff21\uff2d\uff30\uff2c\uff25",
+    "JANE\u200bEXAMPLE",
+    "JANE\u00a0EXAMPLE",
+]
+
+
+@pytest.mark.parametrize("name", PERSON_SPELLINGS)
+def test_a_person_spelt_any_way_is_person_shaped(name: str) -> None:
     assert person_shaped(name)
 
 
+@pytest.mark.parametrize("name", PERSON_SPELLINGS)
+def test_a_register_record_with_a_persons_exact_name_never_vouches(name: str) -> None:
+    register = Register([Record(name, "GENERAL", CORPORATION)])
+    assert match_key(name) in register.keys, "the record has the person's very key"
+    assert not register.vouches(name)
+
+
 @pytest.mark.parametrize(
-    "name", [HOSPITAL, "3M COMPANY", "DOE & ROE", "EXAMPLE (UK)", "A1 EXAMPLE", ""]
+    "name",
+    [
+        HOSPITAL,
+        "3M COMPANY",
+        "A1 EXAMPLE",
+        "",
+        "JANE EXAMPLE, INC.",
+        "JANE Q EXAMPLE B.V.",
+        "DOE & ROE, INCORPORATED",
+        "STICHTING JANE EXAMPLE",
+        "EXAMPLE WIDGETS OF NORTH AMERICA",
+        "JANE MARY ANN EXAMPLE",
+        "JANE EXAMPLE & JOHN EXAMPLE",
+        "JANE & JOHN EXAMPLE CO",
+    ],
 )
-def test_more_words_a_figure_or_a_joiner_is_not_person_shaped(name: str) -> None:
+def test_a_legal_form_at_the_end_four_counted_words_or_a_mixed_word_is_not_person_shaped(
+    name: str,
+) -> None:
+    """Four counted words is past the guard on purpose: counting them would keep 39 more of the
+    pinned files' register-vouched spellings hashed (universities, banks, charities), and a
+    person's name of four words needs a legal-person record of exactly that name to come out."""
     assert not person_shaped(name)
 
 
