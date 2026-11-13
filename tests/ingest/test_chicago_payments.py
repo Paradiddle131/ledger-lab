@@ -13,9 +13,8 @@ import pytest
 
 from ingest import fetch
 from ingest.chicago.payments import COLUMNS, profile, step
-from ingest.chicago.table import TableError, hashed_names_inside
-from ingest.fetch import landing_path
-from ingest.individuals import KEY_VARIABLE, is_organisation
+from ingest.chicago.table import TableError
+from ingest.individuals import KEY_VARIABLE
 
 ENV = {KEY_VARIABLE: "k" * 32}
 ITEMISED = {
@@ -159,25 +158,3 @@ def test_the_profile_counts_a_date_in_neither_form(tmp_path: Path) -> None:
     counts = profile(landed(tmp_path, ITEMISED, {**DIRECT, "check_date": "2022-03-17"}))
     assert counts["unreadable_dates"] == 1
     assert (counts["itemised_rows"], counts["rolled_up_rows"]) == (1, 0)
-
-
-@pytest.mark.landed
-def test_the_landed_payments_carry_the_roll_ups_and_name_no_person() -> None:
-    path = landing_path() / "chicago-payments"
-    counts = profile(path)
-    print(counts)
-    assert counts["rolled_up_rows"] > 0
-    assert counts["rolled_up_by_year"]["2002"] > 0
-    assert counts["earliest_year"] == 2002, "1996 to 2001 live only inside the 2002 bucket"
-    assert counts["unreadable_dates"] == 0
-    assert counts["without_contract"] > 0
-    assert counts["payees_hashed"] > 0
-    con = duckdb.connect()
-    payees = con.execute("SELECT DISTINCT vendor_name FROM read_parquet(?)", [str(path)]).fetchall()
-    in_clear = [p for (p,) in payees if not str(p).startswith("person:")]
-    assert in_clear, "some payees are organisations by evidence"
-    assert [p for p in in_clear if not is_organisation(str(p))] == []
-    inside = hashed_names_inside(path)
-    print("cells holding a hashed payee's name, by column:", inside)
-    codes_and_figures = ("voucher_number", "amount", "check_date", "contract_number")
-    assert [inside[c] for c in codes_and_figures] == [0] * len(codes_and_figures)

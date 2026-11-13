@@ -1,14 +1,18 @@
 """The City of Chicago's contracts: the step that lands them, and the profile of their mess.
 
 `step` turns the verified CSV into Parquet through the shared Chicago landing (`table.py`). A vendor
-who is a person, or may be one, leaves only as a keyed hash, with their vendor id hashed beside it;
-on their rows the purchase-order description (which repeats the name in truncated and reordered
-forms no replacement catches), street address, ZIP code and the link to the signed contract are
-dropped, and on every row a description or address holding a hashed vendor's name is dropped. The
-contract and specification numbers stay in clear, as the keys that tie payments to contracts; the
-City's public search can look a hashed vendor up by them. A company named after a person passes in
-clear, as the pseudonymiser allows, even where that person is hashed on other rows. Every column
-lands as the text the publisher served, with blanks as nulls; typing is the models' job.
+who is a person, or may be one, leaves only as a keyed hash, with the vendor id on that row hashed
+beside it (the same id stays in clear on a row whose vendor name is clear). On their rows the
+purchase-order description (which repeats the name in truncated and reordered forms no replacement
+catches), ZIP code and the link to the signed contract are blanked. The street address columns
+are left out on every row, since they carry contact people (`ATTN`, `C/O`) and nothing needs them.
+On every row a description holding a hashed vendor's name, in any order and punctuation, or a
+person marker (an estate, a deceased) is blanked; an organisation row's description is otherwise
+landed as served, and is the known remaining place a person's name could sit. The contract and
+specification numbers stay in clear, as the keys that tie payments to contracts; the City's public
+search can look a hashed vendor up by them. A company named after a person passes in clear, as the
+pseudonymiser allows, even where that person is hashed on other rows. Every column lands as the
+text the publisher served, with blanks as nulls; typing is the models' job.
 
 `profile` counts the mess the models must survive: contracts carrying several revisions,
 negative awards (revisions that lower an award), revision numbers that are not numbers, the
@@ -47,8 +51,9 @@ TABLE = Table(
     COLUMNS,
     name="vendor_name",
     identifier="vendor_id",
-    personal=("purchase_order_description", "address_1", "address_2", "zip", "contract_pdf"),
-    free_text=("purchase_order_description", "address_1", "address_2"),
+    personal=("purchase_order_description", "zip", "contract_pdf"),
+    dropped=("address_1", "address_2"),
+    descriptions=("purchase_order_description",),
 )
 
 

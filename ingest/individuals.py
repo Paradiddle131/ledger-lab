@@ -181,10 +181,20 @@ def _marker_spellings(words: list[str]) -> set[str]:
 
 
 def _classify(normalised: str, register: frozenset[str]) -> bool:
-    words = normalised.split()
-    if _marker_spellings(words) & PERSON_MARKERS:
+    if _marks_a_person(normalised):
         return False
-    return normalised in register or _has_legal_form(words)
+    return normalised in register or _has_legal_form(normalised.split())
+
+
+def _marks_a_person(normalised: str) -> bool:
+    return bool(_marker_spellings(normalised.split()) & PERSON_MARKERS)
+
+
+def marks_a_person(text: str) -> bool:
+    """True when the text carries one of the markers that make a name a person's wherever they
+    stand (an estate, executors, a deceased, trading as, also known as): a free-text cell that
+    does names a party who is or was a person."""
+    return _marks_a_person(normalise(text))
 
 
 def is_organisation(name: str, organisations: Iterable[str] = ()) -> bool:
@@ -195,18 +205,14 @@ def is_organisation(name: str, organisations: Iterable[str] = ()) -> bool:
     return _classify(normalise(name), frozenset(map(normalise, organisations)))
 
 
-def pseudonymiser(
-    env: Mapping[str, str] | None = None, organisations: Iterable[str] = ()
-) -> Callable[[str | None], str | None]:
+def pseudonymiser(env: Mapping[str, str] | None = None) -> Callable[[str | None], str | None]:
     """A function that passes an organisation's name through and hashes a person's.
 
     Reads the key first, so it raises before any name is seen.
-    `organisations` are names already known to be organisations, matched after normalisation.
     A missing payee (None, or nothing left after normalisation) stays None: it names nobody,
     and one shared hash for every blank would read as one person.
     """
     as_person = person_hasher(env)
-    register = frozenset(map(normalise, organisations))
 
     def hide(name: str | None) -> str | None:
         if name is None:
@@ -214,7 +220,7 @@ def pseudonymiser(
         normalised = normalise(name)
         if not normalised:
             return None
-        if _classify(normalised, register):
+        if _classify(normalised, frozenset()):
             return name
         return as_person(name)
 
