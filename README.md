@@ -66,13 +66,13 @@ make check        # lint, types, tests, process-id and owner checks, secret scan
 make fresh-clone  # clone HEAD and prove it holds no secret, identifier or data
 ```
 
-The dbt models build on DuckDB in the session by default, reading the landed Chicago, UK and legal-entity files in place under `LEDGER_LAB_LANDING`; setting `LEDGER_LAB_GCP_PROJECT` (with `uv sync --group bigquery`) moves them to BigQuery:
+The dbt models build on DuckDB in the session by default, reading the landed files in place under `LEDGER_LAB_LANDING`; setting `LEDGER_LAB_GCP_PROJECT` (with `uv sync --group bigquery`) moves them to BigQuery:
 
 ```bash
 uv run dbt build --project-dir models --profiles-dir models
 ```
 
-Every model that reads a fetched source reads the file the fetch kit landed (`python -m ingest.fetch ecb-rates`, `python -m ingest.fetch nl-government-budget`), and the build fails on a missing file; the tests pass `--vars '{source_rows: sample}'` to read the committed samples of real rows instead (a fortnight of ECB rates, and Dutch budget rows chosen for their mess), and `uv run pytest -m landed` runs the translation and budget rules over the landed files.
+Every model that reads a fetched source reads the file the fetch kit landed (`python -m ingest.fetch ecb-rates`, `python -m ingest.fetch nl-government-budget`, and for the vendors' legal entities `chicago`, `uk-transport-spend-2025` and `gleif-legal-entities`), and the build fails on a missing file; the tests pass `--vars '{source_rows: sample}'` to read the committed samples of real rows instead (a fortnight of ECB rates, and Dutch budget rows chosen for their mess), and `uv run pytest -m landed` runs the translation and budget rules over the landed files.
 The Dutch budget against outturn shows the figures as the file serves them: a zero the file may serve in place of a figure is flagged on its line (`has_doubtful_zero`), and the landed tests count the figures the file serves wrong.
 
 Each source is fetched by name from [`ingest/sources.yaml`](ingest/sources.yaml), which records its URL or pinned query, SHA-256, licence link, publisher and whether it names people; the file lands under `LEDGER_LAB_LANDING` (default `landing/`, outside git) only when its checksum matches, and the command exits non-zero otherwise:

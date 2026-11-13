@@ -17,9 +17,9 @@ from typing import Any
 
 import duckdb
 import pytest
+from conftest import landed_file
 from test_fx_translation import environment
 
-from ingest.fetch import landing_path
 from tests.models.dbt_build import dbt
 
 SELECTION = ["--select", "+budget_against_outturn+", "fiscal_calendar"]
@@ -250,6 +250,7 @@ ANOMALIES = {
 
 @pytest.fixture(scope="module")
 def landed(tmp_path_factory: pytest.TempPathFactory) -> Build:
+    landed_file("nl-government-budget")
     return build_budget(tmp_path_factory.mktemp("landed"), "landed")
 
 
@@ -288,7 +289,7 @@ def test_each_kind_of_doubtful_figure_is_counted(landed: Build, anomaly: str) ->
 @pytest.mark.landed
 def test_a_plain_sum_of_the_served_rows_would_count_repeats_twice(landed: Build) -> None:
     """The 2024 cash outturn the served rows add up to, against the model's."""
-    path = landing_path() / "nl-government-budget"
+    path = landed_file("nl-government-budget")
     with duckdb.connect() as db:
         served = db.execute(
             "select sum(cast(amount as hugeint)) from read_parquet(?)"
@@ -314,7 +315,7 @@ def test_every_sample_row_is_a_landed_row_unchanged() -> None:
             " from read_parquet(?))",
             [
                 str(sample / "nl_government_budget_sample.csv"),
-                str(landing_path() / "nl-government-budget"),
+                str(landed_file("nl-government-budget")),
             ],
         ).fetchall()
     assert missing == [(0,)]

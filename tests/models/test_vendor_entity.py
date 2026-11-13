@@ -3,10 +3,13 @@ rule and score that matched it, and makes no wrong match on a labelled sample of
 companies.
 
 `vendor_sample.yaml` holds the sample: organisation names as the landed files spell them, each
-with the LEI it should match (none where the register has no record of it), and every record of
-the pinned register that shares a name with one of them before or after its legal form, so the
-fixture build sees the same candidates the real one does. The landed test runs the same sample
-against the real landing.
+with the LEI of the company it names, looked up in the register by hand (none where the register
+has no record of that company in the entity's own country, or two records of one name). The vendor
+seeds hold those names as landed vendors and every register record the rules could consider for
+them, plus each expected record they miss, so the sample build sees the candidates the real one
+does. The landed test runs the same sample against the real landing. Taking out the ambiguity
+check, the country and active preference, or the own-country limit of the looser rules each turns
+the sample test red.
 """
 
 import csv
@@ -28,7 +31,7 @@ SOURCES = ("chicago-contracts", "chicago-payments", "uk-transport-spend-2025")
 # Of the sample's names that have a legal entity, the share the rules match to it: a floor set just
 # under what they reach, so a rule that stops matching what it matched turns the test red. Wrong
 # matches (a name matched to another entity than its own, or to any when it has none) must be none.
-RECALL = 0.80
+RECALL = 0.93
 
 
 def labelled() -> list[dict[str, Any]]:
