@@ -5,15 +5,17 @@ The organisations are real rows of the City's table; every person's name is inve
 
 import csv
 import io
+import re
 from pathlib import Path
 
 import duckdb
 import pytest
 
 from ingest import fetch
-from ingest.chicago.contracts import COLUMNS, ContractsError, profile, step
+from ingest.chicago.contracts import COLUMNS, TABLE, profile, step
+from ingest.chicago.table import TableError, hashed_names_inside
 from ingest.fetch import landing_path
-from ingest.individuals import KEY_VARIABLE
+from ingest.individuals import KEY_VARIABLE, is_organisation
 
 ENV = {KEY_VARIABLE: "k" * 32}
 ORG = {
@@ -44,6 +46,7 @@ PERSON = {
     "state": "IL",
     "zip": "60601",
     "award_amount": "-1050",
+    "contract_pdf": "https://example.org/contract/T607891.pdf",
 }
 
 
@@ -75,15 +78,27 @@ def test_an_organisation_lands_as_served(tmp_path: Path) -> None:
     assert row["end_date"] is None, "a blank lands as null"
 
 
-def test_a_person_is_hashed_everywhere_the_row_names_or_locates_them(tmp_path: Path) -> None:
-    path = landed(tmp_path, PERSON)
-    (row,) = rows(path)
-    assert str(row["vendor_name"]).startswith("person:")
-    locators = ("purchase_order_description", "address_1", "address_2", "zip")
-    assert [row[c] for c in locators] == [None] * len(locators)
+def test_a_person_is_hashed_and_their_row_cut_to_what_cannot_name_them(tmp_path: Path) -> None:
+    (row,) = rows(landed(tmp_path, PERSON))
+    assert re.fullmatch(r"person:[0-9a-f]{64}", str(row["vendor_name"]))
+    assert re.fullmatch(r"id:[0-9a-f]{64}", str(row["vendor_id"]))
+    dropped = ("purchase_order_description", "address_1", "address_2", "zip", "contract_pdf")
+    assert [row[c] for c in dropped] == [None] * len(dropped)
     assert (row["city"], row["state"]) == ("CHICAGO", "IL")
-    assert b"JANE" not in path.read_bytes().upper()
+    values = " ".join(str(v) for v in row.values()).upper()
+    assert "JANE" not in values
+    assert "99999999X" not in values
     assert row["purchase_order_contract_number"] == "T607891"
+
+
+def test_an_organisation_describing_work_for_a_hashed_vendor_loses_the_description(
+    tmp_path: Path,
+) -> None:
+    for_her = {**ORG, "purchase_order_description": "HORSE TRAILERS FOR JANE Q EXAMPLE"}
+    _, org = rows(landed(tmp_path, PERSON, for_her))
+    assert org["vendor_name"] == ORG["vendor_name"]
+    assert org["purchase_order_description"] is None
+    assert org["address_1"] == ORG["address_1"]
 
 
 def test_the_step_refuses_without_the_hash_key() -> None:
@@ -92,7 +107,7 @@ def test_the_step_refuses_without_the_hash_key() -> None:
 
 
 def test_the_step_refuses_a_table_whose_columns_changed() -> None:
-    with pytest.raises(ContractsError):
+    with pytest.raises(TableError):
         step(served(ORG, columns=(*COLUMNS, "new_column")), ENV)
 
 
@@ -111,15 +126,29 @@ def test_the_profile_counts_revisions_negative_awards_and_formats(tmp_path: Path
     assert counts["negative_awards"] == 2
     assert counts["non_numeric_revisions"] == 1
     assert counts["vendors_hashed"] == 1
+    assert counts["hashed_rows"] == 1
+    assert counts["hashed_rows_with_contract_number"] == 1
+    assert counts["hashed_rows_with_specification_number"] == 0
     assert counts["order_number_formats"] == {"A999999": 3}
 
 
 @pytest.mark.landed
-def test_the_landed_contracts_carry_the_known_mess() -> None:
-    counts = profile(landing_path() / "chicago-contracts")
+def test_the_landed_contracts_carry_the_known_mess_and_name_no_hashed_vendor() -> None:
+    path = landing_path() / "chicago-contracts"
+    counts = profile(path)
     print(counts)
     assert counts["contracts_with_several_rows"] > 0
     assert counts["negative_awards"] > 0
     assert counts["non_numeric_revisions"] > 0
     assert len(counts["order_number_formats"]) >= 5
     assert counts["vendors_hashed"] > 0
+    vendors = (
+        duckdb.connect()
+        .execute("SELECT DISTINCT vendor_name FROM read_parquet(?)", [str(path)])
+        .fetchall()
+    )
+    in_clear = [v for (v,) in vendors if v and not str(v).startswith("person:")]
+    assert [v for v in in_clear if not is_organisation(str(v))] == []
+    inside = hashed_names_inside(path)
+    print("cells holding a hashed vendor's name, by column:", inside)
+    assert [inside[c] for c in TABLE.free_text] == [0] * len(TABLE.free_text)
