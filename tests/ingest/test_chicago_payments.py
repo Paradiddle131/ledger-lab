@@ -12,14 +12,22 @@ import duckdb
 import pytest
 
 from ingest import fetch
-from ingest.chicago.payments import COLUMNS, profile, step
-from ingest.chicago.table import TableError
+from ingest.chicago import together
+from ingest.chicago.payments import COLUMNS, TABLE, profile
+from ingest.chicago.table import TableError, land
 from ingest.entities import Register
 from ingest.individuals import KEY_VARIABLE
 
 ENV = {KEY_VARIABLE: "k" * 32}
 # A register that vouches for no name, so only the classifier decides.
 NONE = Register(())
+
+
+def step(raw: bytes, env: dict[str, str], register: Register) -> bytes:
+    """The table landed on its own, as the set's landing scrubs it."""
+    return land(raw, TABLE, env, register)
+
+
 ITEMISED = {
     "voucher_number": "PV84248442063",
     "amount": "45111.74",
@@ -133,8 +141,9 @@ def test_a_contract_number_with_a_dash_lands(tmp_path: Path) -> None:
     assert row["contract_number"] == "B-12345"
 
 
-def test_the_fetch_kit_lands_the_payments_only_through_this_step() -> None:
-    assert fetch.STEPS["chicago-payments"] is step
+def test_the_fetch_kit_lands_the_table_only_in_the_chicago_set() -> None:
+    assert "chicago-payments" not in fetch.STEPS
+    assert "chicago-payments".startswith(f"{together.SET}-")
     assert fetch.load_sources(fetch.SOURCES)["chicago-payments"]["names_people"] is True
 
 

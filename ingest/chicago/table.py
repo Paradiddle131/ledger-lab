@@ -9,12 +9,12 @@ still joins) and stays in clear on a row whose name is clear: an id carrying bot
 a company name appears once in clear beside the company and once as a hash beside the person's
 hash, and nothing links the two without the key. On a hashed row the cells that describe or locate
 the payee are blanked. Columns no consumer needs and that hold contact people (street addresses)
-are dropped from every row. A description on any row is blanked when a run of its words, in any
-order and whatever punctuation sits between them, is a name this table hashes, or when it carries
-a person marker in the form that introduces one (the estate or executors of someone, a deceased, a
-name that is no company trading as another). A description of an organisation's row is otherwise
-landed as served: it is the known remaining place a person's name could sit, including a name
-another table hashes, since each table's landing reads only its own data.
+are dropped from every row. The tables of one publisher land together
+(`land_all`): a description on any row of any of them is blanked when a run of its words, in any
+order and whatever punctuation sits between them, is a name any of the tables hashes, or when it
+carries a person marker in the form that introduces one (the estate or executors of someone, a
+deceased, a name that is no company trading as another). A description of an organisation's row is
+otherwise landed as served, the remaining place a person's name could sit unseen.
 """
 
 import csv
@@ -56,27 +56,61 @@ class Table:
 
 
 def scrub(
-    rows: list[dict[str, str]], table: Table, register: Register, env: Mapping[str, str] | None
+    tables: list[tuple[list[dict[str, str]], Table]],
+    register: Register,
+    env: Mapping[str, str] | None,
 ) -> None:
-    """Every row changed in place: hashed payees, their identifiers and personal cells, dropped
-    columns, and descriptions that name a hashed payee or a person."""
-    names = {row[table.name] for row in rows}
+    """Every row of every table changed in place: hashed payees, their identifiers and personal
+    cells, dropped columns, and descriptions that name a person or a payee any of the tables
+    hashes. The decision to hash is the name's alone, so a name is hashed in every table or none."""
+    names = {row[table.name] for rows, table in tables for row in rows}
     hide, as_id = pseudonymiser(env, register.vouched(names)), identifier_hasher(env)
     hidden = {n: h for n in names if (h := hide(n or None)) not in (n, None)}
     found = HashedNames(hidden)
-    for row in rows:
-        for column in table.dropped:
-            del row[column]
-        if row[table.name] in hidden:
-            row[table.name] = hidden[row[table.name]]
-            if table.identifier and row[table.identifier]:
-                row[table.identifier] = as_id(row[table.identifier])
-            for column in table.personal:
-                row[column] = ""
-        for column in table.descriptions:
-            cell = row[column]
-            if cell and (introduces_a_person(cell) or found.in_any_order(cell)):
-                row[column] = ""
+    for rows, table in tables:
+        for row in rows:
+            for column in table.dropped:
+                del row[column]
+            if row[table.name] in hidden:
+                row[table.name] = hidden[row[table.name]]
+                if table.identifier and row[table.identifier]:
+                    row[table.identifier] = as_id(row[table.identifier])
+                for column in table.personal:
+                    row[column] = ""
+            for column in table.descriptions:
+                cell = row[column]
+                if cell and (introduces_a_person(cell) or found.in_any_order(cell)):
+                    row[column] = ""
+
+
+def land_all(
+    served: Mapping[str, tuple[bytes, Table]],
+    env: Mapping[str, str] | None = None,
+    register: Register | None = None,
+) -> dict[str, bytes]:
+    """Each verified CSV, by name, as text Parquet, scrubbed together: every payee who may be a
+    person hashed in every table, and no table's description naming a payee any of them hashes;
+    the names the register (the landed one unless given) vouches for kept in clear."""
+    pseudonymiser(env)  # refuses before any row is read
+    register = Register.landed() if register is None else register
+    read = {}
+    for name, (raw, table) in served.items():
+        reader = csv.DictReader(io.StringIO(raw.decode("utf-8"), newline=""))
+        if tuple(reader.fieldnames or ()) != table.columns:
+            raise TableError(f"{name}: the served columns differ from the table's")
+        rows = list(reader)
+        for row in rows:
+            table.check(row)
+        read[name] = (rows, table)
+    scrub(list(read.values()), register, env)
+    landed = {}
+    for name, (rows, table) in read.items():
+        out = io.StringIO()
+        writer = csv.DictWriter(out, table.landed)
+        writer.writeheader()
+        writer.writerows(rows)
+        landed[name] = parquet_from_csv(out.getvalue(), all_varchar=True)
+    return landed
 
 
 def land(
@@ -85,22 +119,8 @@ def land(
     env: Mapping[str, str] | None = None,
     register: Register | None = None,
 ) -> bytes:
-    """The verified CSV as text Parquet with every payee who may be a person hashed, the names the
-    register (the landed one unless given) vouches for kept in clear."""
-    pseudonymiser(env)  # refuses before any row is read
-    register = Register.landed() if register is None else register
-    reader = csv.DictReader(io.StringIO(raw.decode("utf-8"), newline=""))
-    if tuple(reader.fieldnames or ()) != table.columns:
-        raise TableError("the served columns differ from the table's")
-    rows = list(reader)
-    for row in rows:
-        table.check(row)
-    scrub(rows, table, register, env)
-    out = io.StringIO()
-    writer = csv.DictWriter(out, table.landed)
-    writer.writeheader()
-    writer.writerows(rows)
-    return parquet_from_csv(out.getvalue(), all_varchar=True)
+    """One verified CSV landed on its own (`land_all` of one table)."""
+    return land_all({"table": (raw, table)}, env, register)["table"]
 
 
 def counter(path: Path) -> tuple[duckdb.DuckDBPyConnection, Callable[[str], int]]:

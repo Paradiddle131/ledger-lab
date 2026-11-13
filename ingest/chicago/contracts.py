@@ -1,32 +1,29 @@
-"""The City of Chicago's contracts: the step that lands them, and the profile of their mess.
+"""The City of Chicago's contracts: how they land, and the profile of their mess.
 
-`step` turns the verified CSV into Parquet through the shared Chicago landing (`table.py`). A vendor
-who is a person, or may be one, leaves only as a keyed hash, with the vendor id on that row hashed
-beside it (the same id stays in clear on a row whose vendor name is clear). On their rows the
-purchase-order description (which repeats the name in truncated and reordered forms no replacement
-catches), ZIP code and the link to the signed contract are blanked. The street address columns
-are left out on every row, since they carry contact people (`ATTN`, `C/O`) and nothing needs them.
-On every row a description holding a hashed vendor's name, in any order and punctuation, or a
-marker introducing a person (the estate of, a deceased) is blanked; an organisation row's
-description is otherwise landed as served, and is the known remaining place a person's name could
-sit. The contract and specification numbers stay in clear, as the keys that tie payments to
-contracts; the City's public search can look a hashed vendor up by them. A company named after a
-person passes in clear, as the pseudonymiser allows, even where that person is hashed on other
-rows. Every column lands as the text the publisher served, with blanks as nulls; typing is the
-models' job.
+`TABLE` is how the shared Chicago landing (`table.py`) turns the verified CSV into Parquet, together
+with the payments as one set (`together.py`). A vendor who is a person, or may be one, leaves only
+as a keyed hash, with the vendor id on that row hashed beside it (the same id stays in clear on a
+row whose vendor name is clear). On their rows the purchase-order description (which repeats the
+name in truncated and reordered forms no replacement catches), ZIP code and the link to the signed
+contract are blanked. The street address columns are left out on every row, since they carry contact
+people (`ATTN`, `C/O`) and nothing needs them. On every row a description holding a name either
+table hashes, in any order and punctuation, or a marker introducing a person (the estate of, a
+deceased) is blanked; an organisation row's description is otherwise landed as served, the remaining
+place a person's name could sit unseen. The contract and specification numbers stay in clear, as the
+keys that tie payments to contracts; the City's public search can look a hashed vendor up by them. A
+company named after a person passes in clear, as the pseudonymiser allows, even where that person is
+hashed on other rows. Every column lands as the text the publisher served, with blanks as nulls;
+typing is the models' job.
 
-`profile` counts the mess the models must survive: contracts carrying several revisions,
-negative awards (revisions that lower an award), revision numbers that are not numbers, the
-order-number formats in use, and how many hashed rows still carry a contract or specification
-number.
+`profile` counts the mess the models must survive: contracts carrying several revisions, negative
+awards (revisions that lower an award), revision numbers that are not numbers, the order-number
+formats in use, and how many hashed rows still carry a contract or specification number.
 """
 
-from collections.abc import Mapping
 from pathlib import Path
 from typing import TypedDict
 
-from ingest.chicago.table import Table, counter, land
-from ingest.entities import Register
+from ingest.chicago.table import Table, counter
 
 COLUMNS: tuple[str, ...] = (
     "purchase_order_description",
@@ -74,14 +71,6 @@ class Profile(TypedDict):
     hashed_rows_with_contract_number: int
     hashed_rows_with_specification_number: int
     order_number_formats: dict[str, int]
-
-
-def step(
-    raw: bytes, env: Mapping[str, str] | None = None, register: Register | None = None
-) -> bytes:
-    """The verified CSV as Parquet, with every vendor who may be a person hashed; the register is
-    the landed one unless given."""
-    return land(raw, TABLE, env, register)
 
 
 def profile(path: Path) -> Profile:

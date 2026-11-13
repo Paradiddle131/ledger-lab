@@ -12,14 +12,22 @@ import duckdb
 import pytest
 
 from ingest import fetch
-from ingest.chicago.contracts import COLUMNS, profile, step
-from ingest.chicago.table import TableError
+from ingest.chicago import together
+from ingest.chicago.contracts import COLUMNS, TABLE, profile
+from ingest.chicago.table import TableError, land
 from ingest.entities import Register
 from ingest.individuals import KEY_VARIABLE
 
 ENV = {KEY_VARIABLE: "k" * 32}
 # A register that vouches for no name, so only the classifier decides.
 NONE = Register(())
+
+
+def step(raw: bytes, env: dict[str, str], register: Register) -> bytes:
+    """The table landed on its own, as the set's landing scrubs it."""
+    return land(raw, TABLE, env, register)
+
+
 ORG = {
     "purchase_order_description": "HORSE TRAILERS",
     "purchase_order_contract_number": "C017892",
@@ -119,8 +127,9 @@ def test_the_step_refuses_a_table_whose_columns_changed() -> None:
         step(served(ORG, columns=(*COLUMNS, "new_column")), ENV, NONE)
 
 
-def test_the_fetch_kit_lands_the_contracts_only_through_this_step() -> None:
-    assert fetch.STEPS["chicago-contracts"] is step
+def test_the_fetch_kit_lands_the_table_only_in_the_chicago_set() -> None:
+    assert "chicago-contracts" not in fetch.STEPS
+    assert "chicago-contracts".startswith(f"{together.SET}-")
     assert fetch.load_sources(fetch.SOURCES)["chicago-contracts"]["names_people"] is True
 
 

@@ -586,13 +586,48 @@ def test_a_set_lands_every_member_through_its_step_as_one_file(
             "spending": entry(f"{site.base}/file.csv", sha256(FILE)),
         }
     )
-    landed = fetch.fetch_set("spend", landing)
+    (landed,) = fetch.fetch_set("spend", landing)
     assert landed == landing / "spend"
     assert landed.read_bytes() == FILE + FILE.upper()
     assert [list(files) for files in seen] == [
         [f"{site.base}/file.csv", f"{site.base}/second.csv"]
     ], "the step gets each member by its URL, in the sources file's order, and no other source"
     assert everything_under(landing) == [landed]
+
+
+def test_a_set_step_may_land_one_file_per_member(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    site.files["/second.csv"] = FILE.upper()
+    monkeypatch.setitem(
+        fetch.SET_STEPS, "spend", lambda files: {"spend-1": b"one", "spend-2": b"two"}
+    )
+    write_sources(
+        **{
+            "spend-1": entry(f"{site.base}/file.csv", sha256(FILE), names_people=True),
+            "spend-2": entry(f"{site.base}/second.csv", sha256(FILE.upper()), names_people=True),
+        }
+    )
+    landed = fetch.fetch_set("spend", landing)
+    assert landed == [landing / "spend-1", landing / "spend-2"]
+    assert [path.read_bytes() for path in landed] == [b"one", b"two"]
+    assert everything_under(landing) == landed
+
+
+def test_a_set_step_naming_a_file_that_is_no_member_lands_nothing(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(fetch.SET_STEPS, "spend", lambda files: {"spend-1": b"1", "other": b"2"})
+    write_sources(**{"spend-1": entry(f"{site.base}/file.csv", sha256(FILE), names_people=True)})
+    with pytest.raises(fetch.FetchError, match="no member"):
+        fetch.fetch_set("spend", landing)
+    assert everything_under(landing) == []
 
 
 def test_a_set_member_whose_download_is_cut_short_lands_on_the_retry(
@@ -609,7 +644,7 @@ def test_a_set_member_whose_download_is_cut_short_lands_on_the_retry(
             "spend-2": entry(f"{site.base}/cut.csv", sha256(FILE)),
         }
     )
-    assert fetch.fetch_set("spend", landing).read_bytes() == FILE + FILE
+    assert fetch.fetch_set("spend", landing)[0].read_bytes() == FILE + FILE
     assert [r["path"] for r in site.requests] == ["/file.csv", "/cut.csv", "/cut.csv"]
 
 

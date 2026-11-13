@@ -1,28 +1,27 @@
-"""The City of Chicago's payments: the step that lands them, and the profile of their mess.
+"""The City of Chicago's payments: how they land, and the profile of their mess.
 
-`step` turns the verified CSV into Parquet through the shared Chicago landing (`table.py`). A payee
-who is a person, or may be one, leaves only as a keyed hash. The table has no payee identifier,
-address or description, and its voucher and contract numbers must be codes (a digit and no space,
-or one of the table's placeholders); a code column that reads as words fails the step, since it
-could carry a name. The voucher and contract numbers stay in clear on a hashed row, as the keys
-that tie payments to vouchers and contracts; the City's public search can look a payee up by them.
-The department is one of the City's departments; five of them are also payees, hashed for lack of
-a legal form, and stay in clear as departments. Every column lands as the text the publisher
-served, with blanks as nulls; typing is the models' job.
+`TABLE` is how the shared Chicago landing (`table.py`) turns the verified CSV into Parquet, together
+with the contracts as one set (`together.py`). A payee who is a person, or may be one, leaves only
+as a keyed hash. The table has no payee identifier, address or description, and its voucher and
+contract numbers must be codes (a digit and no space, or one of the table's placeholders); a code
+column that reads as words fails the step, since it could carry a name, and the set's landing
+refuses it. The voucher and contract numbers stay in clear on a hashed row, as the keys that tie
+payments to vouchers and contracts; the City's public search can look a payee up by them. The
+department is one of the City's departments; five of them are also payees, hashed for lack of a
+legal form, and stay in clear as departments. Every column lands as the text the publisher served,
+with blanks as nulls; typing is the models' job.
 
-`profile` counts the mess the models must survive. Payments older than two years are rolled up
-by the publisher into one row per vendor, contract and year, dated by the bare year and carrying
-no voucher; those from 1996 to 2002 share the year 2002, so no earlier year appears. A payment on
-no contract carries `DV` (a direct voucher: settlements, refunds, utilities, reimbursements).
+`profile` counts the mess the models must survive. Payments older than two years are rolled up by
+the publisher into one row per vendor, contract and year, dated by the bare year and carrying no
+voucher; those from 1996 to 2002 share the year 2002, so no earlier year appears. A payment on no
+contract carries `DV` (a direct voucher: settlements, refunds, utilities, reimbursements).
 """
 
 import re
-from collections.abc import Mapping
 from pathlib import Path
 from typing import TypedDict
 
-from ingest.chicago.table import Table, TableError, counter, land
-from ingest.entities import Register
+from ingest.chicago.table import Table, TableError, counter
 
 COLUMNS: tuple[str, ...] = (
     "voucher_number",
@@ -67,14 +66,6 @@ def _codes_only(row: dict[str, str]) -> None:
 
 
 TABLE = Table(COLUMNS, name="vendor_name", check=_codes_only)
-
-
-def step(
-    raw: bytes, env: Mapping[str, str] | None = None, register: Register | None = None
-) -> bytes:
-    """The verified CSV as Parquet, with every payee who may be a person hashed; the register is
-    the landed one unless given."""
-    return land(raw, TABLE, env, register)
 
 
 def profile(path: Path) -> Profile:
