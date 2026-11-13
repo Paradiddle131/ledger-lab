@@ -3,12 +3,16 @@ rule and score that matched it, and makes no wrong match on a labelled sample of
 companies.
 
 `vendor_sample.yaml` holds the sample: organisation names as the landed files spell them, each
-with the LEI it should match (none where the register has no record of it), and every record of
-the pinned register that shares a name with one of them before or after its legal form, so the
-fixture build sees the same candidates the real one does. The landed test runs the same sample
-against the real landing.
+with the LEI of the company it names, looked up in the register by hand (none where the register
+has no record of that company in the entity's own country, or two records of one name). The vendor
+seeds hold those names as landed vendors and every register record the rules could consider for
+them, plus each expected record they miss, so the sample build sees the candidates the real one
+does. The landed test runs the same sample against the real landing. Taking out the ambiguity
+check, the country and active preference, or the own-country limit of the looser rules each turns
+the sample test red.
 """
 
+import csv
 import json
 from pathlib import Path
 from typing import Any
@@ -21,13 +25,13 @@ from ingest.entities import REGISTER, Register, match_key
 from ingest.fetch import landing_path
 from ingest.individuals import is_organisation
 from ingest.uk_transport.spend import BODIES
-from tests.models.dbt_build import HASHED, SAMPLE, Build, built, dbt, query
+from tests.models.dbt_build import HASHED, SAMPLE, SEEDS, Build, built, dbt, query
 
 SOURCES = ("chicago-contracts", "chicago-payments", "uk-transport-spend-2025")
 # Of the sample's names that have a legal entity, the share the rules match to it: a floor set just
 # under what they reach, so a rule that stops matching what it matched turns the test red. Wrong
 # matches (a name matched to another entity than its own, or to any when it has none) must be none.
-RECALL = 0.80
+RECALL = 0.93
 
 
 def labelled() -> list[dict[str, Any]]:
@@ -72,7 +76,18 @@ def test_the_sample_holds_fifty_organisations_with_their_expected_match() -> Non
     assert len({(v["entity"], v["name"]) for v in vendors}) == len(vendors)
     assert sum(v["lei"] is not None for v in vendors) >= 40
     assert any(v["lei"] is None for v in vendors), "some names have no record to match"
-    leis = {r["lei"] for r in yaml.safe_load(SAMPLE.read_text())["register"]}
+    seeded = {
+        name: [row for row in csv.DictReader((SEEDS / f"{name}.csv").open())]
+        for name in ("vendor_contracts_sample", "vendor_suppliers_sample")
+    }
+    names = {("chicago", r["vendor_name"]) for r in seeded["vendor_contracts_sample"]}
+    names |= {("uk-transport", r["supplier"]) for r in seeded["vendor_suppliers_sample"]}
+    assert {(v["entity"], v["name"]) for v in vendors} | {
+        ("chicago", HASHED),
+        ("uk-transport", HASHED),
+    } == names, "the seeds hold the labelled names as landed vendors, and nothing else"
+    with (SEEDS / "vendor_legal_entities_sample.csv").open() as records:
+        leis = {r["LEI"] for r in csv.DictReader(records)}
     assert {v["lei"] for v in vendors if v["lei"]} <= leis
 
 
@@ -87,13 +102,11 @@ def test_the_matching_makes_no_wrong_match_on_the_labelled_sample(build: Build) 
 def test_a_hashed_name_is_never_matched(build: Build) -> None:
     rows = query(
         build,
-        "select entity_id, lei, match_status, match_rule, match_score from vendor_entity"
-        " where vendor_name like 'person:%' order by entity_id",
+        "select lei, match_status, match_rule, match_score from vendor_entity"
+        " where vendor_name = ?",
+        HASHED,
     )
-    assert rows == [(e, None, "hashed", None, None) for e in ("chicago", "uk-transport")]
-    assert query(build, "select count(*) from vendor_entity where vendor_name = ?", HASHED) == [
-        (1,)
-    ]
+    assert rows == [(None, "hashed", None, None)] * 2
 
 
 def model_keys(build: Build, names: list[str]) -> list[str]:
@@ -144,7 +157,7 @@ def test_the_real_landing_matches_the_sample_and_every_vouched_name(tmp_path: Pa
     for name in (*SOURCES, REGISTER):
         if not (landing / name).exists():
             pytest.skip(f"{name} is not landed")
-    build = built(tmp_path, landing)
+    build = built(tmp_path, "landed", landing)
     score = scored(build)
     print("labelled sample on the real register:", score)
     assert score["wrong"] == []

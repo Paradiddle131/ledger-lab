@@ -1,11 +1,12 @@
 # A cut of the City of Chicago's contracts and payments for the model tests: real rows of the
-# pinned files, in the columns the City serves, which the fixture build lands through the
-# landing's own step (`ingest/chicago/table.py`) with a test hash key and the labelled vendor
-# sample's register records, so the models read them as they read a real landing. Every vendor
-# is a company, none a person: each name of the labelled vendor sample (`vendor_sample.yaml`) on one or
-# more of its rows, and the accounting firm ERNST & YOUNG LLP, which the sample's register does
-# not vouch for, so the step hashes it with the test key, as a real landing hashes a payee
-# without evidence; no row carries a hash made with the real key. The
+# pinned files, in the columns the City serves. The Chicago seeds
+# (`models/seeds/staging/chicago/`) are these rows as the landing's own step
+# (`ingest/chicago/table.py`) lands them with a test hash key and the vendor seeds' register
+# records, and a test lands them again and holds the seeds to it. Every vendor is a company, none
+# a person: public companies of the labelled vendor sample (`vendor_sample.yaml`), and companies
+# whose name the classifier cannot read as one party (`ERNST & YOUNG LLP`, `3M COMPANY`) and the
+# seeds' register does not vouch for, which the step hashes with the test key, as a real landing
+# hashes any payee without evidence; no row carries a hash made with the real key. The
 # purchase-order descriptions and contract links are left out; nothing here is free text.
 # The rows show the mess the models handle: a contract with a negative revision and revisions
 # numbered by the legacy system (D0952390332), contracts paid exactly their award after revisions

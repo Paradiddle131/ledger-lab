@@ -17,10 +17,9 @@ models:
         description: "{{ doc('payment_entity_id') }}"
         data_tests:
           - not_null
-          - relationships:
+          - accepted_values:
               arguments:
-                to: ref('fiscal_year_starts')
-                field: entity_id
+                values: [chicago, uk-transport, nl-government]
       - name: currency
         description: "{{ doc('payment_currency') }}"
         data_tests:

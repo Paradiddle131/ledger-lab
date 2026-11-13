@@ -10,6 +10,15 @@ landing/
 !/models/seeds/calendars/period_status.csv
 # Real ECB rates, a licence-allowed sample (free use with the source cited) the translation tests need.
 !/models/seeds/reference/fx/ecb_rates_sample.csv
+# Real rows of the Dutch budget statements, a licence-allowed sample (CC0) the budget tests need.
+!/models/seeds/staging/nl_government/nl_government_budget_sample.csv
+!/models/seeds/intermediate/vendors/vendor_contracts_sample.csv
+!/models/seeds/intermediate/vendors/vendor_legal_entities_sample.csv
+!/models/seeds/intermediate/vendors/vendor_payments_sample.csv
+!/models/seeds/intermediate/vendors/vendor_suppliers_sample.csv
+# Real rows of Chicago's contracts and payments, companies only, landed with a test key (the owner accepted the City's terms).
+!/models/seeds/staging/chicago/chicago_contracts_sample.csv
+!/models/seeds/staging/chicago/chicago_payments_sample.csv
 *.tsv
 *.xlsx
 *.xls

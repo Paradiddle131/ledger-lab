@@ -86,3 +86,45 @@ models:
           - not_null
       - name: vendor_is_hashed
         description: True when the payee's name is a keyed hash.
+
+seeds:
+  - name: chicago_contracts_sample
+    description: >
+      Real rows of the City's contracts for the builds inside `make check`, read when the
+      `source_rows` var is `sample`: the cut in `tests/models/chicago_sample.yaml` (companies only,
+      descriptions and contract links left out) as the landing's step lands it with a test hash
+      key, so its one hashed vendor carries that key's hash, never the real one's; a test lands the
+      cut again and holds this file to it.
+    config:
+      column_types:
+        purchase_order_description: string
+        purchase_order_contract_number: string
+        revision_number: string
+        specification_number: string
+        contract_type: string
+        start_date: string
+        end_date: string
+        approval_date: string
+        department: string
+        vendor_name: string
+        vendor_id: string
+        city: string
+        state: string
+        zip: string
+        award_amount: string
+        procurement_type: string
+        contract_pdf: string
+  - name: chicago_payments_sample
+    description: >
+      Real rows of the City's payments for the builds inside `make check`, read when the
+      `source_rows` var is `sample`: the cut in `tests/models/chicago_sample.yaml` as the
+      landing's step lands it with a test hash key; a test lands the cut again and holds this file
+      to it.
+    config:
+      column_types:
+        voucher_number: string
+        amount: string
+        check_date: string
+        department_name: string
+        contract_number: string
+        vendor_name: string

@@ -640,6 +640,32 @@ def test_files_that_fail_to_land_together_leave_the_old_ones_as_they_were(
     assert everything_under(tmp_path) == [first, second]
 
 
+def test_files_whose_rollback_fails_too_keep_the_old_ones_aside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second new file cannot be placed and the old first one cannot be moved back: neither new
+    file stays, and both old files stay whole under their hidden names, which the error names."""
+    first, second = tmp_path / "set-1", tmp_path / "set-2"
+    first.write_bytes(b"old one")
+    second.write_bytes(b"old two")
+    rename = Path.replace
+
+    def replace(self: Path, to: Path) -> Path:
+        if Path(to) == second and self.name.startswith(".set-2.new."):
+            raise OSError(28, "No space left on device")
+        if Path(to) == first and self.name.startswith(".set-1.old."):
+            raise OSError(5, "Input/output error")
+        return rename(self, to)
+
+    monkeypatch.setattr(Path, "replace", replace)
+    with pytest.raises(fetch.FetchError, match="kept as"):
+        fetch.land_all("set", {first: b"new one", second: b"new two"})
+    kept = sorted(p.read_bytes() for p in tmp_path.glob(".set-*.old.*"))
+    assert kept == [b"old one", b"old two"]
+    assert not first.exists() and not second.exists()
+    assert not list(tmp_path.glob(".*.new.*"))
+
+
 def test_files_that_land_together_replace_the_old_ones_and_leave_nothing_else(
     tmp_path: Path,
 ) -> None:

@@ -5,6 +5,7 @@
 -- sign as served. The key hashes every landed column with the entity, and numbers rows that are
 -- identical in every column (the publisher serves some payments twice), so it is unique and the
 -- same in every landing made with the same hash key.
+-- The `source_rows` var picks the rows: the landed file or the committed sample of real rows.
 with served as (
     select
         voucher_number,
@@ -22,7 +23,7 @@ with served as (
             "'|'", "coalesce(contract_number, '')",
             "'|'", "coalesce(vendor_name, '')",
         ])) }} as row_hash
-    from {{ source('landing', 'chicago-payments') }}
+    from {{ landed_or_sample('landing', 'chicago-payments', 'chicago_payments_sample') }}
 ),
 
 numbered as (
