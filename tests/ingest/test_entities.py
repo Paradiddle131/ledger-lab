@@ -133,29 +133,65 @@ def test_a_register_record_with_a_persons_exact_name_never_vouches(name: str) ->
     assert not register.vouches(name)
 
 
+# Invented names a register record could carry exactly, which the register must never clear: a
+# legal form after what may be a person's name or initials, person evidence anywhere, two people
+# joined, and figures or marks that must not stretch a name past the guard.
+NEVER_VOUCHED = [
+    "JANE EXAMPLE PC",
+    "JANE EXAMPLE MD PC",
+    "JANE EXAMPLE M.D., P.C.",
+    "DR JANE EXAMPLE INC",
+    "JANE EXAMPLE DDS PLLC",
+    "J. EXAMPLE B.V.",
+    "EXAMPLE B.V.",
+    "EXAMPLE, B.V.",
+    "EXAMPLE N.V.",
+    "EXAMPLE P.C.",
+    "DE EXAMPLE B.V.",
+    "J EXAMPLE N.V.",
+    "EXAMPLE BV",
+    "JANE EXAMPLE & JOHN SAMPLE LLP",
+    "JANE EXAMPLE TRUST LLC",
+    "STICHTING J. EXAMPLE",
+    "VERENIGING JANE EN JOHN EXAMPLE",
+    "JANE EXAMPLE, INC.",
+    "JANE Q EXAMPLE B.V.",
+    "CHICK-EXAMPLE, INC",
+    "JANE EXAMPLE FAMILY HOLDINGS OF CHICAGO",
+    "JANE EXAMPLE REVOCABLE LIVING HOLDINGS",
+    "JANE MARY EXAMPLE C/O EXAMPLE HOLDINGS GROUP",
+    "JANE EXAMPLE AS AGENT FOR EXAMPLE HOLDINGS",
+    "JANE EXAMPLE AND JOHN EXAMPLE SAMPLE",
+    "JANE & JOHN EXAMPLE CO",
+    "JANE EXAMPLE & JOHN EXAMPLE",
+    "JANE MARY EXAMPLE 2ND",
+    "JANE MARY EXAMPLE 3RD",
+    "JANE MARY EXAMPLE APT 4B",
+    "JANE MARY EXAMPLE #4B",
+    "JANE MARY EXAMPLE2",
+    "JANE² MARY EXAMPLE",
+    "JANE MARY EXAMPLE \u216b",
+    "JAQ\u0301UE MARY EXAMPLE",
+    "3M EXAMPLE",
+    "A1 EXAMPLE",
+]
+
+
+@pytest.mark.parametrize("name", NEVER_VOUCHED)
+def test_a_register_record_never_clears_a_name_a_person_could_carry(name: str) -> None:
+    register = Register([Record(name, "GENERAL", CORPORATION)])
+    assert match_key(name) in register.keys, "the record has the name's very key"
+    assert not register.vouches(name)
+
+
 @pytest.mark.parametrize(
-    "name",
-    [
-        HOSPITAL,
-        "3M COMPANY",
-        "A1 EXAMPLE",
-        "",
-        "JANE EXAMPLE, INC.",
-        "JANE Q EXAMPLE B.V.",
-        "DOE & ROE, INCORPORATED",
-        "STICHTING JANE EXAMPLE",
-        "EXAMPLE WIDGETS OF NORTH AMERICA",
-        "JANE MARY ANN EXAMPLE",
-        "JANE EXAMPLE & JOHN EXAMPLE",
-        "JANE & JOHN EXAMPLE CO",
-    ],
+    "name", [HOSPITAL, "EXAMPLE WIDGETS OF NORTH AMERICA", "JANE MARY ANN EXAMPLE"]
 )
-def test_a_legal_form_at_the_end_four_counted_words_or_a_mixed_word_is_not_person_shaped(
-    name: str,
-) -> None:
-    """Four counted words is past the guard on purpose: counting them would keep 39 more of the
-    pinned files' register-vouched spellings hashed (universities, banks, charities), and a
-    person's name of four words needs a legal-person record of exactly that name to come out."""
+def test_four_counted_words_on_every_side_of_a_joiner_are_not_person_shaped(name: str) -> None:
+    """Four counted words is past the guard on purpose: counting them would keep dozens more of the
+    pinned files' register-vouched names hashed (universities, banks, charities), and a person's
+    name of four words needs a legal-person record of exactly that name to come out; the pinned
+    register holds about six vouching records of four-word, two-people or similar shapes."""
     assert not person_shaped(name)
 
 
