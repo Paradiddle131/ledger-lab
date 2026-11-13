@@ -15,12 +15,18 @@ terraform {
   }
 }
 
+# Bill every API call to the lab project: with a person's own login, APIs such as Budgets otherwise
+# charge their quota to whatever project the login defaults to, where the API may be off.
 provider "google" {
-  project = var.project
-  region  = var.region
+  project               = var.project
+  region                = var.region
+  billing_project       = var.project
+  user_project_override = true
 }
 
 provider "google-beta" {
-  project = var.project
-  region  = var.region
+  project               = var.project
+  region                = var.region
+  billing_project       = var.project
+  user_project_override = true
 }

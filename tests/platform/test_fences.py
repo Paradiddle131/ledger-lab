@@ -140,8 +140,18 @@ def test_the_workflow_unlinks_billing_only_above_the_threshold() -> None:
     condition = by_name["decide"]["switch"][0]
     assert condition == {"condition": "${cost > threshold}", "next": "unlink"}
     unlink = by_name["unlink"]
-    assert unlink["call"] == "googleapis.cloudbilling.v1.projects.updateBillingInfo"
+    assert unlink["call"] == "http.put"
+    assert unlink["args"]["url"].startswith('${"https://cloudbilling.googleapis.com/v1/projects/"')
+    assert unlink["args"]["url"].endswith('+ "/billingInfo"}')
+    assert unlink["args"]["auth"] == {"type": "OAuth2"}
     assert unlink["args"]["body"] == {"billingAccountName": ""}
+
+
+def test_every_api_call_is_billed_to_the_lab_project() -> None:
+    for provider in CONFIG["provider"]:
+        (body,) = provider.values()
+        assert body["billing_project"] == "${var.project}"
+        assert body["user_project_override"] is True
 
 
 @pytest.mark.parametrize("name", ["project", "billing_account"])

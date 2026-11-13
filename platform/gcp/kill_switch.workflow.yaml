@@ -13,10 +13,13 @@ main:
           - condition: ${cost > threshold}
             next: unlink
         next: keep
+    # Workflows has no Cloud Billing connector: call the API directly as the workflow's identity.
     - unlink:
-        call: googleapis.cloudbilling.v1.projects.updateBillingInfo
+        call: http.put
         args:
-          name: ${"projects/" + sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          url: ${"https://cloudbilling.googleapis.com/v1/projects/" + sys.get_env("GOOGLE_CLOUD_PROJECT_ID") + "/billingInfo"}
+          auth:
+            type: OAuth2
           body:
             billingAccountName: ""
         next: unlinked
