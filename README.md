@@ -35,7 +35,8 @@ To land a source, set `LEDGER_LAB_HASH_KEY` (see `ingest/individuals.py`) and ru
 
 ```bash
 uv run python -m ingest.fetch chicago-contracts   # lands landing/chicago-contracts as Parquet
-uv run pytest -m landed                          # profiles what is landed
+uv run python -m ingest.fetch chicago-payments    # lands landing/chicago-payments as Parquet
+uv run pytest -m landed                          # profiles what is landed and checks it for names, with the same key
 ```
 
 ## Checks

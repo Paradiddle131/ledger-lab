@@ -30,7 +30,7 @@ import httpx
 import yaml
 from jsonschema import Draft202012Validator
 
-from ingest.chicago import contracts
+from ingest.chicago import contracts, payments
 
 HERE = Path(__file__).resolve().parent
 SOURCES = HERE / "sources.yaml"
@@ -54,7 +54,10 @@ BACKOFF = 5.0
 DROPPED = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
 
 # A source's own step between verification and landing, by source name.
-STEPS: dict[str, Callable[[bytes], bytes]] = {"chicago-contracts": contracts.step}
+STEPS: dict[str, Callable[[bytes], bytes]] = {
+    "chicago-contracts": contracts.step,
+    "chicago-payments": payments.step,
+}
 
 
 class FetchError(Exception):

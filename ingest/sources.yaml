@@ -24,3 +24,16 @@ sources:
     licence: https://www.chicago.gov/city/en/narr/foia/data_disclaimer.html
     publisher: City of Chicago
     names_people: true
+  # City of Chicago payments (s4vu-giwb), every row the portal created by the cut-off. Check dates
+  # are text in two forms and payments with old check dates arrive every day, so the cut-off is the
+  # portal's row-creation time. The City reloads the whole table when it rolls payments older than
+  # two years up by year, and a reload moves the hash.
+  chicago-payments:
+    query:
+      url: https://data.cityofchicago.org/resource/s4vu-giwb.csv?$limit=1000000
+      order: {$order: "voucher_number, check_date, amount, contract_number, vendor_name, department_name"}
+      cut_off: {$where: ":created_at <= '2026-10-31T23:59:59'"}
+    sha256: 840db59a961f62cc2ce514d9359acee13abdd6b16043f3b559d4a962405d8a53  # pragma: allowlist secret
+    licence: https://www.chicago.gov/city/en/narr/foia/data_disclaimer.html
+    publisher: City of Chicago
+    names_people: true
