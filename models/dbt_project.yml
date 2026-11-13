@@ -17,10 +17,10 @@ vars:
   fiscal_years:
     first: 2023
     last: 2026
-  # Where the currency translation reads the ECB reference rates: `landed`, the file the fetch kit
-  # lands under LEDGER_LAB_LANDING, or `sample`, the committed fortnight of real rates the tests
-  # pass explicitly.
-  ecb_rates: landed
+  # Where every model reading a fetched source reads it (the `landed_or_sample` macro): `landed`,
+  # the files the fetch kit lands under LEDGER_LAB_LANDING, or `sample`, the committed seeds of
+  # real rows the tests pass explicitly.
+  source_rows: landed
 
 models:
   ledger_lab:
@@ -28,4 +28,6 @@ models:
     calendars:
       +materialized: table
     reference:
+      +materialized: table
+    marts:
       +materialized: table
