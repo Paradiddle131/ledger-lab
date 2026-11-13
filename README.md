@@ -36,6 +36,12 @@ uv sync
 make check        # lint, types, tests, process-id and owner checks, secret scan
 ```
 
+The dbt models build on DuckDB in the session by default; setting `LEDGER_LAB_GCP_PROJECT` (with `uv sync --group bigquery`) moves them to BigQuery:
+
+```bash
+uv run dbt build --project-dir models --profiles-dir models
+```
+
 ## Licence
 
 [MIT](LICENSE).

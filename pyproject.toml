@@ -8,7 +8,13 @@ requires-python = ">=3.13,<3.14"
 dependencies = []
 
 [dependency-groups]
+# The BigQuery adapter, installed only where the lab project exists: `uv sync --group bigquery`.
+bigquery = [
+  "dbt-bigquery==1.12.3",
+]
 dev = [
+  "dbt-core==1.12.7",
+  "dbt-duckdb==1.11.1",
   "detect-secrets==1.5.0",
   "jsonschema==4.26.0",
   "pyright==1.1.414",

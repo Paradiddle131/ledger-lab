@@ -1,0 +1,16 @@
+# The layered models. The engine is a profile target (profiles.yml): DuckDB in the session by
+# default, BigQuery once the lab project is set; model SQL stays the same on both.
+name: ledger_lab
+version: "0.0.0"
+config-version: 2
+profile: ledger_lab
+
+model-paths: ["models"]
+clean-targets: ["target"]
+
+flags:
+  send_anonymous_usage_stats: false
+
+models:
+  ledger_lab:
+    +materialized: view
