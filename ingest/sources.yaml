@@ -146,3 +146,36 @@ sources:
     licence: https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/
     publisher: Department for Transport
     names_people: true
+  # The SEC's Financial Statement Data Sets for the first quarter of four years: each a dated zip of
+  # the numbers on the primary statements of every report filed with XBRL that quarter, as filed,
+  # landed together as the set sec-annual-filings through its step, which keeps the listed
+  # companies' annual-report revenue (ingest/filings/companies.yaml); no quarter lands alone. A
+  # posted quarter is not rewritten as later filings arrive (those go to later quarters), so a
+  # re-fetch verifies; the SEC reprocessed every posted quarter once (December 2024, the 2023 and
+  # 2024 files' last change), and a reprocessing like it moves the hashes and fails the fetch until
+  # re-pinned. The largest is 127,765,057 bytes, a quarter of the kit's cap; the four are held in
+  # memory together before the step runs.
+  sec-annual-filings-2023q1:
+    url: https://www.sec.gov/files/dera/data/financial-statement-data-sets/2023q1.zip
+    sha256: 479638c1be4088fa2ae42d2947468913eaff5ad0f093c412ba4340af8a8f791e  # pragma: allowlist secret
+    licence: https://www.sec.gov/privacy
+    publisher: U.S. Securities and Exchange Commission
+    names_people: false
+  sec-annual-filings-2024q1:
+    url: https://www.sec.gov/files/dera/data/financial-statement-data-sets/2024q1.zip
+    sha256: 94c7894b00903f8ff7186c4250ba1c1daa1bde8b3a0b26fae68f72608b2ffc9b  # pragma: allowlist secret
+    licence: https://www.sec.gov/privacy
+    publisher: U.S. Securities and Exchange Commission
+    names_people: false
+  sec-annual-filings-2025q1:
+    url: https://www.sec.gov/files/dera/data/financial-statement-data-sets/2025q1.zip
+    sha256: 4386e7057cc216b6fc729d8f957998acb831d29be7b16f6d8ed0f6b1ab74eba5  # pragma: allowlist secret
+    licence: https://www.sec.gov/privacy
+    publisher: U.S. Securities and Exchange Commission
+    names_people: false
+  sec-annual-filings-2026q1:
+    url: https://www.sec.gov/files/dera/data/financial-statement-data-sets/2026q1.zip
+    sha256: d18c01c615da8f5cd46273b0dacaeee5b1163f4089171da0f84153a5f3c362f6  # pragma: allowlist secret
+    licence: https://www.sec.gov/privacy
+    publisher: U.S. Securities and Exchange Commission
+    names_people: false
