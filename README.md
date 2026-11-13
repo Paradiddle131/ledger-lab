@@ -42,6 +42,15 @@ The dbt models build on DuckDB in the session by default; setting `LEDGER_LAB_GC
 uv run dbt build --project-dir models --profiles-dir models
 ```
 
+The container stack needs Docker with Compose; the shared database always starts, every other service only under its profile:
+
+```bash
+export LEDGER_LAB_DB_PASSWORD=<any local password>
+make stack-up                 # the shared database
+make stack-up PROFILE=<name>  # plus one service
+make stack-down               # stop everything and drop its volumes
+```
+
 ## Licence
 
 [MIT](LICENSE).

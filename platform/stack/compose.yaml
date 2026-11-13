@@ -1,0 +1,24 @@
+# The lab's container stack: one entry point, `make stack-up [PROFILE=<service>]` / `make stack-down`.
+# The shared database is the core and always starts; every heavier service (ERP, lineage backend,
+# orchestrator, tracing) joins under a profile named after it and starts only when asked for.
+# Configuration comes from the environment; nothing here names an account or holds a credential.
+name: ledger-lab
+
+services:
+  db:
+    image: postgres:16.15-alpine
+    environment:
+      POSTGRES_USER: ${LEDGER_LAB_DB_USER:-ledger_lab}
+      POSTGRES_PASSWORD: ${LEDGER_LAB_DB_PASSWORD:?set LEDGER_LAB_DB_PASSWORD for the stack's database}
+    ports:
+      - "127.0.0.1:${LEDGER_LAB_DB_PORT:-55432}:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\""]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  db-data:

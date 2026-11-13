@@ -4,7 +4,7 @@
 LOADOUT ?= $(or $(shell sed -n 's/^The collection .* is cloned at `\([^`]*\)`.*/\1/p' $(HOME)/.claude/CLAUDE.md 2>/dev/null),../loadout)
 GUARDS := $(LOADOUT)/cloud/githooks
 
-.PHONY: check sync lint typecheck test ids portable scan
+.PHONY: check sync lint typecheck test ids portable scan stack-up stack-down
 
 check: lint typecheck test ids portable scan
 	@echo "make check: all passed"
@@ -33,3 +33,12 @@ portable:
 scan: sync
 	git ls-files -z | xargs -0 uv run detect-secrets-hook
 	@echo "scan: $$(git ls-files | wc -l) tracked files, no secret"
+
+# The container stack: the shared database always, one more service per PROFILE=<name>.
+STACK := docker compose -f platform/stack/compose.yaml
+
+stack-up:
+	$(STACK) $(if $(PROFILE),--profile $(PROFILE)) up -d --wait
+
+stack-down:
+	$(STACK) --profile '*' down --volumes
