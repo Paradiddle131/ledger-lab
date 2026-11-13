@@ -18,10 +18,10 @@ from typing import Any
 import duckdb
 import httpx
 import pytest
+from conftest import landed_file
 
 from ingest import fetch
 from ingest.entities import Record, Register, person_shaped
-from ingest.fetch import landing_path
 from ingest.individuals import KEY_VARIABLE, is_organisation, normalise
 from ingest.uk_transport.spend import (
     BODIES,
@@ -557,6 +557,7 @@ def named_in(cell: str, spellings: set[str]) -> bool:
 @pytest.fixture(scope="module")
 def real() -> Iterator[tuple[dict[str, bytes], list[dict[str, Any]]]]:
     """The served files, downloaded again and verified in memory, and the landed set's rows."""
+    path = landed_file(SET)
     sources = fetch.load_sources(fetch.SOURCES)
     files = {}
     for name, entry in sources.items():
@@ -564,13 +565,13 @@ def real() -> Iterator[tuple[dict[str, bytes], list[dict[str, Any]]]]:
             raw = fetch.download(entry)
             fetch.verify(name, entry, raw)
             files[entry["url"]] = raw
-    yield files, rows(landing_path() / SET)
+    yield files, rows(path)
 
 
 @pytest.mark.landed
 def test_every_month_of_the_year_is_landed_once(real: tuple) -> None:
     files, _ = real
-    counts = profile(landing_path() / SET)
+    counts = profile(landed_file(SET))
     print(counts)
     assert list(counts["months"]) == FISCAL_MONTHS
     assert counts["files"] == len(files) == 12

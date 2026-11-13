@@ -48,8 +48,7 @@ The landed tests need the key the files were landed with for Chicago, and the ne
 
 ```bash
 uv run python -m ingest.fetch gleif-legal-entities  # lands landing/gleif-legal-entities as Parquet
-uv run python -m ingest.fetch chicago-contracts   # lands landing/chicago-contracts as Parquet
-uv run python -m ingest.fetch chicago-payments    # lands landing/chicago-payments as Parquet
+uv run python -m ingest.fetch chicago             # lands landing/chicago-contracts and landing/chicago-payments together as Parquet
 uv run python -m ingest.fetch ecb-rates           # lands landing/ecb-rates as Parquet
 uv run python -m ingest.fetch nl-government-budget  # lands landing/nl-government-budget as Parquet
 uv run python -m ingest.fetch uk-transport-spend-2025  # lands April 2025 to March 2026 as one Parquet set

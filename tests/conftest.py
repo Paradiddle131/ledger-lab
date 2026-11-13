@@ -27,6 +27,16 @@ def load_checked(data: Path, schema: Path) -> dict[str, Any]:
     return doc
 
 
+def landed_file(name: str) -> Path:
+    """A landed file under the landing path; a landed test skips when it is not landed."""
+    from ingest.fetch import landing_path
+
+    path = landing_path() / name
+    if not path.exists():
+        pytest.skip(f"{name} is not landed")
+    return path
+
+
 def load_access() -> dict[str, Any]:
     return load_checked(REPO / "access/personas.yaml", REPO / "access/schema.json")
 

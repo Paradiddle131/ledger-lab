@@ -14,6 +14,7 @@ from pathlib import Path
 
 import duckdb
 import pytest
+from conftest import landed_file
 
 from ingest import fetch
 from ingest.fetch import landing_path
@@ -333,7 +334,7 @@ def test_the_step_refuses_an_archive_that_declares_more_than_the_bound_unzipped(
 
 @pytest.mark.landed
 def test_the_landed_register_holds_complete_records_for_the_vendors_countries() -> None:
-    counts = profile(landing_path() / "gleif-legal-entities")
+    counts = profile(landed_file("gleif-legal-entities"))
     print(counts)
     assert counts["incomplete"] == 0
     assert counts["malformed_leis"] == 0

@@ -12,11 +12,10 @@ from urllib.parse import parse_qs, urlsplit
 import duckdb
 import pytest
 import yaml
-from conftest import REPO
+from conftest import REPO, landed_file
 
 from ingest import fetch
 from ingest.ecb.rates import COLUMNS, RatesError, step
-from ingest.fetch import landing_path
 
 SOURCE = "ecb-rates"
 HEADER = ",".join(COLUMNS)
@@ -181,7 +180,7 @@ def test_the_rates_are_pinned_to_a_closed_period_over_the_covered_years() -> Non
 @pytest.mark.landed
 def test_the_landed_rates_cover_every_working_day_and_no_closing_day() -> None:
     con = duckdb.connect()
-    con.read_parquet(str(landing_path() / SOURCE)).create_view("r")
+    con.read_parquet(str(landed_file(SOURCE))).create_view("r")
     first, last = pinned_period()
     open_days, gaps = working_days(first, last)
     landed_rows = con.execute("SELECT date, currency, rate FROM r").fetchall()

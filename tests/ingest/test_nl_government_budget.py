@@ -8,9 +8,9 @@ from pathlib import Path
 
 import duckdb
 import pytest
+from conftest import landed_file
 
 from ingest import fetch
-from ingest.fetch import landing_path
 from ingest.nl_government.budget import (
     COLUMNS,
     MOMENTS,
@@ -145,7 +145,7 @@ def test_the_profile_counts_moments_per_year_units_and_split_articles(tmp_path: 
 
 @pytest.mark.landed
 def test_each_landed_year_has_its_draft_supplementary_and_outturn_moments() -> None:
-    path = landing_path() / "nl-government-budget"
+    path = landed_file("nl-government-budget")
     counts = profile(path)
     print(counts)
     assert set(COVERED_WITH_OUTTURN) <= set(counts["moments"])
