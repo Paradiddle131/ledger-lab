@@ -147,7 +147,15 @@ def test_the_live_check_reads_its_expected_values_from_these_definitions() -> No
     assert expected.query_cap_limit == "/d/project"
     assert expected.region in FREE_REGIONS
     assert expected.kill_threshold_bounds == (1, 10)
-    assert expected.budget_thresholds == (0.01, 0.03, 0.05, 1.0)
+    assert expected.budget_thresholds == tuple(
+        (t, "CURRENT_SPEND") for t in (0.01, 0.03, 0.05, 1.0)
+    )
+    assert expected.budget_period == "MONTH"
+    assert expected.kill_switch_roles == (
+        "roles/billing.projectManager",
+        "roles/eventarc.eventReceiver",
+        "roles/workflows.invoker",
+    )
     assert expected.workflow_source == (GCP / "kill_switch.workflow.yaml").read_text()
     unresolved = [k for k, v in vars(expected).items() if k != "workflow_source" and "${" in str(v)]
     assert unresolved == []

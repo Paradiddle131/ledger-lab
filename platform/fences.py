@@ -94,8 +94,28 @@ class Declared:
     trigger_event_type: str
     budget_name: str
     budget_units: str
-    budget_thresholds: tuple[float, ...]
+    budget_thresholds: tuple[tuple[float, str], ...]
     budget_credits: str
+    budget_period: str
+    kill_switch_roles: tuple[str, ...]
+
+
+# What the Budgets API applies to a field the definition leaves unset.
+BUDGET_DEFAULT_PERIOD = "MONTH"
+BUDGET_DEFAULT_SPEND_BASIS = "CURRENT_SPEND"
+KILL_SWITCH_MEMBER = "serviceAccount:${google_service_account.kill_switch.email}"
+
+
+def kill_switch_roles() -> tuple[str, ...]:
+    """The project roles the definition grants the kill switch's account."""
+    return tuple(
+        sorted(
+            unquote(body["role"])
+            for (rtype, _), body in blocks("resource").items()
+            if rtype == "google_project_iam_member"
+            and unquote(body["member"]) == KILL_SWITCH_MEMBER
+        )
+    )
 
 
 def declared() -> Declared:
@@ -103,6 +123,7 @@ def declared() -> Declared:
     workflow = one("google_workflows_workflow")
     trigger = one("google_eventarc_trigger")
     budget = one("google_billing_budget")
+    (budget_filter,) = budget["budget_filter"]
     (criterion,) = trigger["matching_criteria"]
     (threshold_check,) = variable("kill_threshold")["validation"]
     return Declared(
@@ -119,6 +140,16 @@ def declared() -> Declared:
         trigger_event_type=unquote(criterion["value"]),
         budget_name=unquote(budget["display_name"]),
         budget_units=unquote(budget["amount"][0]["specified_amount"][0]["units"]),
-        budget_thresholds=tuple(sorted(r["threshold_percent"] for r in budget["threshold_rules"])),
-        budget_credits=unquote(budget["budget_filter"][0]["credit_types_treatment"]),
+        budget_thresholds=tuple(
+            sorted(
+                (
+                    r["threshold_percent"],
+                    unquote(r.get("spend_basis", BUDGET_DEFAULT_SPEND_BASIS)),
+                )
+                for r in budget["threshold_rules"]
+            )
+        ),
+        budget_credits=unquote(budget_filter["credit_types_treatment"]),
+        budget_period=unquote(budget_filter.get("calendar_period", BUDGET_DEFAULT_PERIOD)),
+        kill_switch_roles=kill_switch_roles(),
     )
