@@ -30,6 +30,7 @@ from jsonschema import Draft202012Validator
 
 from ingest.chicago import contracts
 from ingest.ecb import rates
+from ingest.nl_government import budget
 
 HERE = Path(__file__).resolve().parent
 SOURCES = HERE / "sources.yaml"
@@ -49,6 +50,7 @@ MAX_BYTES = 512 * 1024 * 1024
 STEPS: dict[str, Callable[[bytes], bytes]] = {
     "chicago-contracts": contracts.step,
     "ecb-rates": rates.step,
+    "nl-government-budget": budget.step,
 }
 
 
