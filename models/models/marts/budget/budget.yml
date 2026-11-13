@@ -1,0 +1,218 @@
+models:
+  - name: budget_against_outturn
+    description: >
+      The Dutch central government's budget against its outturn: one row per budget line, year
+      and kind of amount, for the fiscal years the calendar covers, each budget moment in its own
+      column, the year's current budget and the moment it came from, and the outturn in its own
+      column beside it, never in place of a budget figure. A line is one article as the publisher
+      serves it; an article served on two rows that each carry part of its moments is one line,
+      counted once. A moment the year has not reached is null on every line, a real zero is zero.
+      Amounts are euros; commitments, cash expenditure and receipts are separate rows and never
+      add up. The file carries budget lines, not payments to anyone, so no payments rows come
+      from it. Source: Ministerie van Financiën (Rijksbegrotingsstaten), CC0 1.0.
+    columns:
+      - name: budget_line_key
+        description: >
+          The line's key: entity, year, kind, chapter code, article number and the line's place
+          among the lines sharing that code (`nl-government-2024-U-IX-1-1`).
+        data_tests:
+          - unique
+          - not_null
+      - name: entity_id
+        description: The entity, as in the fiscal calendars and access/personas.yaml.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [nl-government]
+      - name: currency
+        description: The currency of every amount on the row.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [EUR]
+      - name: fiscal_year
+        description: >
+          The budget year, a calendar year; only the years the fiscal calendar covers for the
+          entity (`fiscal_periods`) appear.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('fiscal_periods')
+                field: fiscal_year
+      - name: kind
+        description: "`V` commitments, `U` cash expenditure, `O` receipts; never added together."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [V, U, O]
+      - name: chapter_code
+        description: The budget chapter's code as served; with the name, since one code can name several funds.
+        data_tests:
+          - not_null
+      - name: chapter_name
+        description: The chapter's name, trimmed and repaired.
+        data_tests:
+          - not_null
+      - name: article_number
+        description: The article's number within its chapter, as served.
+        data_tests:
+          - not_null
+      - name: article_name
+        description: The article's name, trimmed and repaired, from the line's first served row.
+        data_tests:
+          - not_null
+      - name: line_in_article
+        description: >
+          The line's place, from 1 in served order, among the lines of one year, kind, chapter
+          code and article number: 2 or more only where different articles share a code.
+        data_tests:
+          - not_null
+      - name: served_rows
+        description: How many served rows the line is made of (2 for an article served on two rows).
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2]
+                quote: false
+      - name: draft_budget_eur
+        description: The draft budget (`StandOWB`), in euros; null when the file has no draft for the year.
+      - name: first_supplementary_eur
+        description: >
+          The budget after the first supplementary budget (`StandO1`), in euros; null when the
+          year has not reached it.
+      - name: september_supplementary_eur
+        description: >
+          The budget after the September supplementary budget (`StandSBS`), in euros; null when
+          the year has not reached it or, before 2023, had none.
+      - name: second_supplementary_eur
+        description: >
+          The budget after the second supplementary budget (`StandO2`), in euros; null when the
+          year has not reached it.
+      - name: current_budget_eur
+        description: >
+          The year's current budget in euros: the figure of the latest budget moment the year has
+          reached (`current_budget_moment`), a real zero included; never the outturn.
+        data_tests:
+          - not_null
+      - name: current_budget_moment
+        description: The budget moment `current_budget_eur` comes from; never `Realisatie`.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [StandOWB, StandO1, StandSBS, StandO2]
+      - name: outturn_eur
+        description: >
+          The outturn (`Realisatie`), in euros, beside the current budget it is compared with;
+          null until the year's outturn is published.
+
+unit_tests:
+  - name: the_latest_reached_moment_is_the_current_budget
+    description: >
+      Real served rows. The King's 2024 allowance has every moment: the current budget is the
+      second supplementary figure, and the outturn stays in its own column. The unallocated
+      reserve of 2024, served on two rows, falls to a real zero at the second supplementary
+      budget, and that zero is the current figure, not the September one before it.
+    model: budget_against_outturn
+    given:
+      - input: ref('stg_nl_government__budget_moments')
+        rows:
+          - {source_row: 5702, fiscal_year: 2024, kind: U, chapter_code: I, chapter_name: De Koning, article_number: "1", article_name: Grondwettelijke uitkering aan de leden van het Koninklijk Huis, moment: StandOWB, amount_eur: 11640000}
+          - {source_row: 5702, fiscal_year: 2024, kind: U, chapter_code: I, chapter_name: De Koning, article_number: "1", article_name: Grondwettelijke uitkering aan de leden van het Koninklijk Huis, moment: StandO1, amount_eur: 11640000}
+          - {source_row: 5702, fiscal_year: 2024, kind: U, chapter_code: I, chapter_name: De Koning, article_number: "1", article_name: Grondwettelijke uitkering aan de leden van het Koninklijk Huis, moment: StandSBS, amount_eur: 11895000}
+          - {source_row: 5702, fiscal_year: 2024, kind: U, chapter_code: I, chapter_name: De Koning, article_number: "1", article_name: Grondwettelijke uitkering aan de leden van het Koninklijk Huis, moment: StandO2, amount_eur: 11895000}
+          - {source_row: 5702, fiscal_year: 2024, kind: U, chapter_code: I, chapter_name: De Koning, article_number: "1", article_name: Grondwettelijke uitkering aan de leden van het Koninklijk Huis, moment: Realisatie, amount_eur: 12043000}
+          - {source_row: 5798, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "10", article_name: Nog onverdeeld, moment: StandOWB, amount_eur: 154748000}
+          - {source_row: 5798, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "10", article_name: Nog onverdeeld, moment: StandO1, amount_eur: 387279000}
+          - {source_row: 5798, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "10", article_name: Nog onverdeeld, moment: StandSBS, amount_eur: 0}
+          - {source_row: 5798, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "10", article_name: Nog onverdeeld, moment: StandO2, amount_eur: 0}
+          - {source_row: 5798, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "10", article_name: Nog onverdeeld, moment: Realisatie, amount_eur: 0}
+          - {source_row: 5799, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "10", article_name: Nog onverdeeld, moment: StandOWB, amount_eur: 0}
+          - {source_row: 5799, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "10", article_name: Nog onverdeeld, moment: StandO1, amount_eur: 0}
+          - {source_row: 5799, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "10", article_name: Nog onverdeeld, moment: StandSBS, amount_eur: 54112000}
+          - {source_row: 5799, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "10", article_name: Nog onverdeeld, moment: StandO2, amount_eur: 0}
+          - {source_row: 5799, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "10", article_name: Nog onverdeeld, moment: Realisatie, amount_eur: 0}
+      - input: ref('fiscal_periods')
+        rows:
+          - {entity_id: nl-government, fiscal_year: 2024}
+    expect:
+      rows:
+        - {budget_line_key: nl-government-2024-U-I-1-1, served_rows: 1, second_supplementary_eur: 11895000, current_budget_eur: 11895000, current_budget_moment: StandO2, outturn_eur: 12043000}
+        - {budget_line_key: nl-government-2024-U-IX-10-1, served_rows: 2, september_supplementary_eur: 54112000, second_supplementary_eur: 0, current_budget_eur: 0, current_budget_moment: StandO2, outturn_eur: 0}
+
+  - name: outturn_never_replaces_the_budget
+    description: >
+      Real served rows of the King's allowance in 2026 and 2025. In 2026 the file has the draft
+      and the September supplementary budget only, so the first and second supplementary figures
+      and the outturn are null, not zero, and the current budget is the September figure; the
+      zero served as 2026's outturn never becomes a budget figure. In 2025 the outturn is
+      published and stays beside the current budget, which is still the second supplementary
+      figure.
+    model: budget_against_outturn
+    given:
+      - input: ref('stg_nl_government__budget_moments')
+        rows:
+          - {source_row: 6271, fiscal_year: 2025, kind: U, chapter_code: I, chapter_name: De Koning, article_number: "1", article_name: Grondwettelijke uitkering aan de leden van het Koninklijk Huis, moment: StandOWB, amount_eur: 12422000}
+          - {source_row: 6271, fiscal_year: 2025, kind: U, chapter_code: I, chapter_name: De Koning, article_number: "1", article_name: Grondwettelijke uitkering aan de leden van het Koninklijk Huis, moment: StandO1, amount_eur: 37266000}
+          - {source_row: 6271, fiscal_year: 2025, kind: U, chapter_code: I, chapter_name: De Koning, article_number: "1", article_name: Grondwettelijke uitkering aan de leden van het Koninklijk Huis, moment: StandSBS, amount_eur: 12422000}
+          - {source_row: 6271, fiscal_year: 2025, kind: U, chapter_code: I, chapter_name: De Koning, article_number: "1", article_name: Grondwettelijke uitkering aan de leden van het Koninklijk Huis, moment: StandO2, amount_eur: 12422000}
+          - {source_row: 6271, fiscal_year: 2025, kind: U, chapter_code: I, chapter_name: De Koning, article_number: "1", article_name: Grondwettelijke uitkering aan de leden van het Koninklijk Huis, moment: Realisatie, amount_eur: 12452000}
+          - {source_row: 6865, fiscal_year: 2026, kind: U, chapter_code: I, chapter_name: De Koning, article_number: "1", article_name: Grondwettelijke uitkering aan de leden van het Koninklijk Huis, moment: StandOWB, amount_eur: 12571000}
+          - {source_row: 6865, fiscal_year: 2026, kind: U, chapter_code: I, chapter_name: De Koning, article_number: "1", article_name: Grondwettelijke uitkering aan de leden van het Koninklijk Huis, moment: StandO1, amount_eur: 0}
+          - {source_row: 6865, fiscal_year: 2026, kind: U, chapter_code: I, chapter_name: De Koning, article_number: "1", article_name: Grondwettelijke uitkering aan de leden van het Koninklijk Huis, moment: StandSBS, amount_eur: 12571000}
+          - {source_row: 6865, fiscal_year: 2026, kind: U, chapter_code: I, chapter_name: De Koning, article_number: "1", article_name: Grondwettelijke uitkering aan de leden van het Koninklijk Huis, moment: StandO2, amount_eur: 0}
+          - {source_row: 6865, fiscal_year: 2026, kind: U, chapter_code: I, chapter_name: De Koning, article_number: "1", article_name: Grondwettelijke uitkering aan de leden van het Koninklijk Huis, moment: Realisatie, amount_eur: 0}
+      - input: ref('fiscal_periods')
+        rows:
+          - {entity_id: nl-government, fiscal_year: 2025}
+          - {entity_id: nl-government, fiscal_year: 2026}
+    expect:
+      rows:
+        - {budget_line_key: nl-government-2025-U-I-1-1, first_supplementary_eur: 37266000, second_supplementary_eur: 12422000, current_budget_eur: 12422000, current_budget_moment: StandO2, outturn_eur: 12452000}
+        - {budget_line_key: nl-government-2026-U-I-1-1, first_supplementary_eur: null, second_supplementary_eur: null, current_budget_eur: 12571000, current_budget_moment: StandSBS, outturn_eur: null}
+
+  - name: an_article_on_two_rows_is_one_line_and_articles_sharing_a_code_stay_apart
+    description: >
+      Real served rows. The 2024 taxes article is served on two rows, one carrying the draft and
+      first supplementary figures, the other the September one, both repeating the second
+      supplementary figure and the outturn: one line, each figure once. The Infrastructure Fund
+      serves two different main-roads articles under one code and one name in 2022, each with its
+      own figure at every moment: two lines, neither merged into the other.
+    model: budget_against_outturn
+    given:
+      - input: ref('stg_nl_government__budget_moments')
+        rows:
+          - {source_row: 5796, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "1", article_name: Belastingen, moment: StandOWB, amount_eur: 3475108000}
+          - {source_row: 5796, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "1", article_name: Belastingen, moment: StandO1, amount_eur: 3602111000}
+          - {source_row: 5796, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "1", article_name: Belastingen, moment: StandSBS, amount_eur: 0}
+          - {source_row: 5796, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "1", article_name: Belastingen, moment: StandO2, amount_eur: 3993674000}
+          - {source_row: 5796, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "1", article_name: Belastingen, moment: Realisatie, amount_eur: 3918024000}
+          - {source_row: 5797, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "1", article_name: Belastingen, moment: StandOWB, amount_eur: 0}
+          - {source_row: 5797, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "1", article_name: Belastingen, moment: StandO1, amount_eur: 0}
+          - {source_row: 5797, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "1", article_name: Belastingen, moment: StandSBS, amount_eur: 4053750000}
+          - {source_row: 5797, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "1", article_name: Belastingen, moment: StandO2, amount_eur: 3993674000}
+          - {source_row: 5797, fiscal_year: 2024, kind: U, chapter_code: IX, chapter_name: Financiën en Nationale Schuld, article_number: "1", article_name: Belastingen, moment: Realisatie, amount_eur: 3918024000}
+          - {source_row: 4605, fiscal_year: 2022, kind: U, chapter_code: A, chapter_name: Infrastructuurfonds, article_number: "12", article_name: Hoofdwegennet, moment: StandOWB, amount_eur: 2982240000}
+          - {source_row: 4605, fiscal_year: 2022, kind: U, chapter_code: A, chapter_name: Infrastructuurfonds, article_number: "12", article_name: Hoofdwegennet, moment: StandO1, amount_eur: 3135139000}
+          - {source_row: 4605, fiscal_year: 2022, kind: U, chapter_code: A, chapter_name: Infrastructuurfonds, article_number: "12", article_name: Hoofdwegennet, moment: StandSBS, amount_eur: 0}
+          - {source_row: 4605, fiscal_year: 2022, kind: U, chapter_code: A, chapter_name: Infrastructuurfonds, article_number: "12", article_name: Hoofdwegennet, moment: StandO2, amount_eur: 3272650000}
+          - {source_row: 4605, fiscal_year: 2022, kind: U, chapter_code: A, chapter_name: Infrastructuurfonds, article_number: "12", article_name: Hoofdwegennet, moment: Realisatie, amount_eur: 3176794000}
+          - {source_row: 4606, fiscal_year: 2022, kind: U, chapter_code: A, chapter_name: Infrastructuurfonds, article_number: "12", article_name: Hoofdwegennet, moment: StandOWB, amount_eur: 2879349000}
+          - {source_row: 4606, fiscal_year: 2022, kind: U, chapter_code: A, chapter_name: Infrastructuurfonds, article_number: "12", article_name: Hoofdwegennet, moment: StandO1, amount_eur: 3032003000}
+          - {source_row: 4606, fiscal_year: 2022, kind: U, chapter_code: A, chapter_name: Infrastructuurfonds, article_number: "12", article_name: Hoofdwegennet, moment: StandSBS, amount_eur: 0}
+          - {source_row: 4606, fiscal_year: 2022, kind: U, chapter_code: A, chapter_name: Infrastructuurfonds, article_number: "12", article_name: Hoofdwegennet, moment: StandO2, amount_eur: 3077394000}
+          - {source_row: 4606, fiscal_year: 2022, kind: U, chapter_code: A, chapter_name: Infrastructuurfonds, article_number: "12", article_name: Hoofdwegennet, moment: Realisatie, amount_eur: 2952254000}
+      - input: ref('fiscal_periods')
+        rows:
+          - {entity_id: nl-government, fiscal_year: 2022}
+          - {entity_id: nl-government, fiscal_year: 2024}
+    expect:
+      rows:
+        - {budget_line_key: nl-government-2022-A-12-1, served_rows: 1, draft_budget_eur: 2982240000, september_supplementary_eur: null, outturn_eur: 3176794000}
+        - {budget_line_key: nl-government-2022-A-12-2, served_rows: 1, draft_budget_eur: 2879349000, september_supplementary_eur: null, outturn_eur: 2952254000}
+        - {budget_line_key: nl-government-2024-U-IX-1-1, served_rows: 2, draft_budget_eur: 3475108000, september_supplementary_eur: 4053750000, second_supplementary_eur: 3993674000, outturn_eur: 3918024000}

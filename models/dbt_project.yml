@@ -21,6 +21,9 @@ vars:
   # lands under LEDGER_LAB_LANDING, or `sample`, the committed fortnight of real rates the tests
   # pass explicitly.
   ecb_rates: landed
+  # Where the Dutch budget models read the budget statements: `landed`, the file the fetch kit
+  # lands under LEDGER_LAB_LANDING, or `sample`, the committed real rows the tests pass explicitly.
+  nl_government_budget: landed
 
 models:
   ledger_lab:
@@ -28,4 +31,6 @@ models:
     calendars:
       +materialized: table
     reference:
+      +materialized: table
+    marts:
       +materialized: table
