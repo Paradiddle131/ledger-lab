@@ -1,0 +1,12 @@
+sources:
+  - name: landing
+    description: >
+      The landed files under the landing path (`LEDGER_LAB_LANDING`, default `landing/`), read in
+      place as Parquet; `python -m ingest.fetch <source>` lands each.
+    meta:
+      external_location: "read_parquet('{{ env_var('LEDGER_LAB_LANDING', 'landing') }}/{name}')"
+    tables:
+      - name: chicago-contracts
+      - name: chicago-payments
+      - name: uk-transport-spend-2025
+      - name: gleif-legal-entities
