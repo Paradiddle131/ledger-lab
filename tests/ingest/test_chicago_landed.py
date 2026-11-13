@@ -1,15 +1,17 @@
 """The landed Chicago files: their profiles, a leak check across each file's rows, and a count of
 what one file hashes and the other shows in clear.
 
-These need the files landed under the landing path and `LEDGER_LAB_HASH_KEY` set to the key they
-were landed with (`pytest -m landed`). The leak check finds a cell's words with its own reading of
-the cell (letters and digits by `str.isalnum`, plus every stretch of the cell as served from one
-word's start to a later word's end) and hashes each run as a person's name, so it shares no
-tokenising with the step. It cannot see a hashed name written in another order; the step blanks
-those, and nothing checks them here. It asserts on free-text descriptions and code columns, and
-only counts vendor, department and city cells, where a clear organisation's name may contain a
-hashed name by design. Across the two files it only counts: a name one file hashes may sit in
-clear in the other's descriptions, the known remaining gap.
+These need the files landed under the landing path, the legal-entity register among them, and
+`LEDGER_LAB_HASH_KEY` set to the key they were landed with (`pytest -m landed`). Every clear vendor
+name is an organisation by its legal form or by the register's word, never a person-shaped name.
+The leak check finds a cell's words with its own reading of the cell (letters and digits by
+`str.isalnum`, plus every stretch of the cell as served from one word's start to a later word's
+end) and hashes each run as a person's name, so it shares no tokenising with the step. It cannot
+see a hashed name written in another order; the step blanks those, and nothing checks them here.
+It asserts on free-text descriptions and code columns, and only counts vendor, department and city
+cells, where a clear organisation's name may contain a hashed name by design.
+Across the two files it only counts: a name one file hashes may sit in clear in the other's
+descriptions, the known remaining gap.
 """
 
 from collections.abc import Callable
@@ -19,6 +21,7 @@ import duckdb
 import pytest
 
 from ingest.chicago import contracts, payments
+from ingest.entities import Register, person_shaped
 from ingest.fetch import landing_path
 from ingest.individuals import is_organisation, person_hasher
 
@@ -86,9 +89,15 @@ def holding(
 
 
 def clear_names_are_organisations(path: Path, column: str) -> None:
+    """Every clear name is an organisation by its legal form or by the landed register's word, and
+    the register's word is never taken for a person-shaped name."""
     in_clear = [cell for cell, _ in cells(path, column)]
     assert in_clear, "some names are organisations by evidence"
-    assert [n for n in in_clear if not is_organisation(n)] == []
+    register = Register.landed()
+    vouched = [n for n in in_clear if not is_organisation(n)]
+    print(f"{len(vouched)} clear names on the register's word alone")
+    assert [n for n in vouched if not register.vouches(n)] == []
+    assert not any(person_shaped(n) for n in vouched)
 
 
 def test_the_landed_contracts_carry_their_mess_and_no_hashed_name_in_a_description() -> None:

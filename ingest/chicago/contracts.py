@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from ingest.chicago.table import Table, counter, land
+from ingest.entities import Register
 
 COLUMNS: tuple[str, ...] = (
     "purchase_order_description",
@@ -75,9 +76,12 @@ class Profile(TypedDict):
     order_number_formats: dict[str, int]
 
 
-def step(raw: bytes, env: Mapping[str, str] | None = None) -> bytes:
-    """The verified CSV as Parquet, with every vendor who may be a person hashed."""
-    return land(raw, TABLE, env)
+def step(
+    raw: bytes, env: Mapping[str, str] | None = None, register: Register | None = None
+) -> bytes:
+    """The verified CSV as Parquet, with every vendor who may be a person hashed; the register is
+    the landed one unless given."""
+    return land(raw, TABLE, env, register)
 
 
 def profile(path: Path) -> Profile:

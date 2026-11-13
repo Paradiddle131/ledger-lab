@@ -2,7 +2,8 @@
 knows, every payee who may be a person hashed, and written as text Parquet, blanks as nulls, without
 the rows ever touching disk; and the one-number queries their profiles run over the landed file.
 
-A payee is hashed exactly when the pseudonymiser finds no evidence of an organisation, and the
+A payee is hashed exactly when the pseudonymiser finds no evidence of an organisation, a legal form
+in the name or a register record that vouches for the whole name (`ingest/entities.py`), and the
 table's identifier for payees (a vendor id) is hashed on that row with it (`id:`, a keyed hash that
 still joins) and stays in clear on a row whose name is clear: an id carrying both a person-like and
 a company name appears once in clear beside the company and once as a hash beside the person's
@@ -24,6 +25,7 @@ from pathlib import Path
 
 import duckdb
 
+from ingest.entities import Register
 from ingest.individuals import identifier_hasher, introduces_a_person, pseudonymiser
 from ingest.scrub import HashedNames, parquet_from_csv
 
@@ -53,11 +55,13 @@ class Table:
         return tuple(c for c in self.columns if c not in self.dropped)
 
 
-def scrub(rows: list[dict[str, str]], table: Table, env: Mapping[str, str] | None) -> None:
+def scrub(
+    rows: list[dict[str, str]], table: Table, register: Register, env: Mapping[str, str] | None
+) -> None:
     """Every row changed in place: hashed payees, their identifiers and personal cells, dropped
     columns, and descriptions that name a hashed payee or a person."""
-    hide, as_id = pseudonymiser(env), identifier_hasher(env)
     names = {row[table.name] for row in rows}
+    hide, as_id = pseudonymiser(env, register.vouched(names)), identifier_hasher(env)
     hidden = {n: h for n in names if (h := hide(n or None)) not in (n, None)}
     found = HashedNames(hidden)
     for row in rows:
@@ -75,16 +79,23 @@ def scrub(rows: list[dict[str, str]], table: Table, env: Mapping[str, str] | Non
                 row[column] = ""
 
 
-def land(raw: bytes, table: Table, env: Mapping[str, str] | None = None) -> bytes:
-    """The verified CSV as text Parquet with every payee who may be a person hashed."""
+def land(
+    raw: bytes,
+    table: Table,
+    env: Mapping[str, str] | None = None,
+    register: Register | None = None,
+) -> bytes:
+    """The verified CSV as text Parquet with every payee who may be a person hashed, the names the
+    register (the landed one unless given) vouches for kept in clear."""
     pseudonymiser(env)  # refuses before any row is read
+    register = Register.landed() if register is None else register
     reader = csv.DictReader(io.StringIO(raw.decode("utf-8"), newline=""))
     if tuple(reader.fieldnames or ()) != table.columns:
         raise TableError("the served columns differ from the table's")
     rows = list(reader)
     for row in rows:
         table.check(row)
-    scrub(rows, table, env)
+    scrub(rows, table, register, env)
     out = io.StringIO()
     writer = csv.DictWriter(out, table.landed)
     writer.writeheader()

@@ -19,7 +19,8 @@ outside them is refused, not hashed, since those columns name the payer, and a n
 in what the Department publishes that a re-pin must see.
 
 A supplier who is or may be a person (the pseudonymiser's classifier finds no evidence of an
-organisation; the Department's bodies in `BODIES` are known ones) leaves only as a keyed hash
+organisation; the Department's bodies in `BODIES` and the names the legal-entity register vouches
+for, `ingest/entities.py`, are known ones) leaves only as a keyed hash
 (`person:`). Their row, and a row the Department itself redacted (supplier `REDACTED`), also keeps
 no description and no postal code, and its transaction number leaves as a keyed identifier hash
 (`id:`, the shared one): a reference carried only by such rows never appears in clear, while one
@@ -80,6 +81,7 @@ from urllib.parse import urlsplit
 import duckdb
 
 from ingest import StepError
+from ingest.entities import Register
 from ingest.individuals import (
     hash_key,
     identifier_hasher,
@@ -225,15 +227,18 @@ def read_month(source: str, raw: bytes) -> tuple[str, list[dict[str, str]]]:
     return months.pop(), rows
 
 
-def scrub(rows: list[dict[str, str]], env: Mapping[str, str] | None) -> None:
+def scrub(rows: list[dict[str, str]], register: Register, env: Mapping[str, str] | None) -> None:
     """Every row of the set changed in place: see the module's account."""
     as_person, as_id = person_hasher(env), identifier_hasher(env)
     introduced = {m["name"] for row in rows for m in INITIALLED.finditer(row["item_text"])}
+    suppliers = {row["supplier"] for row in rows}
+    known = (*BODIES, *register.vouched(suppliers))
+    clear = {s for s in suppliers if is_organisation(s, known)}
     hashed: set[str] = set()
     for row in rows:
         supplier = normalise(row["supplier"])
         redacted = supplier == REDACTED
-        if redacted or (supplier and not is_organisation(row["supplier"], BODIES)):
+        if redacted or (supplier and row["supplier"] not in clear):
             if not redacted:
                 hashed.add(row["supplier"])
                 row["supplier"] = as_person(row["supplier"])
@@ -250,9 +255,15 @@ def scrub(rows: list[dict[str, str]], env: Mapping[str, str] | None) -> None:
             row["item_text"] = ""
 
 
-def step(files: Mapping[str, bytes], env: Mapping[str, str] | None = None) -> bytes:
-    """The verified months, by URL, as one text Parquet set with every possible person hashed."""
+def step(
+    files: Mapping[str, bytes],
+    env: Mapping[str, str] | None = None,
+    register: Register | None = None,
+) -> bytes:
+    """The verified months, by URL, as one text Parquet set with every possible person hashed, the
+    names the register (the landed one unless given) vouches for kept in clear."""
     hash_key(env)  # refuses before any row is read
+    register = Register.landed() if register is None else register
     rows, seen = [], set()
     for url, raw in files.items():
         source = Path(urlsplit(url).path).name
@@ -263,7 +274,7 @@ def step(files: Mapping[str, bytes], env: Mapping[str, str] | None = None) -> by
         rows += month_rows
     if sorted(seen) != MONTHS:
         raise SpendError(f"{len(seen)} months, not the twelve of one April-to-March year")
-    scrub(rows, env)
+    scrub(rows, register, env)
     out = io.StringIO()
     writer = csv.DictWriter(out, COLUMNS, quoting=csv.QUOTE_ALL)
     writer.writeheader()

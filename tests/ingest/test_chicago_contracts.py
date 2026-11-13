@@ -14,9 +14,12 @@ import pytest
 from ingest import fetch
 from ingest.chicago.contracts import COLUMNS, profile, step
 from ingest.chicago.table import TableError
+from ingest.entities import Register
 from ingest.individuals import KEY_VARIABLE
 
 ENV = {KEY_VARIABLE: "k" * 32}
+# A register that vouches for no name, so only the classifier decides.
+NONE = Register(())
 ORG = {
     "purchase_order_description": "HORSE TRAILERS",
     "purchase_order_contract_number": "C017892",
@@ -60,7 +63,7 @@ def served(*rows: dict[str, str], columns: tuple[str, ...] = COLUMNS) -> bytes:
 
 def landed(tmp_path: Path, *rows: dict[str, str]) -> Path:
     path = tmp_path / "chicago-contracts"
-    path.write_bytes(step(served(*rows), ENV))
+    path.write_bytes(step(served(*rows), ENV, NONE))
     return path
 
 
@@ -108,12 +111,12 @@ def test_a_vendor_id_stays_in_clear_beside_a_clear_name(tmp_path: Path) -> None:
 
 def test_the_step_refuses_without_the_hash_key() -> None:
     with pytest.raises(Exception, match=KEY_VARIABLE):
-        step(served(PERSON), {})
+        step(served(PERSON), {}, NONE)
 
 
 def test_the_step_refuses_a_table_whose_columns_changed() -> None:
     with pytest.raises(TableError):
-        step(served(ORG, columns=(*COLUMNS, "new_column")), ENV)
+        step(served(ORG, columns=(*COLUMNS, "new_column")), ENV, NONE)
 
 
 def test_the_fetch_kit_lands_the_contracts_only_through_this_step() -> None:

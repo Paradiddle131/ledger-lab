@@ -14,9 +14,12 @@ import pytest
 from ingest import fetch
 from ingest.chicago.payments import COLUMNS, profile, step
 from ingest.chicago.table import TableError
+from ingest.entities import Register
 from ingest.individuals import KEY_VARIABLE
 
 ENV = {KEY_VARIABLE: "k" * 32}
+# A register that vouches for no name, so only the classifier decides.
+NONE = Register(())
 ITEMISED = {
     "voucher_number": "PV84248442063",
     "amount": "45111.74",
@@ -65,7 +68,7 @@ def served(*rows: dict[str, str], columns: tuple[str, ...] = COLUMNS) -> bytes:
 
 def landed(tmp_path: Path, *rows: dict[str, str]) -> Path:
     path = tmp_path / "chicago-payments"
-    path.write_bytes(step(served(*rows), ENV))
+    path.write_bytes(step(served(*rows), ENV, NONE))
     return path
 
 
@@ -102,19 +105,19 @@ def test_an_organisation_without_a_legal_form_is_hashed_as_a_person(tmp_path: Pa
 
 def test_the_step_refuses_without_the_hash_key() -> None:
     with pytest.raises(Exception, match=KEY_VARIABLE):
-        step(served(PERSON), {})
+        step(served(PERSON), {}, NONE)
 
 
 def test_the_step_refuses_a_table_whose_columns_changed() -> None:
     with pytest.raises(TableError):
-        step(served(ITEMISED, columns=(*COLUMNS, "payee_address")), ENV)
+        step(served(ITEMISED, columns=(*COLUMNS, "payee_address")), ENV, NONE)
 
 
 @pytest.mark.parametrize("column", ["voucher_number", "contract_number"])
 @pytest.mark.parametrize("words", ["JANE EXAMPLE", "EXAMPLE", "JANE 2"])
 def test_the_step_refuses_a_code_column_that_reads_as_words(column: str, words: str) -> None:
     with pytest.raises(TableError, match=column):
-        step(served({**PERSON, column: words}), ENV)
+        step(served({**PERSON, column: words}), ENV, NONE)
 
 
 @pytest.mark.parametrize(
