@@ -27,9 +27,21 @@ def load_checked(data: Path, schema: Path) -> dict[str, Any]:
     return doc
 
 
+def load_access() -> dict[str, Any]:
+    return load_checked(REPO / "access/personas.yaml", REPO / "access/schema.json")
+
+
 @pytest.fixture(scope="session")
 def access() -> dict[str, Any]:
-    return load_checked(REPO / "access/personas.yaml", REPO / "access/schema.json")
+    return load_access()
+
+
+def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+    """A test taking `persona` runs once per persona, `agent` once per persona of kind agent."""
+    for name, kinds in (("persona", {"human", "agent"}), ("agent", {"agent"})):
+        if name in metafunc.fixturenames:
+            personas = [p["id"] for p in load_access()["personas"] if p["kind"] in kinds]
+            metafunc.parametrize(name, personas)
 
 
 @pytest.fixture(scope="session")
@@ -73,7 +85,9 @@ def as_persona(
 
     def act(persona: str) -> duckdb.DuckDBPyConnection:
         who = identity(access, persona)
-        opened.append(open_local(who, warehouse, tmp_path / f"{len(opened)}-{persona}.duckdb"))
+        directory = tmp_path / str(len(opened))
+        directory.mkdir()
+        opened.append(open_local(who, warehouse, directory))
         return opened[-1]
 
     yield act
