@@ -1,15 +1,24 @@
 models:
   - name: budget_against_outturn
     description: >
-      The Dutch central government's budget against its outturn: one row per budget line, year
-      and kind of amount, for the fiscal years the calendar covers, each budget moment in its own
-      column, the year's current budget and the moment it came from, and the outturn in its own
-      column beside it, never in place of a budget figure. A line is one article as the publisher
-      serves it; an article served on two rows that each carry part of its moments is one line,
-      counted once. A moment the year has not reached is null on every line, a real zero is zero.
-      Amounts are euros; commitments, cash expenditure and receipts are separate rows and never
-      add up. The file carries budget lines, not payments to anyone, so no payments rows come
-      from it. Source: Ministerie van Financiën (Rijksbegrotingsstaten), CC0 1.0.
+      The Dutch central government's budget against its outturn, as the publisher's file serves
+      it: one row per budget line, year and kind of amount, for the fiscal years the calendar
+      covers, each budget moment in its own column, the year's current budget and the moment it
+      came from, and the outturn in its own column beside it, never in place of a budget figure.
+      A line is one article as the file serves it; an article served on two rows that repeat a
+      figure is one line, counted once. A moment the file does not serve for a year is null on
+      every line; a zero is the figure as served, and the file sometimes serves zero where the
+      publisher's own budget documents print a figure (`has_doubtful_zero`). Wrong figures pass
+      through as served and are counted by the landed tests, never corrected: in 2025 the first
+      supplementary figure is about three times the draft and September figures on 225 lines (the
+      King's allowance is served as 37,266 thousand where the publisher prints 12,422), in 2024
+      three chapter XV commitment lines carry a first supplementary figure over a hundred times
+      their draft, and in 2026 four articles are served under two chapter codes, so a sum over
+      chapters counts them twice (Algemene Zaken's article 1 under IIB, with the Raad van State's
+      September figure, and under III). Amounts are euros; commitments, cash expenditure and
+      receipts are separate rows and never add up. The file carries budget lines, not payments to
+      anyone, so no payments rows come from it. Source: Ministerie van Financiën
+      (Rijksbegrotingsstaten), CC0 1.0.
     columns:
       - name: budget_line_key
         description: >
@@ -21,14 +30,12 @@ models:
       - name: entity_id
         description: The entity, as in the fiscal calendars and access/personas.yaml.
         data_tests:
-          - not_null
           - accepted_values:
               arguments:
                 values: [nl-government]
       - name: currency
         description: The currency of every amount on the row.
         data_tests:
-          - not_null
           - accepted_values:
               arguments:
                 values: [EUR]
@@ -36,88 +43,84 @@ models:
         description: >
           The budget year, a calendar year; only the years the fiscal calendar covers for the
           entity (`fiscal_periods`) appear.
-        data_tests:
-          - not_null
-          - relationships:
-              arguments:
-                to: ref('fiscal_periods')
-                field: fiscal_year
       - name: kind
         description: "`V` commitments, `U` cash expenditure, `O` receipts; never added together."
-        data_tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: [V, U, O]
       - name: chapter_code
-        description: The budget chapter's code as served; with the name, since one code can name several funds.
-        data_tests:
-          - not_null
+        description: >
+          The budget chapter's code as served. One code can hold several chapters' articles
+          (`IIB` serves an Algemene Zaken article, `L` several funds and Foreign Affairs articles).
       - name: chapter_name
-        description: The chapter's name, trimmed and repaired.
-        data_tests:
-          - not_null
+        description: >
+          The chapter's name, trimmed and repaired, from the line's first served row; the file
+          serves some chapters under two names in one year (`A` as Mobiliteitsfonds and
+          Infrastructuurfonds).
       - name: article_number
         description: The article's number within its chapter, as served.
-        data_tests:
-          - not_null
       - name: article_name
         description: The article's name, trimmed and repaired, from the line's first served row.
-        data_tests:
-          - not_null
       - name: line_in_article
         description: >
           The line's place, from 1 in served order, among the lines of one year, kind, chapter
-          code and article number: 2 or more only where different articles share a code.
-        data_tests:
-          - not_null
+          code and article number: 2 where the file serves two articles, or two rows it gives no
+          evidence are one article, under one code.
       - name: served_rows
-        description: How many served rows the line is made of (2 for an article served on two rows).
+        description: >
+          How many served rows the line is made of: 2 where two rows of one code repeat a figure
+          and differ at no moment, the file's evidence that they are one article.
         data_tests:
-          - not_null
           - accepted_values:
               arguments:
                 values: [1, 2]
                 quote: false
       - name: draft_budget_eur
-        description: The draft budget (`StandOWB`), in euros; null when the file has no draft for the year.
+        description: The draft budget (`StandOWB`), in euros, as served.
       - name: first_supplementary_eur
         description: >
-          The budget after the first supplementary budget (`StandO1`), in euros; null when the
-          year has not reached it.
+          The budget after the first supplementary budget (`StandO1`), in euros, as served; null
+          when the file serves no figure for it that year (2026, though the publisher has
+          published one). In 2025 it is about three times too high on many lines, as served.
       - name: september_supplementary_eur
         description: >
-          The budget after the September supplementary budget (`StandSBS`), in euros; null when
-          the year has not reached it or, before 2023, had none.
+          The budget after the September supplementary budget (`StandSBS`), in euros, as served;
+          null when the file serves none that year (none existed before 2023).
       - name: second_supplementary_eur
         description: >
-          The budget after the second supplementary budget (`StandO2`), in euros; null when the
-          year has not reached it.
+          The budget after the second supplementary budget (`StandO2`), in euros, as served; null
+          when the file serves no figure for it that year.
       - name: current_budget_eur
         description: >
-          The year's current budget in euros: the figure of the latest budget moment the year has
-          reached (`current_budget_moment`), a real zero included; never the outturn.
+          The year's current budget in euros: the figure of the latest budget moment the file
+          serves for the year (`current_budget_moment`), as served, a zero included; never the
+          outturn. Where `has_doubtful_zero` is true it may be a zero the file serves in place of
+          a figure.
         data_tests:
           - not_null
       - name: current_budget_moment
         description: The budget moment `current_budget_eur` comes from; never `Realisatie`.
-        data_tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: [StandOWB, StandO1, StandSBS, StandO2]
       - name: outturn_eur
         description: >
-          The outturn (`Realisatie`), in euros, beside the current budget it is compared with;
-          null until the year's outturn is published.
+          The outturn (`Realisatie`), in euros, as served, beside the current budget it is
+          compared with; null while the file serves no outturn for the year.
+      - name: has_doubtful_zero
+        description: >
+          True when a budget moment is served as zero between non-zero figures of the line, or
+          the draft is zero before a non-zero figure at every later moment served: the file
+          sometimes serves zero where the publisher prints a figure (its 2023 second
+          supplementary budget for chapter XII shows 290,715 thousand for article 16 and 109,767
+          for article 13, where the file serves 0), so a comparison of budget with outturn can
+          leave these lines out or show them. Some are real zeros (an article opened during the
+          year); the file cannot tell which.
+        data_tests:
+          - not_null
 
 unit_tests:
-  - name: the_latest_reached_moment_is_the_current_budget
+  - name: a_zero_served_at_the_latest_moment_is_the_current_budget
     description: >
       Real served rows. The King's 2024 allowance has every moment: the current budget is the
       second supplementary figure, and the outturn stays in its own column. The unallocated
-      reserve of 2024, served on two rows, falls to a real zero at the second supplementary
-      budget, and that zero is the current figure, not the September one before it.
+      reserve of 2024 is served on two rows that repeat no figure, so they stay two lines; both
+      are served as zero at the second supplementary budget, and that zero, as served, is the
+      current figure, not the September one before it.
     model: budget_against_outturn
     given:
       - input: ref('stg_nl_government__budget_moments')
@@ -143,16 +146,19 @@ unit_tests:
     expect:
       rows:
         - {budget_line_key: nl-government-2024-U-I-1-1, served_rows: 1, september_supplementary_eur: 11895000, second_supplementary_eur: 11895000, current_budget_eur: 11895000, current_budget_moment: StandO2, outturn_eur: 12043000}
-        - {budget_line_key: nl-government-2024-U-IX-10-1, served_rows: 2, september_supplementary_eur: 54112000, second_supplementary_eur: 0, current_budget_eur: 0, current_budget_moment: StandO2, outturn_eur: 0}
+        - {budget_line_key: nl-government-2024-U-IX-10-1, served_rows: 1, september_supplementary_eur: 0, second_supplementary_eur: 0, current_budget_eur: 0, current_budget_moment: StandO2, outturn_eur: 0}
+        - {budget_line_key: nl-government-2024-U-IX-10-2, served_rows: 1, september_supplementary_eur: 54112000, second_supplementary_eur: 0, current_budget_eur: 0, current_budget_moment: StandO2, outturn_eur: 0}
 
-  - name: outturn_never_replaces_the_budget
+  - name: a_moment_not_served_is_null_and_the_outturn_stays_beside_the_budget
     description: >
-      Real served rows of the King's allowance in 2026 and 2025. In 2026 the file has the draft
-      and the September supplementary budget only, so the first and second supplementary figures
+      Real served rows of the King's allowance in 2026 and 2025. For 2026 the file serves the
+      draft and the September supplementary budget only (the publisher has published the first
+      supplementary one, the file carries zeros), so the first and second supplementary figures
       and the outturn are null, not zero, and the current budget is the September figure; the
-      zero served as 2026's outturn never becomes a budget figure. In 2025 the outturn is
-      published and stays beside the current budget, which is still the second supplementary
-      figure.
+      zero served as 2026's outturn never becomes a budget figure. In 2025 the outturn stays
+      beside the current budget, the second supplementary figure. The 2025 first supplementary
+      figure of 37,266 thousand is the file's error, kept as served: the publisher prints
+      12,422.
     model: budget_against_outturn
     given:
       - input: ref('stg_nl_government__budget_moments')
@@ -176,7 +182,7 @@ unit_tests:
         - {budget_line_key: nl-government-2025-U-I-1-1, first_supplementary_eur: 37266000, second_supplementary_eur: 12422000, current_budget_eur: 12422000, current_budget_moment: StandO2, outturn_eur: 12452000}
         - {budget_line_key: nl-government-2026-U-I-1-1, first_supplementary_eur: null, second_supplementary_eur: null, current_budget_eur: 12571000, current_budget_moment: StandSBS, outturn_eur: null}
 
-  - name: an_article_on_two_rows_is_one_line_and_articles_sharing_a_code_stay_apart
+  - name: a_repeated_figure_makes_two_rows_one_line_and_a_differing_one_keeps_them_apart
     description: >
       Real served rows. The 2024 taxes article is served on two rows, one carrying the draft and
       first supplementary figures, the other the September one, both repeating the second

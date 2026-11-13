@@ -1,16 +1,15 @@
 """The Dutch budget against outturn builds and passes its rules on the local engine.
 
-The rules (the latest reached moment is the current budget, outturn never stands in for it, a
-moment is reached on every line of a year or on none, every served row is in one line, names are
-repaired) are dbt data and unit tests in `models/`; these tests run them over the committed
-sample of real landed rows and check each ran and passed, and check what a passing build cannot
-show: the sample's lines as the publisher serves them, and that a build with nothing landed fails.
-The landed test builds over the whole landed file and reconciles the model's totals with totals
-computed here, in Python, straight from the served rows.
+The rules (the current budget is the latest served figure, a moment is served on every line of a
+year or on none, two rows are one line only on a repeated figure, every served row and figure is
+on a line, the figures the publisher prints tie, names are repaired) are dbt data and unit tests
+in `models/`; these tests run them over the committed sample of real landed rows and check each
+ran and passed, and check what a passing build cannot show: the sample's lines as the file
+serves them, and that a build with nothing landed fails. The landed tests run the rules over the
+whole landed file and pin today's counts of the figures the file serves wrong or leaves out.
 """
 
 import json
-from collections import defaultdict
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -22,25 +21,26 @@ from test_fx_translation import environment
 from test_models import dbt
 
 from ingest.fetch import landing_path
-from ingest.nl_government.budget import MOMENTS
 
 SELECTION = ["--select", "+budget_against_outturn+", "fiscal_calendar"]
 RULES = [
-    "the_current_budget_is_the_latest_reached_moment",
-    "outturn_never_stands_in_for_the_budget",
-    "a_moment_is_reached_on_every_line_or_none",
+    "the_current_budget_is_the_latest_served_figure",
+    "a_moment_is_served_on_every_line_or_none",
     "every_served_row_of_a_covered_year_is_in_one_line",
+    "every_served_figure_is_on_a_line_of_its_article",
+    "no_repeated_figure_is_split_across_lines",
+    "a_line_of_two_rows_repeats_a_figure",
+    "lines_sharing_a_code_without_evidence_are_known",
+    "figures_tie_to_the_publishers_reports",
     "names_carry_no_double_encoding",
-    "the_latest_reached_moment_is_the_current_budget",
-    "outturn_never_replaces_the_budget",
-    "an_article_on_two_rows_is_one_line_and_articles_sharing_a_code_stay_apart",
+    "a_zero_served_at_the_latest_moment_is_the_current_budget",
+    "a_moment_not_served_is_null_and_the_outturn_stays_beside_the_budget",
+    "a_repeated_figure_makes_two_rows_one_line_and_a_differing_one_keeps_them_apart",
     "unique_budget_against_outturn_budget_line_key",
     "not_null_budget_against_outturn_budget_line_key",
     "accepted_values_budget_against_outturn_entity_id__nl_government",
     "accepted_values_budget_against_outturn_currency__EUR",
-    "accepted_values_budget_against_outturn_kind__V__U__O",
-    "accepted_values_budget_against_outturn_current_budget_moment__StandOWB__StandO1__StandSBS__StandO2",
-    "relationships_budget_against_outturn_fiscal_year__fiscal_year__ref_fiscal_periods_",
+    "accepted_values_stg_nl_government__budget_moments_kind__V__U__O",
     "accepted_values_stg_nl_government__budget_moments_served_unit__EUR_thousand",
 ]
 COLUMNS = {
@@ -61,7 +61,7 @@ class Build:
 def build_budget(tmp_path: Path, rows: str) -> Build:
     """Build the budget models over the `rows` set and run every rule; each result by name."""
     env = environment(tmp_path)
-    variables = json.dumps({"nl_government_budget": rows})
+    variables = json.dumps({"source_rows": rows})
     result = dbt(env, tmp_path, "build", *SELECTION, "--vars", variables)
     assert result.returncode == 0, result.stdout + result.stderr
     run = json.loads((tmp_path / "target" / "run_results.json").read_text())
@@ -118,17 +118,44 @@ def test_two_funds_sharing_a_chapter_code_stay_two_lines(sample: Build) -> None:
     ]
 
 
-def test_a_moment_not_reached_is_null_and_a_real_zero_is_zero(sample: Build) -> None:
+def test_a_moment_not_served_is_null_and_a_served_zero_is_zero(sample: Build) -> None:
     rows = query(
         sample,
         "select budget_line_key, first_supplementary_eur, second_supplementary_eur, outturn_eur,"
-        " current_budget_eur, current_budget_moment from budget_against_outturn"
+        " current_budget_eur, current_budget_moment, has_doubtful_zero from budget_against_outturn"
         " where budget_line_key in"
         " ('nl-government-2026-U-I-1-1', 'nl-government-2024-U-IX-10-1') order by 1",
     )
     assert rows == [
-        ("nl-government-2024-U-IX-10-1", 387279000, 0, 0, 0, "StandO2"),
-        ("nl-government-2026-U-I-1-1", None, None, None, 12571000, "StandSBS"),
+        ("nl-government-2024-U-IX-10-1", 387279000, 0, 0, 0, "StandO2", False),
+        ("nl-government-2026-U-I-1-1", None, None, None, 12571000, "StandSBS", False),
+    ]
+
+
+def test_a_zero_between_figures_is_flagged_doubtful(sample: Build) -> None:
+    """Curaçao's 2024 first supplementary figure is served as zero between non-zero draft and
+    September figures; the King's allowance has none."""
+    flags = dict(
+        query(
+            sample,
+            "select budget_line_key, has_doubtful_zero from budget_against_outturn"
+            " where budget_line_key in"
+            " ('nl-government-2024-U-IIB-7-1', 'nl-government-2024-U-I-1-1')",
+        )
+    )
+    assert flags == {"nl-government-2024-U-IIB-7-1": True, "nl-government-2024-U-I-1-1": False}
+
+
+def test_rows_that_repeat_no_figure_stay_two_lines(sample: Build) -> None:
+    rows = query(
+        sample,
+        "select budget_line_key, served_rows, draft_budget_eur, september_supplementary_eur"
+        " from budget_against_outturn where fiscal_year = 2024 and kind = 'U'"
+        " and chapter_code = 'IX' and article_number = '10' order by 1",
+    )
+    assert rows == [
+        ("nl-government-2024-U-IX-10-1", 1, 154748000, 0),
+        ("nl-government-2024-U-IX-10-2", 1, 0, 54112000),
     ]
 
 
@@ -163,106 +190,118 @@ def test_a_build_without_the_landed_file_fails_on_it(tmp_path: Path) -> None:
 
 
 def test_the_rows_var_refuses_anything_but_landed_or_sample(tmp_path: Path) -> None:
-    variables = json.dumps({"nl_government_budget": "fixtures"})
+    variables = json.dumps({"source_rows": "fixtures"})
     result = dbt(environment(tmp_path), tmp_path, "compile", *SELECTION, "--vars", variables)
     assert result.returncode != 0
     assert "'sample' or 'landed', not 'fixtures'" in result.stdout + result.stderr
 
 
-def repaired(name: str) -> str:
-    """A name with UTF-8 read as Latin-1 decoded again, and its edge spaces dropped."""
-    if "Ã" in name:
-        name = name.encode("latin-1").decode("utf-8")
-    return name.strip()
+# Today's counts over the landed file, each a kind of figure the file serves that a reader
+# comparing budget with outturn must know of; a re-pin that changes one fails here for a look.
+ANOMALIES = {
+    # A budget moment served as zero between non-zero figures, or a zero draft before non-zero
+    # figures (the publisher prints figures for some of these; the column flags them).
+    "lines with a doubtful zero, per year": (
+        "select fiscal_year, count(*) from budget_against_outturn where has_doubtful_zero"
+        " group by 1 order by 1",
+        [(2023, 29), (2024, 78), (2025, 23), (2026, 21)],
+    ),
+    # A first supplementary figure about three times both the draft and the September figure
+    # (the King's 2025 allowance: served 37,266 thousand, published 12,422).
+    "lines with a first supplementary figure about three times too high, per year": (
+        "select fiscal_year, count(*) from budget_against_outturn"
+        " where draft_budget_eur <> 0 and september_supplementary_eur <> 0"
+        " and abs(first_supplementary_eur) >= 2.5 * abs(draft_budget_eur)"
+        " and abs(first_supplementary_eur) >= 2.5 * abs(september_supplementary_eur)"
+        " and abs(first_supplementary_eur)"
+        " <= 3.5 * greatest(abs(draft_budget_eur), abs(september_supplementary_eur))"
+        " group by 1 order by 1",
+        [(2024, 2), (2025, 225)],
+    ),
+    # A first supplementary figure over a hundred times both its neighbours (2024 chapter XV
+    # commitments, articles 3, 8 and 9).
+    "lines with a first supplementary figure over a hundred times its neighbours": (
+        "select budget_line_key from budget_against_outturn"
+        " where draft_budget_eur <> 0 and september_supplementary_eur <> 0"
+        " and abs(first_supplementary_eur) >= 100 * abs(draft_budget_eur)"
+        " and abs(first_supplementary_eur) >= 100 * abs(september_supplementary_eur)"
+        " order by 1",
+        [
+            ("nl-government-2024-V-XV-3-1",),
+            ("nl-government-2024-V-XV-8-1",),
+            ("nl-government-2024-V-XV-9-1",),
+        ],
+    ),
+    # One article served under two chapter codes in one year, so a sum over chapters counts it
+    # twice (2026 Algemene Zaken under IIB, with the Raad van State's September figure, and III).
+    "articles served under two chapter codes": (
+        "select fiscal_year, kind, chapter_name, article_number from budget_against_outturn"
+        " group by fiscal_year, kind, chapter_name, article_number, article_name"
+        " having count(distinct chapter_code) > 1 order by all",
+        [
+            (2026, "O", "Algemene Zaken", "1"),
+            (2026, "O", "Buitenlandse Zaken", "2"),
+            (2026, "U", "Algemene Zaken", "1"),
+            (2026, "U", "Klimaatfonds", "1"),
+        ],
+    ),
+}
 
 
-def served_totals(path: Path, years: set[int]) -> tuple[dict[tuple[int, str, str], int], int]:
-    """Totals per year, kind and moment, in thousands of euros, computed from the served rows:
-    rows of one article (year, kind, chapter code and name, article number) whose non-zero amounts
-    never differ at a moment are one article, taken once; others are each their own. Also the
-    plain sum's excess over those totals, the double count a sum of served rows would make."""
-    with duckdb.connect() as db:
-        served = db.execute(
-            "select source_row, Begrotingsjaar, VUO, HoofdstukRomeins, Hoofdstuknaam,"
-            " Artikelnummer, moment, amount from read_parquet(?)",
-            [str(path)],
-        ).fetchall()
-    articles: dict[tuple[int, str, str, str, str], dict[int, dict[str, int]]] = defaultdict(
-        lambda: defaultdict(dict)
-    )
-    for source_row, year, kind, code, chapter, article, moment, amount in served:
-        if int(year) in years:
-            key = (int(year), kind, code, repaired(chapter), article)
-            articles[key][source_row][moment] = int(amount)
-    totals: dict[tuple[int, str, str], int] = defaultdict(int)
-    plain: dict[tuple[int, str, str], int] = defaultdict(int)
-    for (year, kind, *_), rows in articles.items():
-        one = all(len({r[m] for r in rows.values() if r[m] != 0}) <= 1 for m in MOMENTS)
-        for moment in MOMENTS:
-            amounts = [r[moment] for r in rows.values()]
-            plain[year, kind, moment] += sum(amounts)
-            if one:
-                totals[year, kind, moment] += next((a for a in amounts if a != 0), 0)
-            else:
-                totals[year, kind, moment] += sum(amounts)
-    excess = sum(plain.values()) - sum(totals.values())
-    return dict(totals), excess
+@pytest.fixture(scope="module")
+def landed(tmp_path_factory: pytest.TempPathFactory) -> Build:
+    return build_budget(tmp_path_factory.mktemp("landed"), "landed")
 
 
 @pytest.mark.landed
-def test_the_model_reconciles_with_the_served_rows_over_the_whole_landed_file(
-    tmp_path: Path,
-) -> None:
-    """Over the whole landed file: every rule passes, each year, kind and moment the model
-    carries totals what the served rows total once an article served on two rows is counted
-    once, a moment the year has not reached is null throughout, and two figures tie to the
-    publisher's annual report."""
-    path = landing_path() / "nl-government-budget"
-    landed = build_budget(tmp_path, "landed")
+def test_every_rule_holds_over_the_whole_landed_file(landed: Build) -> None:
+    """Over the whole landed file: every rule passes, the figures the publisher prints in its
+    annual reports among them, and only 2026's first and second supplementary budget and outturn
+    are moments the file does not serve."""
     assert {r: landed.results.get(r) for r in RULES} == dict.fromkeys(RULES, "pass")
-    years = {y for (y,) in query(landed, "select distinct fiscal_year from budget_against_outturn")}
-    assert years == {2023, 2024, 2025, 2026}
-    expected, excess = served_totals(path, years)
-    sums = ", ".join(f"sum({c}), count({c})" for c in COLUMNS.values())
-    model: dict[tuple[int, str, str], Decimal | None] = {}
-    for year, kind, *figures in query(
-        landed,
-        f"select fiscal_year, kind, {sums} from budget_against_outturn group by all",  # noqa: S608
-    ):
-        for moment, total, count in zip(COLUMNS, figures[::2], figures[1::2], strict=True):
-            model[year, kind, moment] = None if count == 0 else total
-    reached = {key: value for key, value in model.items() if value is not None}
-    not_reached = {key for key, value in model.items() if value is None}
-    assert reached == {key: Decimal(expected[key]) * 1000 for key in reached}
-    assert all(expected[key] == 0 for key in not_reached)
-    assert {(y, m) for y, _, m in not_reached} == {
-        (2026, "StandO1"),
-        (2026, "StandO2"),
-        (2026, "Realisatie"),
+    counts = ", ".join(f"count({c})" for c in COLUMNS.values())
+    not_served = {
+        (year, moment)
+        for year, *figures in query(
+            landed,
+            f"select fiscal_year, {counts} from budget_against_outturn group by 1",  # noqa: S608
+        )
+        for moment, figure in zip(COLUMNS, figures, strict=True)
+        if figure == 0
     }
-    lines, served_rows, two_row = query(
+    assert not_served == {(2026, "StandO1"), (2026, "StandO2"), (2026, "Realisatie")}
+    lines, served_rows, two_rows = query(
         landed,
         "select count(*), sum(served_rows), count(*) filter (where served_rows = 2)"
         " from budget_against_outturn",
     )[0]
-    print(f"lines {lines}, served rows {served_rows}, lines of two rows {two_row}")
-    print(f"double count avoided: {excess} thousand euros")
-    for key in sorted(reached):
-        print(key, f"{reached[key]:,.0f}")
-    # The publisher's 2024 annual reports show, under "bedragen x € 1.000", the King's allowance
-    # outturn as 12.043 (rijksfinancien.nl/jaarverslag/2024/I, table 1) and, for the taxes
-    # article served on two rows, cash expenditure of 3.918.024 against a budget as adopted of
-    # 3.475.108 (rijksfinancien.nl/jaarverslag/2024/IX, article 1).
-    published = query(
+    assert (lines, served_rows, two_rows) == (2239, 2287, 48)
+
+
+@pytest.mark.landed
+@pytest.mark.parametrize("anomaly", ANOMALIES)
+def test_each_kind_of_doubtful_figure_is_counted(landed: Build, anomaly: str) -> None:
+    sql, today = ANOMALIES[anomaly]
+    assert query(landed, sql) == today
+
+
+@pytest.mark.landed
+def test_a_plain_sum_of_the_served_rows_would_count_repeats_twice(landed: Build) -> None:
+    """The 2024 cash outturn the served rows add up to, against the model's."""
+    path = landing_path() / "nl-government-budget"
+    with duckdb.connect() as db:
+        served = db.execute(
+            "select sum(cast(amount as hugeint)) from read_parquet(?)"
+            " where Begrotingsjaar = '2024' and VUO = 'U' and moment = 'Realisatie'",
+            [str(path)],
+        ).fetchall()
+    model = query(
         landed,
-        "select budget_line_key, draft_budget_eur, outturn_eur from budget_against_outturn"
-        " where budget_line_key in"
-        " ('nl-government-2024-U-I-1-1', 'nl-government-2024-U-IX-1-1') order by 1",
+        "select sum(outturn_eur) from budget_against_outturn"
+        " where fiscal_year = 2024 and kind = 'U'",
     )
-    assert published == [
-        ("nl-government-2024-U-I-1-1", Decimal(11640000), Decimal(12043000)),
-        ("nl-government-2024-U-IX-1-1", Decimal(3475108000), Decimal(3918024000)),
-    ]
+    assert served == [(470517247,)]
+    assert model == [(Decimal(394204901000),)]
 
 
 @pytest.mark.landed

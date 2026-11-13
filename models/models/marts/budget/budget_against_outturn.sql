@@ -1,17 +1,19 @@
 -- One row per budget line of the Dutch central government, year and kind of amount, for the years
--- the fiscal calendar covers: each budget moment in its own column, the year's current budget
--- (the latest moment the file has reached that year) with the moment it came from, and the
--- outturn in its own column beside it.
+-- the fiscal calendar covers: each budget moment in its own column as the file serves it, the
+-- year's current budget (the figure of the latest moment the file serves for that year) with the
+-- moment it came from, the outturn in its own column beside it, and whether the line holds a zero
+-- the file may have served in place of a figure.
 --
 -- A budget line is what the publisher serves for one article: usually one served row, but some
 -- articles are served on two rows that each carry some of the moments and repeat the others.
--- Served rows of the same year, kind, chapter (code and name) and article number are one line when
--- no moment carries two different non-zero amounts across them; the line then takes, at each
--- moment, the one non-zero amount (a repeat counted once), else zero. Rows that do carry two
--- different non-zero amounts at a moment are different articles sharing a code, and each is its
--- own line. A moment that has no non-zero amount anywhere in a year has not been reached that
--- year (or did not exist then, such as the September supplementary budget before 2023), so every
--- line's amount at it is null, never a zero a sum would treat as real.
+-- Served rows of one year, kind, chapter code and article number are one line only on the file's
+-- own evidence: at least one non-zero figure repeated across them, and no moment with two
+-- different non-zero figures; the line then takes, at each moment, the one non-zero figure (a
+-- repeat counted once), else zero. Otherwise each served row is its own line. The chapter name is
+-- left out of the match, since the file serves one chapter under two names in one year.
+-- A moment with no non-zero amount anywhere in a year is not served in the file for that year
+-- (the September supplementary budget before 2023, or a moment the file has not been updated
+-- with), so every line's amount at it is null, never a zero a sum would treat as a figure.
 with served as (
     select * from {{ ref('stg_nl_government__budget_moments') }}
 ),
@@ -21,12 +23,12 @@ article_moments as (
         fiscal_year,
         kind,
         chapter_code,
-        chapter_name,
         article_number,
         moment,
-        count(distinct case when amount_eur <> 0 then amount_eur end) as non_zero_amounts
+        count(distinct case when amount_eur <> 0 then amount_eur end) as non_zero_figures,
+        count(case when amount_eur <> 0 then 1 end) as non_zero_rows
     from served
-    group by fiscal_year, kind, chapter_code, chapter_name, article_number, moment
+    group by fiscal_year, kind, chapter_code, article_number, moment
 ),
 
 articles as (
@@ -34,11 +36,10 @@ articles as (
         fiscal_year,
         kind,
         chapter_code,
-        chapter_name,
         article_number,
-        max(non_zero_amounts) <= 1 as is_one_line
+        max(non_zero_figures) <= 1 and max(non_zero_rows) >= 2 as is_one_line
     from article_moments
-    group by fiscal_year, kind, chapter_code, chapter_name, article_number
+    group by fiscal_year, kind, chapter_code, article_number
 ),
 
 lined as (
@@ -51,7 +52,6 @@ lined as (
                         served.fiscal_year,
                         served.kind,
                         served.chapter_code,
-                        served.chapter_name,
                         served.article_number
                 )
             else served.source_row
@@ -62,11 +62,10 @@ lined as (
             served.fiscal_year = articles.fiscal_year
             and served.kind = articles.kind
             and served.chapter_code = articles.chapter_code
-            and served.chapter_name = articles.chapter_name
             and served.article_number = articles.article_number
 ),
 
-reached as (
+served_moments as (
     select
         fiscal_year,
         moment
@@ -80,26 +79,24 @@ line_moments as (
         lined.fiscal_year,
         lined.kind,
         lined.chapter_code,
-        lined.chapter_name,
         lined.article_number,
         lined.line_source_row,
         lined.moment,
         count(*) as served_rows,
         cast(
             case
-                when max(reached.moment) is not null
+                when max(served_moments.moment) is not null
                     then coalesce(max(case when lined.amount_eur <> 0 then lined.amount_eur end), 0)
             end
             as {{ dbt.type_numeric() }}
         ) as amount_eur
     from lined
-    left join reached
-        on lined.fiscal_year = reached.fiscal_year and lined.moment = reached.moment
+    left join served_moments
+        on lined.fiscal_year = served_moments.fiscal_year and lined.moment = served_moments.moment
     group by
         lined.fiscal_year,
         lined.kind,
         lined.chapter_code,
-        lined.chapter_name,
         lined.article_number,
         lined.line_source_row,
         lined.moment
@@ -110,7 +107,7 @@ lines as (
         line_moments.fiscal_year,
         line_moments.kind,
         line_moments.chapter_code,
-        line_moments.chapter_name,
+        first_row.chapter_name,
         line_moments.article_number,
         first_row.article_name,
         line_moments.line_source_row,
@@ -134,7 +131,7 @@ lines as (
         line_moments.fiscal_year,
         line_moments.kind,
         line_moments.chapter_code,
-        line_moments.chapter_name,
+        first_row.chapter_name,
         line_moments.article_number,
         first_row.article_name,
         line_moments.line_source_row
@@ -195,5 +192,40 @@ select
         when first_supplementary_eur is not null then 'StandO1'
         when draft_budget_eur is not null then 'StandOWB'
     end as current_budget_moment,
-    outturn_eur
+    outturn_eur,
+    coalesce(
+        -- A draft of zero before a non-zero figure at every later moment the file serves.
+        (
+            draft_budget_eur = 0
+            and coalesce(first_supplementary_eur, 1) <> 0
+            and coalesce(september_supplementary_eur, 1) <> 0
+            and coalesce(second_supplementary_eur, 1) <> 0
+            and coalesce(outturn_eur, 1) <> 0
+        )
+        -- A later budget moment served as zero between non-zero figures of the line.
+        or (
+            first_supplementary_eur = 0
+            and draft_budget_eur <> 0
+            and (
+                coalesce(september_supplementary_eur, 0) <> 0
+                or coalesce(second_supplementary_eur, 0) <> 0
+                or coalesce(outturn_eur, 0) <> 0
+            )
+        )
+        or (
+            september_supplementary_eur = 0
+            and (draft_budget_eur <> 0 or coalesce(first_supplementary_eur, 0) <> 0)
+            and (coalesce(second_supplementary_eur, 0) <> 0 or coalesce(outturn_eur, 0) <> 0)
+        )
+        or (
+            second_supplementary_eur = 0
+            and (
+                draft_budget_eur <> 0
+                or coalesce(first_supplementary_eur, 0) <> 0
+                or coalesce(september_supplementary_eur, 0) <> 0
+            )
+            and coalesce(outturn_eur, 0) <> 0
+        ),
+        false
+    ) as has_doubtful_zero
 from numbered

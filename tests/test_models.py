@@ -90,7 +90,7 @@ def build(tmp_path_factory: pytest.TempPathFactory) -> Build:
         "DBT_LOG_PATH": str(tmp_path / "logs"),
         "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
     }
-    samples = {"ecb_rates": "sample", "nl_government_budget": "sample"}
+    samples = {"source_rows": "sample"}
     result = dbt(env, tmp_path, "build", "--vars", json.dumps(samples))
     assert result.returncode == 0, result.stdout + result.stderr
     run = json.loads((tmp_path / "target" / "run_results.json").read_text())

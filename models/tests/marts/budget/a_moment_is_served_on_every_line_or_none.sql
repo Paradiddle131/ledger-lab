@@ -1,7 +1,7 @@
 -- Fails on every year and moment that is null on some lines and not on others, that is null
 -- although the year's served rows carry a non-zero amount at it, or that holds figures although
--- they carry none: a moment the year has not reached is null on every line, a reached one is a
--- figure (a real zero included) on every line.
+-- they carry none: a moment the file does not serve for a year is null on every line, a served
+-- one is a figure on every line, a zero as served included.
 {%- set moments = {
     'StandOWB': 'draft_budget_eur',
     'StandO1': 'first_supplementary_eur',

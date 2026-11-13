@@ -2,18 +2,10 @@
 -- integer, the amount in euros as a decimal (the publisher's whole thousands times 1,000, so no
 -- figure is rounded), and the chapter and article names with their edge spaces trimmed and the
 -- two doubly encoded letters the file serves repaired. Every served year is kept; the mart keeps
--- the years the fiscal calendar covers. The `nl_government_budget` var picks the rows: the file
--- the fetch kit landed (`landed`) or the committed sample of real landed rows (`sample`).
-{%- set chosen = var('nl_government_budget') %}
-{%- if chosen == 'landed' %}
-    {%- set served = source('nl_government', 'budget') %}
-{%- elif chosen == 'sample' %}
-    {%- set served = ref('nl_government_budget_sample') %}
-{%- else %}
-    {{ exceptions.raise_compiler_error(
-        "the nl_government_budget var is 'sample' or 'landed', not '" ~ chosen ~ "'"
-    ) }}
-{%- endif %}
+-- the years the fiscal calendar covers. Amounts are as the file serves them, wrong or missing
+-- figures included. The `source_rows` var picks the rows: the file the fetch kit landed
+-- (`landed`) or the committed sample of real landed rows (`sample`).
+{%- set served = landed_or_sample('nl_government', 'budget', 'nl_government_budget_sample') %}
 
 select
     cast(source_row as {{ dbt.type_int() }}) as source_row,
