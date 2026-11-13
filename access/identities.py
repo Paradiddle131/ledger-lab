@@ -32,10 +32,16 @@ import duckdb
 READS = frozenset({"read", "edit"})
 # The column an entity-scoped data product holds its entity id in.
 ENTITY = "entity"
+# The catalog name the build attaches the source warehouse under.
+SOURCE = "warehouse"
 
 
 class UnknownPersonaError(KeyError):
     """The persona is not in the catalogue."""
+
+
+class ReservedPersonaError(ValueError):
+    """The persona id is a catalog name DuckDB reserves or the build uses, so it cannot name one."""
 
 
 @dataclass(frozen=True)
@@ -79,16 +85,23 @@ def open_local(who: Identity, warehouse: Path, directory: Path) -> duckdb.DuckDB
     database = str(directory / f"{who.persona}.duckdb")
     source = str(warehouse).replace("'", "''")
     with duckdb.connect(database) as build:
-        build.execute(f"attach '{source}' as warehouse (read_only)")
+        # DuckDB renames a file whose stem it reserves (`system` opens as `system_db`), and the
+        # build attaches the source as SOURCE: either way the catalog could not be the persona.
+        (catalog,) = build.execute("select system.main.current_database()").fetchone() or ("",)
+        if catalog != who.persona or who.persona == SOURCE:
+            raise ReservedPersonaError(
+                f"{who.persona} cannot name a DuckDB catalog: it is reserved or used by the build"
+            )
+        build.execute(f"attach '{source}' as {SOURCE} (read_only)")
         for product, entities in who.reads.items():
-            copy = f'create table "{product}" as select * from warehouse."{product}"'  # noqa: S608
+            copy = f'create table "{product}" as select * from {SOURCE}."{product}"'  # noqa: S608
             if entities is None:
                 build.execute(copy)
             else:
                 build.execute(
                     f"{copy} where {ENTITY} in (select unnest(?::varchar[]))", [sorted(entities)]
                 )
-        build.execute("detach warehouse")
+        build.execute(f"detach {SOURCE}")
     return duckdb.connect(
         database,
         read_only=True,

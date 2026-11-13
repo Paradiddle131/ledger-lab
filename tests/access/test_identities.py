@@ -18,7 +18,7 @@ import duckdb
 import pytest
 from gcp_project import lab_project_or_none
 
-from access.identities import UnknownPersonaError, identity
+from access.identities import ReservedPersonaError, UnknownPersonaError, identity, open_local
 
 AsPersona = Callable[[str], duckdb.DuckDBPyConnection]
 # What `access/personas.yaml` says each access lets a persona see row by row, stated here apart
@@ -128,6 +128,19 @@ def test_a_temporary_shadow_forges_only_unqualified_names_in_its_own_connection(
             db.execute(f'select * from "{persona}".main."{product}"')  # noqa: S608
     assert tables(db, persona) == set(expected(access, persona))
     assert tables(as_persona(persona), persona) == set(expected(access, persona))
+
+
+@pytest.mark.parametrize("reserved", ["system", "warehouse"])
+def test_a_persona_id_duckdb_reserves_as_a_catalog_name_is_refused_at_build(
+    access: dict[str, Any], warehouse: Path, tmp_path: Path, reserved: str
+) -> None:
+    catalogue = copy.deepcopy(access)
+    catalogue["personas"][0]["id"] = reserved
+    for grant in catalogue["grants"]:
+        if grant["persona"] == access["personas"][0]["id"]:
+            grant["persona"] = reserved
+    with pytest.raises(ReservedPersonaError, match=reserved):
+        open_local(identity(catalogue, reserved), warehouse, tmp_path)
 
 
 def test_the_fixture_refuses_an_unknown_persona(as_persona: AsPersona) -> None:
