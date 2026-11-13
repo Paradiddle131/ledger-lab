@@ -61,7 +61,8 @@ stack-down:
 stack-test: sync stack-up
 	uv run pytest -m stack
 
-# The lab's month-to-date GCP cost: $0.00 by absence while LEDGER_LAB_GCP_PROJECT is unset.
+# The lab's month-to-date GCP cost and its spend fences, read live; $0.00 by absence, with no GCP
+# call, while LEDGER_LAB_GCP_PROJECT is unset.
 cost-check:
 	@uv run --no-sync python platform/cost_check.py
 

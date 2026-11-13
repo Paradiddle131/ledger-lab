@@ -61,7 +61,7 @@ make stack-down               # stop everything and drop its volumes
 The database password comes from `LEDGER_LAB_DB_PASSWORD` when it is set, else from a file `make stack-up` generates (ignored by git, deleted by `make stack-down`); `make stack-up` prints the loopback port it took (`LEDGER_LAB_DB_PORT` fixes one).
 After changing the password or the database list, run `make stack-down` first, because the server keeps what its volume was created with.
 
-The lab's GCP project comes only from `LEDGER_LAB_GCP_PROJECT`; `make cost-check` prints its month-to-date cost (with `LEDGER_LAB_BILLING_EXPORT` naming the billing export's `dataset.table`), and $0.00 without any GCP call while no project is set.
+The lab's GCP project comes only from `LEDGER_LAB_GCP_PROJECT`; `make cost-check` prints its month-to-date cost (with `LEDGER_LAB_BILLING_EXPORT` naming the billing export's `dataset.table`) and each spend fence's state, read live, and fails above $0.00 or on a loose fence; it prints $0.00 without any GCP call while no project is set.
 The project's spend fences live in `platform/gcp/` as OpenTofu definitions; `make fences-validate` installs the pinned OpenTofu and validates them offline, and only the owner applies them.
 
 ## Licence

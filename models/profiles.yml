@@ -15,5 +15,5 @@ ledger_lab:
       project: "{{ env_var('LEDGER_LAB_GCP_PROJECT', '') }}"
       dataset: "{{ env_var('LEDGER_LAB_BQ_DATASET', 'ledger_lab') }}"
       location: "{{ env_var('LEDGER_LAB_BQ_LOCATION', 'US') }}"
-      maximum_bytes_billed: "{{ env_var('LEDGER_LAB_BQ_MAX_BYTES', '1000000000') | as_number }}"
+      maximum_bytes_billed: 1000000000
       threads: 4
