@@ -2,7 +2,6 @@
 # The shared database is the core and always starts; every heavier service (ERP, lineage backend,
 # orchestrator, tracing) joins under a profile named after it and starts only when asked for.
 # Configuration comes from the environment; nothing here names an account or holds a credential.
-name: ledger-lab
 
 services:
   db:

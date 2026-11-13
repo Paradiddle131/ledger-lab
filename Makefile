@@ -40,10 +40,9 @@ scan: sync
 # The database password comes from LEDGER_LAB_DB_PASSWORD, else from a file generated at the first
 # start, ignored by git and deleted by `make stack-down` with the volume it unlocks.
 STACK_ENV := $(CURDIR)/platform/stack/.env.generated
-STACK_TARGETS := stack-up stack-down stack-test
-$(STACK_TARGETS): export COMPOSE_FILE := $(CURDIR)/platform/stack/compose.yaml
-$(STACK_TARGETS): export COMPOSE_PROJECT_NAME := ledger-lab-$(shell printf '%s' '$(CURDIR)' | cksum | cut -d' ' -f1)
-$(STACK_TARGETS): export COMPOSE_ENV_FILES := $(STACK_ENV)
+stack-up stack-down stack-test: export COMPOSE_PROJECT_NAME := ledger-lab-$(shell printf '%s' '$(CURDIR)' | cksum | cut -d' ' -f1)
+stack-up stack-test: export COMPOSE_FILE := $(CURDIR)/platform/stack/compose.yaml
+stack-up stack-test: export COMPOSE_ENV_FILES := $(STACK_ENV)
 
 $(STACK_ENV):
 	@umask 077 && printf 'LEDGER_LAB_DB_PASSWORD=%s\n' "$$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" > $@
@@ -52,8 +51,10 @@ stack-up: $(STACK_ENV)
 	docker compose $(if $(PROFILE),--profile $(PROFILE)) up -d --wait
 	@echo "stack-up: project $$COMPOSE_PROJECT_NAME, database at $$(docker compose port db 5432)"
 
-stack-down: $(STACK_ENV)
-	docker compose --profile '*' down --volumes --remove-orphans
+# By project name alone, with no compose file to resolve (so no password needed): Compose finds the
+# project's containers, under any profile, its network and its volumes by their labels.
+stack-down:
+	docker compose down --volumes --remove-orphans
 	rm -f $(STACK_ENV)
 
 # The live stack test against this checkout's running database; kept out of `make check`.
