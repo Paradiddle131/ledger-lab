@@ -17,9 +17,14 @@ vars:
   fiscal_years:
     first: 2023
     last: 2026
+  # Where the currency translation reads the ECB reference rates: `sample`, the committed fortnight
+  # of real rates the tests need, or `landed`, the file the fetch kit lands under LEDGER_LAB_LANDING.
+  ecb_rates: sample
 
 models:
   ledger_lab:
     +materialized: view
     calendars:
+      +materialized: table
+    reference:
       +materialized: table

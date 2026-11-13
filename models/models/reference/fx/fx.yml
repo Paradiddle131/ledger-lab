@@ -1,0 +1,83 @@
+sources:
+  - name: ecb
+    description: >
+      The ECB's daily euro reference rates as the fetch kit lands them (`python -m ingest.fetch
+      ecb-rates`), one row per publication date and currency, every field the publisher's text.
+      Read only when the `ecb_rates` var is `landed`; on DuckDB from the landing path the kit
+      uses. Source: European Central Bank; published for information purposes only.
+    tables:
+      - name: rates
+        config:
+          external_location: "read_parquet('{{ env_var('LEDGER_LAB_LANDING', 'landing') }}/ecb-rates')"
+
+models:
+  - name: fx_published_rates
+    description: >
+      One row per ECB publication date and currency (EUR, GBP, USD): the units of the currency one
+      euro buys, as a decimal and as published, with the euro at 1. Source: European Central
+      Bank; a figure translated with these rates is derived from them.
+    columns:
+      - name: published_on
+        data_tests:
+          - not_null
+      - name: currency
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [EUR, GBP, USD]
+      - name: units_per_euro
+        data_tests:
+          - not_null
+
+  - name: fx_rates
+    description: >
+      One row per calendar day and currency from the first publication date to the last: that
+      day's rates, or on a closed day the previous business day's, carried at most four days.
+      `translate_currency` reads it; a day it lacks translates to null.
+    columns:
+      - name: rate_on
+        data_tests:
+          - not_null
+      - name: currency
+        data_tests:
+          - not_null
+      - name: units_per_euro
+        data_tests:
+          - not_null
+      - name: published_on
+        data_tests:
+          - not_null
+
+seeds:
+  - name: ecb_rates_sample
+    description: >
+      Real ECB reference rates for 25 March to 8 April 2024, as the fetch kit lands them (a
+      weekend, and Good Friday to Easter Monday closed): the rates the translation tests need
+      inside `make check`, where no landed file exists. Source: European Central Bank; published
+      for information purposes only, copied unchanged.
+    config:
+      column_types:
+        date: string
+        currency: string
+        rate: string
+
+unit_tests:
+  - name: a_rate_is_carried_at_most_four_days
+    description: >
+      Real rates of 25 March and 2 April 2024 with the five publication dates between left out:
+      25 March's rates carry to 29 March, four days, and 30 March to 1 April get no row.
+    model: fx_rates
+    given:
+      - input: ref('fx_published_rates')
+        rows:
+          - {published_on: 2024-03-25, currency: USD, units_per_euro: 1.0835}
+          - {published_on: 2024-04-02, currency: USD, units_per_euro: 1.0749}
+    expect:
+      rows:
+        - {rate_on: 2024-03-25, currency: USD, units_per_euro: 1.0835, published_on: 2024-03-25}
+        - {rate_on: 2024-03-26, currency: USD, units_per_euro: 1.0835, published_on: 2024-03-25}
+        - {rate_on: 2024-03-27, currency: USD, units_per_euro: 1.0835, published_on: 2024-03-25}
+        - {rate_on: 2024-03-28, currency: USD, units_per_euro: 1.0835, published_on: 2024-03-25}
+        - {rate_on: 2024-03-29, currency: USD, units_per_euro: 1.0835, published_on: 2024-03-25}
+        - {rate_on: 2024-04-02, currency: USD, units_per_euro: 1.0749, published_on: 2024-04-02}
