@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Policy tags on sensitive columns, their masking rules and readers",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tags"],
+  "$defs": {
+    "slug": {"type": "string", "pattern": "^[a-z][a-z0-9-]*[a-z0-9]$"},
+    "personas": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/slug"}
+    }
+  },
+  "properties": {
+    "tags": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "marks", "masking", "clear", "masked"],
+        "properties": {
+          "id": {
+            "description": "The policy tag's name, and with hyphens as underscores its masking rule's id.",
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}[a-z0-9]$"
+          },
+          "marks": {"type": "string", "minLength": 1},
+          "masking": {"enum": ["nullify", "hash", "last-four"]},
+          "clear": {"$ref": "#/$defs/personas"},
+          "masked": {"$ref": "#/$defs/personas"}
+        }
+      }
+    }
+  }
+}
