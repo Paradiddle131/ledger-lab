@@ -1,0 +1,109 @@
+sources:
+  - name: nl_government
+    description: >
+      The Dutch central government's budget statements (Rijksbegrotingsstaten) as the fetch kit
+      lands them (`python -m ingest.fetch nl-government-budget`): one row per served row and
+      budget moment, every field the publisher's text but the served row's position. Read unless
+      the `nl_government_budget` var is `sample`; on DuckDB from the landing path the kit uses, so
+      a build with nothing landed fails on the missing file. Source: Ministerie van Financiën,
+      CC0 1.0.
+    tables:
+      - name: budget
+        config:
+          external_location: "read_parquet('{{ env_var('LEDGER_LAB_LANDING', 'landing') }}/nl-government-budget')"
+
+models:
+  - name: stg_nl_government__budget_moments
+    description: >
+      One row per served row of the budget statements and budget moment, every served year,
+      typed: the year an integer, the amount a decimal in euros, the names trimmed and repaired.
+      A served row is one article of one chapter in one year for one kind of amount; some
+      articles are served on two rows, which `budget_against_outturn` makes one line.
+    columns:
+      - name: source_row
+        description: The served row's position among the file's rows, from 1, as the fetch kit numbers it.
+        data_tests:
+          - not_null
+      - name: fiscal_year
+        description: The budget year (`Begrotingsjaar`), a calendar year, as an integer.
+        data_tests:
+          - not_null
+      - name: kind
+        description: >
+          The kind of amount (`VUO`): `V` commitments, `U` cash expenditure, `O` receipts. The
+          three are different measures of one article and are never added together.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [V, U, O]
+      - name: chapter_code
+        description: >
+          The budget chapter's code (`HoofdstukRomeins`), as served; the code alone does not name
+          one chapter (`L` is a different fund in different rows of one year), so the name goes
+          with it.
+        data_tests:
+          - not_null
+      - name: chapter_name
+        description: >
+          The chapter's name (`Hoofdstuknaam`), its edge spaces trimmed and the doubly encoded
+          `ç` and `é` the file serves repaired.
+        data_tests:
+          - not_null
+      - name: article_number
+        description: The article's number within its chapter (`Artikelnummer`), as served text.
+        data_tests:
+          - not_null
+      - name: article_name
+        description: The article's name (`Artikelnaam`), trimmed and repaired like the chapter's.
+        data_tests:
+          - not_null
+      - name: moment
+        description: >
+          The budget moment, by the publisher's column name, in the order a year passes them:
+          `StandOWB` the draft budget, `StandO1` after the first supplementary budget, `StandSBS`
+          after the September supplementary budget (from 2023), `StandO2` after the second
+          supplementary budget, `Realisatie` the outturn.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [StandOWB, StandO1, StandSBS, StandO2, Realisatie]
+      - name: amount_eur
+        description: >
+          The amount in euros, a decimal (`numeric(28,6)` on DuckDB): the publisher's whole
+          thousands of euros times 1,000, so no figure is rounded. A zero here may be a moment the
+          year has not reached; the mart tells the two apart.
+        data_tests:
+          - not_null
+      - name: served_unit
+        description: The unit the fetch kit lands with every amount; the scaling to euros holds only for this one.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [EUR thousand]
+
+seeds:
+  - name: nl_government_budget_sample
+    description: >
+      Real rows of the landed budget statements, unchanged, for the builds inside `make check`,
+      where no landed file exists; read when the `nl_government_budget` var is `sample`. They
+      hold a year with every moment (2023 to 2025), years with moments not reached yet (2026 and
+      2027), an article served on two rows (2024 taxes), one whose two rows name it differently
+      (2024 apparatus), one whose second supplementary figure is a real zero, two funds sharing
+      chapter code `L` and an article number (2023 and 2025), two articles that share a code and
+      a name (2022, outside the calendar), doubly encoded names, a name ending in a space, and a negative figure.
+      Source: Ministerie van Financiën, CC0 1.0, copied unchanged.
+    config:
+      column_types:
+        source_row: bigint
+        Begrotingsjaar: string
+        VUO: string
+        HoofdstukRomeins: string
+        Hoofdstuknaam: string
+        Artikelnummer: string
+        Artikelnaam: string
+        moment: string
+        amount: string
+        unit: string

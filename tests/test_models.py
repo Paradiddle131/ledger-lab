@@ -78,8 +78,8 @@ def dbt(env: dict[str, str], cwd: Path, *args: str) -> subprocess.CompletedProce
 
 @pytest.fixture(scope="module")
 def build(tmp_path_factory: pytest.TempPathFactory) -> Build:
-    """Seed, build and test the whole project once on the local engine, with the committed sample
-    of ECB rates in place of a landed file."""
+    """Seed, build and test the whole project once on the local engine, with the committed samples
+    of ECB rates and Dutch budget rows in place of landed files."""
     assert DBT.is_file(), "dbt is missing: run `uv sync`"
     tmp_path = tmp_path_factory.mktemp("dbt")
     database = tmp_path / "ledger_lab.duckdb"
@@ -90,7 +90,8 @@ def build(tmp_path_factory: pytest.TempPathFactory) -> Build:
         "DBT_LOG_PATH": str(tmp_path / "logs"),
         "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
     }
-    result = dbt(env, tmp_path, "build", "--vars", json.dumps({"ecb_rates": "sample"}))
+    samples = {"ecb_rates": "sample", "nl_government_budget": "sample"}
+    result = dbt(env, tmp_path, "build", "--vars", json.dumps(samples))
     assert result.returncode == 0, result.stdout + result.stderr
     run = json.loads((tmp_path / "target" / "run_results.json").read_text())
     results = {r["unique_id"].split(".")[2]: r["status"] for r in run["results"]}
