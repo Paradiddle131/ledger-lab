@@ -29,7 +29,7 @@ controls:
   - id: individuals-hashed-before-landing
     layer: Data access
     owner: group-controller
-    asserts: A vendor or payee leaves ingest in clear only on evidence of an organisation (a legal form or a known organisation); every other name becomes an HMAC-SHA-256 keyed from the environment, and without the key nothing is read.
+    asserts: The pseudonymiser in ingest/individuals.py returns a vendor or payee name in clear only on evidence of a single organisation (a legal form with no second party joined, or a known organisation); it replaces every other name with an HMAC-SHA-256 keyed from the environment, gives two people two hashes, and refuses to start without the key.
     proven_by: tests/ingest/test_individuals.py::test_only_organisations_leave_in_clear
     status: implemented
   - id: one-person-one-session

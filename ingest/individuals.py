@@ -1,10 +1,19 @@
 """Replace every vendor or payee who is a person with a keyed hash, before anything is written.
 
-A name counts as an organisation only on positive evidence: a legal form that makes a separate
-legal person (a final `Ltd`, `B.V.`, `Inc` and the like, or a leading `Stichting`), or an exact
-match in names the caller already knows are organisations. A person marker (a trading-as part, an
-estate, executors, trustees, a trust, a surname followed by initials) overrides both. Anything else,
-sole traders and partnerships included, counts as a person.
+A name counts as an organisation only on positive evidence, and doubt always means a person:
+
+- A legal form that makes a separate legal person, as the final words (`Ltd`, `B.V.`, `Inc` and the
+  like) or a leading Dutch form (`Stichting`, `Vereniging`, `Coöperatie`), is evidence only when
+  the rest of the name is one plain party: words of letters and digits, with nothing that could
+  join a second party to the company (a comma other than one directly before the form, a dash, a
+  slash, a bracket, a dot, `&`, a word such as `and` or `as`, a title, a person's suffix or
+  degree, a role such as executor or guardian, a trust).
+- Before a final `B.V.` or `N.V.`, which also read as a surname's initials, the name needs two
+  words that are neither single letters nor Dutch name particles.
+- A name the caller already knows is an organisation counts as one.
+- A trading-as or also-known-as part, an estate, executors or a deceased overrides all of these.
+
+A company named after a person (`Jane Doe Ltd`) is a separate legal person and passes in clear.
 
 A person becomes `person:` and the 64 hex digits of HMAC-SHA-256 over the normalised name, keyed
 by `LEDGER_LAB_HASH_KEY`: fixed length, so it carries no part of the name and not its length.
@@ -37,16 +46,60 @@ LEGAL_FORM_SUFFIXES = (
     ("corp",),
     ("corporation",),
     ("llc",),
+    ("limited", "liability", "company"),
     ("pllc",),
 )
+# Dutch forms that also read as a surname's two initials.
+INITIALS_FORMS = frozenset({("bv",), ("nv",)})
 # First words of Dutch legal forms: foundation, association, cooperative.
 LEGAL_FORM_PREFIXES = frozenset({"stichting", "vereniging", "coöperatie", "cooperatie"})
+# The liability suffix a Dutch cooperative carries after its name.
+COOPERATIVE_SUFFIXES = frozenset({"ua", "wa", "ba"})
 
-TRADING_AS = re.compile(r"(?:^| )(?:t/a|d/b/a|dba|trading as|doing business as)(?: |$)")
-ABOUT_A_PERSON = re.compile(r"(?:^| )(?:estate|executors?|trustees?) of ")
-# One or two letters, dotted or not: "j", "j.", "jb", "j.b.", and so "n.v." after a comma too.
-INITIAL = re.compile(r"^[a-z]\.?(?:[a-z]\.?)?$")
-PUNCTUATION = re.compile(r"[.,;:()]")
+# Words, punctuation stripped, that make a name a person's wherever they stand, register included:
+# trading as, doing business as, also and formerly known as, handelend onder de naam, estates,
+# executors, as trustee for, deceased.
+PERSON_MARKERS = frozenset(
+    {"ta", "tas", "dba", "aka", "fka", "hodn", "estate", "exor", "exors", "executor", "executors"}
+    | {"executrix", "atf", "deceased"}
+)
+# Words that leave doubt whether a legal form covers the whole name: joiners, trusts, titles,
+# a person's suffixes and degrees, and the roles in which a person is paid on someone's behalf.
+DOUBT_WORDS = frozenset(
+    {"and", "en", "or", "andor", "as", "for", "via", "per", "attn", "care", "with", "obo", "x"}
+    | {"plus", "und", "vs", "v", "versus", "doing", "handelend", "onder", "namens", "tav", "tnv"}
+    | {"pa", "trust", "trustee", "trustees"}
+    | {"mr", "mrs", "ms", "miss", "mx", "dr", "prof", "sir", "dame", "lady", "lord", "rev"}
+    | {"dhr", "mevr", "mw", "drs", "ir", "ing"}
+    | {"esq", "jr", "junior", "sr", "senior", "ii", "iii", "phd", "md", "dds", "cpa"}
+    | {"exec", "exr", "admin", "administrator", "administratrix", "guardian", "minor", "heir"}
+    | {"heirs", "beneficiary", "receiver", "liquidator", "attorney", "poa", "custodian", "cust"}
+    | {"utma", "ugma", "payee", "plaintiff", "claimant", "personally", "herself", "himself"}
+    | {"self", "sole", "trader", "agent", "rep", "representative", "ttee", "uta", "fbo", "re"}
+    | {"ref", "inz", "eo", "cs", "mother", "father", "parent", "son", "daughter", "wife"}
+    | {"husband", "spouse", "widow", "widower"}
+)
+# Dutch name particles, which do not count as a word of a company name before `B.V.` or `N.V.`.
+PARTICLES = frozenset({"de", "der", "den", "van", "von", "het", "te", "ter", "ten", "'t", "op"})
+
+PLAIN_WORD = re.compile(r"^[^\W_]+(?:'[^\W_]+)*$")
+FORM_WORD = re.compile(r"^[^\W\d_]+(?:\.[^\W\d_]+)*$")
+NOT_A_LETTER = re.compile(r"[\W_]")
+SPELLINGS = str.maketrans(
+    {
+        "‘": "'",
+        "’": "'",
+        "‚": "'",
+        "‛": "'",
+        "′": "'",
+        "“": '"',
+        "”": '"',
+        "„": '"',
+        "‟": '"',
+        "″": '"',
+        "​": " ",
+    }
+)
 
 
 class NoHashKeyError(RuntimeError):
@@ -64,55 +117,104 @@ def hash_key(env: Mapping[str, str] | None = None) -> bytes:
 
 
 def normalise(name: str) -> str:
-    """NFKC, case folded, whitespace runs collapsed to one space, edge punctuation dropped."""
-    folded = " ".join(unicodedata.normalize("NFKC", name).casefold().split())
+    """The form a name is classified and hashed in.
+
+    NFKC; curly quotes made straight; a zero-width space made a space and every other invisible
+    format character dropped; case folded; whitespace runs collapsed to one space; edge
+    punctuation dropped.
+    """
+    text = unicodedata.normalize("NFKC", name).translate(SPELLINGS)
+    text = "".join(c for c in text if unicodedata.category(c) != "Cf")
+    folded = " ".join(text.casefold().split())
     return " ".join(folded.strip(" .,;:").split())
 
 
-def _is_person_marked(normalised: str, words: list[str]) -> bool:
-    if TRADING_AS.search(normalised) or ABOUT_A_PERSON.search(normalised):
-        return True
-    if words and words[-1] == "trust":
-        return True
-    if "," in normalised:
-        after = normalised.rsplit(",", 1)[1].split()
-        if after and all(INITIAL.match(word) for word in after):
-            return True
-    return False
+def _bare(word: str) -> str:
+    return NOT_A_LETTER.sub("", word)
+
+
+def _one_party(body: list[str], initials_form: bool) -> bool:
+    """True only when the words beside a legal form can be nothing but one company's name."""
+    if not body:
+        return False
+    if body[-1].endswith(","):
+        body = [*body[:-1], body[-1][:-1]]
+    if not all(PLAIN_WORD.match(word) for word in body):
+        return False
+    if any(word in DOUBT_WORDS for word in body):
+        return False
+    if initials_form:
+        return len([w for w in body if len(w) > 1 and w not in PARTICLES]) >= 2
+    return True
 
 
 def _has_legal_form(words: list[str]) -> bool:
     for suffix in LEGAL_FORM_SUFFIXES:
-        if len(words) > len(suffix) and tuple(words[-len(suffix) :]) == suffix:
-            return True
-    return len(words) > 1 and words[0] in LEGAL_FORM_PREFIXES
+        tail = words[-len(suffix) :]
+        if (
+            len(tail) == len(suffix)
+            and all(FORM_WORD.match(w) for w in tail)
+            and tuple(map(_bare, tail)) == suffix
+        ):
+            return _one_party(words[: -len(suffix)], suffix in INITIALS_FORMS)
+    if words and words[0] in LEGAL_FORM_PREFIXES:
+        body = words[1:]
+        if body and FORM_WORD.match(body[-1]) and _bare(body[-1]) in COOPERATIVE_SUFFIXES:
+            body = body[:-1]
+        return _one_party(body, initials_form=False)
+    return False
+
+
+def _marker_spellings(words: list[str]) -> set[str]:
+    """Each word bare and unaccented, plus each run of single letters joined (`t a` as `ta`)."""
+    bare = [
+        "".join(c for c in unicodedata.normalize("NFKD", _bare(w)) if not unicodedata.combining(c))
+        for w in words
+    ]
+    spellings, run = set(bare), ""
+    for word in [*bare, ""]:
+        if len(word) == 1:
+            run += word
+        else:
+            spellings.add(run)
+            run = ""
+    return spellings
 
 
 def _classify(normalised: str, register: frozenset[str]) -> bool:
-    words = [w for w in (PUNCTUATION.sub("", w) for w in normalised.split()) if w]
-    if _is_person_marked(normalised, words):
+    words = normalised.split()
+    if _marker_spellings(words) & PERSON_MARKERS:
         return False
     return normalised in register or _has_legal_form(words)
 
 
 def is_organisation(name: str, organisations: Iterable[str] = ()) -> bool:
-    """True only on positive evidence of an organisation; any doubt answers False (a person)."""
+    """True only on positive evidence of an organisation; any doubt answers False (a person).
+
+    It classifies only and needs no key; `pseudonymiser` is what refuses to run without one.
+    """
     return _classify(normalise(name), frozenset(map(normalise, organisations)))
 
 
 def pseudonymiser(
     env: Mapping[str, str] | None = None, organisations: Iterable[str] = ()
-) -> Callable[[str], str]:
+) -> Callable[[str | None], str | None]:
     """A function that passes an organisation's name through and hashes a person's.
 
     Reads the key first, so it raises before any name is seen.
     `organisations` are names already known to be organisations, matched after normalisation.
+    A missing payee (None, or nothing left after normalisation) stays None: it names nobody,
+    and one shared hash for every blank would read as one person.
     """
     key = hash_key(env)
     register = frozenset(map(normalise, organisations))
 
-    def hide(name: str) -> str:
+    def hide(name: str | None) -> str | None:
+        if name is None:
+            return None
         normalised = normalise(name)
+        if not normalised:
+            return None
         if _classify(normalised, register):
             return name
         digest = hmac.new(key, normalised.encode(), hashlib.sha256).hexdigest()
