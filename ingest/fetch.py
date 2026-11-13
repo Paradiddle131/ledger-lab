@@ -11,7 +11,9 @@ the landing path, and for a source with a step the raw bytes never reach disk at
 whose entry says it names people is refused, before any request, until it has a step.
 
 Holding the response in memory bounds a source: one over `MAX_BYTES` fails, as does one still
-arriving at `DEADLINE`.
+arriving at `DEADLINE`. A download whose connection drops (cut short, closed, timed out) starts
+again from the first byte, up to `ATTEMPTS` in all, within the same deadline; an error status, a
+cap or deadline breach and a checksum mismatch fail at once.
 """
 
 import hashlib
@@ -43,6 +45,13 @@ TIMEOUT = httpx.Timeout(60.0)
 DEADLINE = 1800.0
 # The largest response held in memory.
 MAX_BYTES = 512 * 1024 * 1024
+# Downloads a dropped connection may take in all, and the wait before the next, times the attempt
+# number: portals now and then close a long response before its end, and a rerun completes.
+ATTEMPTS = 3
+BACKOFF = 5.0
+# The transport errors a rerun can cure. httpx's own transport retries cover only connecting, not
+# a body cut short; an error status, a proxy refusal or an unsupported scheme stays fatal.
+DROPPED = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
 
 # A source's own step between verification and landing, by source name.
 STEPS: dict[str, Callable[[bytes], bytes]] = {"chicago-contracts": contracts.step}
@@ -88,25 +97,39 @@ def request_url(entry: dict[str, Any]) -> httpx.URL:
 
 def download(entry: dict[str, Any]) -> bytes:
     """The bytes the publisher serves, undecoded, following redirects, within the deadline and
-    the byte cap."""
+    the byte cap, downloading again from the start when the connection drops."""
     url = request_url(entry)
-    headers = {"User-Agent": CLIENT_NAME, "Accept-Encoding": "identity"}
     ends = time.monotonic() + DEADLINE
+    attempt = 1
+    while True:
+        try:
+            return _download_once(url, ends)
+        except DROPPED as error:
+            wait = BACKOFF * attempt
+            if attempt == ATTEMPTS:
+                raise FetchError(f"{url}: {error} (after {ATTEMPTS} attempts)") from error
+            if time.monotonic() + wait > ends:
+                raise FetchError(f"{url}: {error}; no time to retry by the deadline") from error
+            time.sleep(wait)
+            attempt += 1
+        except httpx.HTTPError as error:
+            raise FetchError(f"{url}: {error}") from error
+
+
+def _download_once(url: httpx.URL, ends: float) -> bytes:
+    headers = {"User-Agent": CLIENT_NAME, "Accept-Encoding": "identity"}
     body = bytearray()
-    try:
-        with (
-            httpx.Client(headers=headers, follow_redirects=True, timeout=TIMEOUT) as client,
-            client.stream("GET", url) as response,
-        ):
-            response.raise_for_status()
-            for chunk in response.iter_raw():
-                body += chunk
-                if len(body) > MAX_BYTES:
-                    raise FetchError(f"{url}: response is more than {MAX_BYTES} bytes")
-                if time.monotonic() > ends:
-                    raise FetchError(f"{url}: still arriving at the {DEADLINE:g} s deadline")
-    except httpx.HTTPError as error:
-        raise FetchError(f"{url}: {error}") from error
+    with (
+        httpx.Client(headers=headers, follow_redirects=True, timeout=TIMEOUT) as client,
+        client.stream("GET", url) as response,
+    ):
+        response.raise_for_status()
+        for chunk in response.iter_raw():
+            body += chunk
+            if len(body) > MAX_BYTES:
+                raise FetchError(f"{url}: response is more than {MAX_BYTES} bytes")
+            if time.monotonic() > ends:
+                raise FetchError(f"{url}: still arriving at the {DEADLINE:g} s deadline")
     return bytes(body)
 
 
