@@ -1,6 +1,7 @@
 """The Dutch central government's budget statements land one row per budget moment, as published.
 
-The served lines are real rows of the publisher's file (CC0), with its separator and line ends.
+The served lines are real rows of the publisher's file (CC0), with its separator and line ends;
+the odd ones (a blank, a literal `NULL`, a leading zero, a misspelt year) are edited real rows.
 """
 
 from pathlib import Path
@@ -14,7 +15,6 @@ from ingest.nl_government.budget import (
     COLUMNS,
     MOMENTS,
     UNIT,
-    YEARS,
     BudgetError,
     profile,
     step,
@@ -50,6 +50,9 @@ AFTER = (
     "2026;U;I;De Koning;1;Grondwettelijke uitkering aan de leden van het Koninklijk Huis;"
     "12571;0;12571;0;0"
 )
+ODD_TEXT = "2024;U;I;NULL;01;;11640;11640;11895;11895;012043"
+# The fiscal calendars cover 2023 to 2026, and 2026's outturn is not yet published.
+COVERED_WITH_OUTTURN = ("2023", "2024", "2025")
 
 
 def served(*lines: str, header: str = HEADER) -> bytes:
@@ -74,7 +77,7 @@ def test_each_served_row_lands_once_per_moment_with_its_amount_as_published(
     assert [r["moment"] for r in landed_rows] == list(MOMENTS)
     assert [r["amount"] for r in landed_rows] == ["11640", "11640", "11895", "11895", "12043"]
     assert {r["unit"] for r in landed_rows} == {UNIT}
-    assert {r["source_row"] for r in landed_rows} == {"1"}
+    assert {r["source_row"] for r in landed_rows} == {1}
     (first, *_) = landed_rows
     assert (first["Begrotingsjaar"], first["VUO"], first["HoofdstukRomeins"]) == ("2024", "U", "I")
     assert first["Artikelnaam"] == "Grondwettelijke uitkering aan de leden van het Koninklijk Huis"
@@ -82,18 +85,35 @@ def test_each_served_row_lands_once_per_moment_with_its_amount_as_published(
 
 def test_every_column_stays_the_publishers_text(tmp_path: Path) -> None:
     landed_rows = rows(landed(tmp_path, NEGATIVE_2024, TRAILING_SPACE_2023))
-    schema = duckdb.read_parquet(str(tmp_path / "nl-government-budget")).types
-    assert {str(t) for t in schema} == {"VARCHAR"}
+    rel = duckdb.read_parquet(str(tmp_path / "nl-government-budget"))
+    types = dict(zip(rel.columns, map(str, rel.types), strict=True))
+    assert types.pop("source_row") == "BIGINT", "the position is this step's number, not text"
+    assert set(types.values()) == {"VARCHAR"}
     assert [r["amount"] for r in landed_rows[:2]] == ["-4129465", "-4130301"]
     assert landed_rows[-1]["Artikelnaam"] == (
         "Uitgaven ten behoeve van leden en oud-leden Tweede Kamer "
     )
 
 
-def test_only_the_chosen_years_land(tmp_path: Path) -> None:
+def test_a_blank_a_literal_null_and_a_leading_zero_land_as_served(tmp_path: Path) -> None:
+    landed_rows = rows(landed(tmp_path, ODD_TEXT))
+    (first, *_, outturn) = landed_rows
+    assert first["Artikelnaam"] == "", "a blank lands as the empty text it was served as"
+    assert first["Hoofdstuknaam"] == "NULL"
+    assert first["Artikelnummer"] == "01"
+    assert (outturn["moment"], outturn["amount"]) == ("Realisatie", "012043")
+
+
+def test_every_served_year_lands(tmp_path: Path) -> None:
     landed_rows = rows(landed(tmp_path, BEFORE, KING_2023, AFTER))
-    assert {r["Begrotingsjaar"] for r in landed_rows} == {"2023"}
-    assert {r["source_row"] for r in landed_rows} == {"2"}, "positions count every served row"
+    assert [r["Begrotingsjaar"] for r in landed_rows[:: len(MOMENTS)]] == ["2013", "2023", "2026"]
+    assert [r["source_row"] for r in landed_rows[:: len(MOMENTS)]] == [1, 2, 3]
+
+
+@pytest.mark.parametrize("year", ["24", "2024 ", "", "twee"])
+def test_the_step_refuses_a_year_that_is_not_four_digits(year: str) -> None:
+    with pytest.raises(BudgetError, match="served row 2"):
+        step(served(KING_2023, KING_2024.replace("2024", year, 1)))
 
 
 def test_the_step_refuses_a_file_whose_columns_changed() -> None:
@@ -120,16 +140,31 @@ def test_the_profile_counts_moments_per_year_units_and_split_articles(tmp_path: 
         "Realisatie": {"rows": 3, "non_zero": 3},
     }
     assert sorted(counts["moments"]) == ["2023", "2024", "2025"]
+    assert counts["years"] == {"first": "2023", "last": "2025"}
 
 
 @pytest.mark.landed
 def test_each_landed_year_has_its_draft_supplementary_and_outturn_moments() -> None:
-    counts = profile(landing_path() / "nl-government-budget")
+    path = landing_path() / "nl-government-budget"
+    counts = profile(path)
     print(counts)
-    assert sorted(counts["moments"]) == list(YEARS)
-    for year in YEARS:
+    assert set(COVERED_WITH_OUTTURN) <= set(counts["moments"])
+    for year in COVERED_WITH_OUTTURN:
         for moment in MOMENTS:
             assert counts["moments"][year][moment]["non_zero"] > 0, (year, moment)
     assert counts["units"] == [UNIT]
     assert counts["non_integer_amounts"] == 0
     assert counts["articles_on_several_rows"] > 0
+    # The publisher's 2024 annual report for chapter I shows this outturn as 12.043 under
+    # "bedragen x € 1.000" (table 1 of rijksfinancien.nl/jaarverslag/2024/I).
+    king = (
+        duckdb.connect()
+        .execute(
+            "SELECT amount, unit FROM read_parquet($path) WHERE Begrotingsjaar = '2024'"
+            " AND VUO = 'U' AND HoofdstukRomeins = 'I' AND Artikelnummer = '1'"
+            " AND moment = 'Realisatie'",
+            {"path": str(path)},
+        )
+        .fetchall()
+    )
+    assert king == [("12043", UNIT)]
