@@ -41,17 +41,18 @@ Records that may name a person (sole proprietors, partnerships that are no separ
 The UK Department for Transport's spending over £25,000 comes from its monthly files on [GOV.UK](https://www.gov.uk/government/collections/dft-departmental-spending-over-25000): Contains public sector information licensed under the [Open Government Licence v3.0](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).
 What lands is the twelve files of one fiscal year in one shape, with every supplier who may be a person hashed and what describes or locates them left out.
 
-To land a source, run its line below; a source that names people (Chicago's contracts, the UK spend) also needs `LEDGER_LAB_HASH_KEY` set (see `ingest/individuals.py`).
+To land a source, run its line below; a source that names people (Chicago's contracts and payments, the UK spend) also needs `LEDGER_LAB_HASH_KEY` set (see `ingest/individuals.py`).
 A set's name lands every source whose name it prefixes (`<set>-<member>`) as one file, through the set's step, once every member has verified.
 The UK spend's landed tests download its files again and read their GOV.UK pages, so they need the network:
 
 ```bash
 uv run python -m ingest.fetch chicago-contracts   # lands landing/chicago-contracts as Parquet
+uv run python -m ingest.fetch chicago-payments    # lands landing/chicago-payments as Parquet
 uv run python -m ingest.fetch ecb-rates           # lands landing/ecb-rates as Parquet
 uv run python -m ingest.fetch gleif-legal-entities  # lands landing/gleif-legal-entities as Parquet
 uv run python -m ingest.fetch nl-government-budget  # lands landing/nl-government-budget as Parquet
 uv run python -m ingest.fetch uk-transport-spend-2025  # lands April 2025 to March 2026 as one Parquet set
-uv run pytest -m landed                          # profiles what is landed
+uv run pytest -m landed                          # profiles what is landed and checks the Chicago files for names, with the same key
 ```
 
 ## Checks

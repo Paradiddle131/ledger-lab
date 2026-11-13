@@ -15,39 +15,57 @@ surrounding spaces, the pound sign and the thousands commas are dropped, and not
 `" £25,018.57 "` lands as `25018.57`; it never passes through a float. Each file's dates must lie
 in one calendar month, and no two files may share one.
 
-A supplier who is or may be a person (the pseudonymiser finds no evidence of an organisation; the
-Department's own bodies, named in its `Department Family` and `Entity` columns, are known ones)
-leaves only as a keyed hash. Their row, and a row the Department itself redacted (supplier
-`REDACTED`), also keeps no description and no postal code, and its transaction number, which finds
-the name again in the published file, leaves as a keyed hash of its own (`ref:`). On every row of
-the set, a description, expense type or expense area is blanked when it holds a hashed supplier's
-name, compared on letters and digits only, in any word order or run together; a description is
-also blanked when it ends in one cut short (the Department cuts some descriptions short), and when
-it names someone by title or for the attention of (`Mr`, `Dr`, `FAO`), whoever they are. The
-Department's own marker for a name it removed from a description (`NAME REMOVED`) names nobody and
-stays. Not caught: a hashed name reduced to a surname or initials elsewhere; and a hashed row's
-date, amount and paying body still find it in the published file, which is public.
+A supplier who is or may be a person (the pseudonymiser's classifier finds no evidence of an
+organisation; the Department's own bodies, named in its `Department Family` and `Entity` columns,
+are known ones) leaves only as a keyed hash (`person:`). Their row, and a row the Department
+itself redacted (supplier `REDACTED`), also keeps no description and no postal code, and its
+transaction number, which finds the name again in the published file, leaves as a keyed identifier
+hash (`id:`, the shared one). On every row of the set (`ingest/scrub.py`), a description, expense
+type or expense area is blanked when a run of its words is a hashed supplier's name in any order,
+the rule Chicago's landing uses, or written run together (`JANEEXAMPLE`); a description is also
+blanked when it ends in a hashed name cut short, since the Department cuts long descriptions, when
+it names someone by title or for the attention of (`Mr`, `Dr`, `FAO`), whoever they are, and when
+it carries one of the classifier's person markers (an estate, a deceased, trading as). The
+run-together and cut-short rules are this step's because the Department's descriptions need them:
+on the real files they blank 12 and 141 descriptions the any-order rule leaves. The Department's
+own marker for a name it removed from a description (`NAME REMOVED`) names nobody and stays. A
+company whose name contains a hashed name (`EXAMPLE` hashed, `EXAMPLE LIMITED` in clear) stays in
+clear, as the pseudonymiser allows.
 
-The rows are held in memory throughout: the Parquet is written to an in-memory filesystem, and
-DuckDB is given no directory to spill to, so nothing of the served files touches disk.
+The landed tests (`pytest -m landed`, left out of `make check`) download the files again and
+assert that every month lands once with every served row, that no pinned month's GOV.UK page lists
+another file or a change note, and that no hashed name, squashed by their own spelling to letters
+and digits in either word order, starts at a word in any clear cell other than a supplier; that a
+hashed or redacted row keeps no description, postcode or clear reference; and that no hashed row's
+reference sits in clear. They only count clear supplier cells containing a hashed name, where an
+organisation's name may hold one by design. Neither the step nor the tests see a hashed name
+reduced to a surname or initials, split by other words, or, under five letters, inside a word; and
+a hashed row's date, amount and paying body still find it in the published file, which is public.
+
+The rows are held in memory throughout, written to Parquet by the shared in-memory writer with
+DuckDB given no directory to spill to, so nothing of the served files touches disk.
 """
 
 import csv
-import hmac
 import io
 import re
-import unicodedata
-import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
 from typing import TypedDict
 from urllib.parse import urlsplit
 
 import duckdb
-import fsspec
 
-from ingest.individuals import hash_key, normalise, pseudonymiser
+from ingest.individuals import (
+    hash_key,
+    identifier_hasher,
+    is_organisation,
+    marks_a_person,
+    normalise,
+    person_hasher,
+)
+from ingest.scrub import HashedNames, parquet_from_csv, words
 
 # The set's name in the fetch kit: fiscal year 2025, April 2025 to March 2026.
 SET = "uk-transport-spend-2025"
@@ -96,8 +114,6 @@ TITLES = frozenset(
 
 DATE = re.compile(r"([0-9]{2})/([0-9]{2})/([0-9]{4})")
 AMOUNT = re.compile(r" *£([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2}) *")
-WORD = re.compile(r"[^\W_]+")
-MEMORY = fsspec.filesystem("memory")
 
 
 class Profile(TypedDict):
@@ -114,54 +130,9 @@ class SpendError(ValueError):
     """A served file is not a month of spend this step knows."""
 
 
-def words(text: str) -> list[str]:
-    """The letters-and-digits runs of a text, accents dropped and case folded."""
-    folded = unicodedata.normalize("NFKD", text).casefold()
-    return WORD.findall("".join(c for c in folded if not unicodedata.combining(c)))
-
-
-class Names:
-    """Hashed suppliers' names, found in a text however it spaces, orders or cuts them."""
-
-    def __init__(self, names: set[str]) -> None:
-        spelt = [w for w in map(words, names) if w]
-        self.joined = {"".join(w) for w in spelt}
-        self.unordered = {tuple(sorted(w)) for w in spelt}
-        self.cut: dict[tuple[str, ...], set[str]] = {}
-        for w in spelt:
-            for k in range(1, len(w)):
-                self.cut.setdefault(tuple(w[:k]), set()).add(w[k])
-        self.longest = max(map(len, spelt), default=0) + 1
-
-    def inside(self, text: str) -> bool:
-        """A run of the text's words is a name, run together or in any order."""
-        cell = words(text)
-        for n in range(1, min(self.longest, len(cell)) + 1):
-            for i in range(len(cell) - n + 1):
-                run = cell[i : i + n]
-                if "".join(run) in self.joined or tuple(sorted(run)) in self.unordered:
-                    return True
-        return False
-
-    def cut_short(self, text: str) -> bool:
-        """The text ends in a name cut short: its first words whole, the next one begun."""
-        cell = words(text)
-        for n in range(1, min(self.longest, len(cell))):
-            head, last = tuple(cell[-n - 1 : -1]), cell[-1]
-            if any(rest.startswith(last) for rest in self.cut.get(head, ())):
-                return True
-        return False
-
-
 def names_by_title(text: str) -> bool:
     cell = words(text)
     return any(word in TITLES for word in cell[:-1])
-
-
-def reference_hasher(env: Mapping[str, str] | None) -> Callable[[str], str]:
-    """`ref:` and the keyed HMAC of a transaction number, labelled so it never equals a name's."""
-    key = hash_key(env)
-    return lambda ref: "ref:" + hmac.new(key, b"ref\0" + ref.encode(), "sha256").hexdigest()
 
 
 def read_month(source: str, raw: bytes) -> tuple[str, list[dict[str, str]]]:
@@ -201,24 +172,26 @@ def read_month(source: str, raw: bytes) -> tuple[str, list[dict[str, str]]]:
 def scrub(rows: list[dict[str, str]], env: Mapping[str, str] | None) -> None:
     """Every row of the set changed in place: see the module's account."""
     register = {row[c] for row in rows for c in ("department_family", "entity")}
-    hide, as_ref = pseudonymiser(env, register), reference_hasher(env)
+    as_person, as_id = person_hasher(env), identifier_hasher(env)
     hashed: set[str] = set()
     for row in rows:
-        redacted = normalise(row["supplier"]) == REDACTED
-        hidden = None if redacted else hide(row["supplier"] or None)
-        if redacted or (hidden is not None and hidden != row["supplier"]):
+        supplier = normalise(row["supplier"])
+        redacted = supplier == REDACTED
+        if redacted or (supplier and not is_organisation(row["supplier"], register)):
             if not redacted:
                 hashed.add(row["supplier"])
-                row["supplier"] = str(hidden)
-            row["transaction_number"] = as_ref(row["transaction_number"])
+                row["supplier"] = as_person(row["supplier"])
+            row["transaction_number"] = as_id(row["transaction_number"])
             for column in PERSONAL:
                 row[column] = ""
-    names = Names(hashed)
+    found = HashedNames(hashed)
     for row in rows:
         for column in FREE_TEXT:
-            if row[column] and names.inside(row[column]):
+            cell = row[column]
+            if cell and (found.in_any_order(cell) or found.run_together(cell)):
                 row[column] = ""
-        if names.cut_short(row["item_text"]) or names_by_title(row["item_text"]):
+        item = row["item_text"]
+        if item and (found.cut_short(item) or names_by_title(item) or marks_a_person(item)):
             row["item_text"] = ""
 
 
@@ -238,20 +211,8 @@ def step(files: Mapping[str, bytes], env: Mapping[str, str] | None = None) -> by
     writer = csv.DictWriter(out, COLUMNS, quoting=csv.QUOTE_ALL)
     writer.writeheader()
     writer.writerows(rows)
-    work = f"/{uuid.uuid4().hex}"
-    try:
-        MEMORY.pipe(f"{work}/rows.csv", out.getvalue().encode())
-        con = duckdb.connect(config={"temp_directory": ""})
-        con.register_filesystem(MEMORY)
-        con.read_csv(
-            f"memory://{work}/rows.csv",
-            header=True,
-            dtype={c: "BIGINT" if c == "source_row" else "VARCHAR" for c in COLUMNS},
-        ).write_parquet(f"memory://{work}/rows.parquet")
-        return MEMORY.cat(f"{work}/rows.parquet")
-    finally:
-        if MEMORY.exists(work):
-            MEMORY.rm(work, recursive=True)
+    dtype = {c: "BIGINT" if c == "source_row" else "VARCHAR" for c in COLUMNS}
+    return parquet_from_csv(out.getvalue(), dtype=dtype)
 
 
 def profile(path: Path) -> Profile:
@@ -278,5 +239,5 @@ def profile(path: Path) -> Profile:
         ),
         rows_hashed=one("SELECT count(*) FROM s WHERE supplier LIKE 'person:%'"),
         rows_redacted=one("SELECT count(*) FROM s WHERE supplier = 'REDACTED'"),
-        references_hashed=one("SELECT count(*) FROM s WHERE transaction_number LIKE 'ref:%'"),
+        references_hashed=one("SELECT count(*) FROM s WHERE transaction_number LIKE 'id:%'"),
     )

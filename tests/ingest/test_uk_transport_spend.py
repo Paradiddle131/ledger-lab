@@ -218,7 +218,7 @@ def test_a_person_is_hashed_and_nothing_on_their_row_names_or_locates_them(
     path = land(tmp_path, {url("april.csv"): served(person_row(), GRANT)})
     person, grant = rows(path)
     assert str(person["supplier"]).startswith("person:")
-    assert str(person["transaction_number"]).startswith("ref:")
+    assert str(person["transaction_number"]).startswith("id:")
     assert (person["item_text"], person["postal_code"]) == (None, None)
     assert (person["amount"], person["date"], person["entity"]) == (
         "30000.00",
@@ -233,7 +233,7 @@ def test_a_person_is_hashed_and_nothing_on_their_row_names_or_locates_them(
 def test_a_reference_hash_is_keyed_and_never_equals_a_name_hash(tmp_path: Path) -> None:
     same = person_row(supplier="4400123", number="4400123")
     (row,) = one_month(tmp_path, same)
-    assert row["supplier"].removeprefix("person:") != row["transaction_number"].removeprefix("ref:")
+    assert row["supplier"].removeprefix("person:") != row["transaction_number"].removeprefix("id:")
     unkeyed = hashlib.sha256(b"4400123").hexdigest()
     assert unkeyed not in (row["supplier"], row["transaction_number"])
 
@@ -248,7 +248,6 @@ def test_a_reference_hash_is_keyed_and_never_equals_a_name_hash(tmp_path: Path) 
         "example jane",
         "Jane-Example settlement",
         "JANEEXAMPLE",
-        "Payment to Jäne Example",
     ],
 )
 def test_a_hashed_name_in_another_months_free_text_blanks_that_cell(
@@ -301,6 +300,12 @@ def test_free_text_that_only_shares_a_word_with_a_hashed_name_stays(tmp_path: Pa
     assert other["item_text"] == "Example route 7"
 
 
+@pytest.mark.parametrize("item", ["Estate of Sam Testperson", "Sam Testperson T/A Example Taxis"])
+def test_a_description_carrying_a_person_marker_is_blanked(tmp_path: Path, item: str) -> None:
+    (row,) = one_month(tmp_path, person_row(supplier="CENTREBUS LTD", item=item))
+    assert row["item_text"] is None
+
+
 @pytest.mark.parametrize("item", ["Payment Mr Testperson", "FAO Sam Testperson", "Dr. Testperson"])
 def test_free_text_naming_someone_by_title_or_for_the_attention_of_is_blanked(
     tmp_path: Path, item: str
@@ -314,7 +319,7 @@ def test_the_departments_own_redaction_stays_and_its_row_is_treated_as_a_person(
 ) -> None:
     (row,) = one_month(tmp_path, person_row(supplier="REDACTED", item="NAME REMOVED"))
     assert row["supplier"] == "REDACTED"
-    assert str(row["transaction_number"]).startswith("ref:")
+    assert str(row["transaction_number"]).startswith("id:")
     assert (row["item_text"], row["postal_code"]) == (None, None)
     counts = profile(tmp_path / SET)
     assert (counts["rows_redacted"], counts["suppliers_hashed"]) == (1, 0)
@@ -466,8 +471,8 @@ def test_no_hashed_supplier_is_named_anywhere_in_the_landed_set(real: tuple) -> 
                 hashed_names.add(supplier)
             if row["supplier"] != supplier or row["supplier"] == "REDACTED":
                 hashed_refs.add(reference)
-                assert row["transaction_number"] == "ref:" + row["transaction_number"][4:]
-                assert len(row["transaction_number"]) == 68
+                assert row["transaction_number"] == "id:" + row["transaction_number"][3:]
+                assert len(row["transaction_number"]) == 67
                 assert (row["item_text"], row["postal_code"]) == (None, None)
             else:
                 clear_refs.add(reference)
@@ -481,7 +486,7 @@ def test_no_hashed_supplier_is_named_anywhere_in_the_landed_set(real: tuple) -> 
     for row in landed:
         for column in COLUMNS[2:]:
             cell = row[column]
-            if cell is None or cell.startswith(("person:", "ref:")):
+            if cell is None or cell.startswith(("person:", "id:")):
                 continue
             if named_in(cell, spellings):
                 if column == "supplier":

@@ -6,19 +6,34 @@
 #       url: https://...?$limit=50000
 #       order: {<param>: <value>}
 #       cut_off: {<param>: <value>}
-#     sha256: <SHA-256 of the bytes the publisher serves, undecoded>  # pragma: allowlist secret (a checksum, not a secret)
+#     sha256: <SHA-256 of the bytes the publisher serves, undecoded>
 #     licence: https://...              # the licence, confirmed on the source's issue
 #     publisher: <who publishes it>
 #     names_people: false               # true: lands only through the source's step
+# A live table is ordered by its content, every column, never by the portal's row id, which the
+# City reassigns when it recreates rows; rows that tie on every column are identical bytes.
 sources:
-  # City of Chicago contracts (rsxa-ify5), every row approved by the cut-off, in the portal's row
-  # order. The table is live: a row the City edits changes the bytes, and a re-pin moves the hash.
+  # City of Chicago contracts (rsxa-ify5), every row approved by the cut-off. The table is live:
+  # a row the City edits changes the bytes, and a re-pin moves the hash.
   chicago-contracts:
     query:
       url: https://data.cityofchicago.org/resource/rsxa-ify5.csv?$limit=500000
-      order: {$order: ":id"}
+      order: {$order: "purchase_order_contract_number, revision_number, specification_number, contract_type, start_date, end_date, approval_date, department, vendor_name, vendor_id, address_1, address_2, city, state, zip, award_amount, procurement_type, contract_pdf, purchase_order_description"}
       cut_off: {$where: "approval_date <= '2026-10-31T23:59:59'"}
-    sha256: c71eaff5b0bbbb62c76ab3f03f0b07a775e4a2f4f7b3f1968309c863cae5c48f  # pragma: allowlist secret
+    sha256: c17c32c54203ce30b5f67464da2eb59af5cd5a5cdfb3c2d6bac1fd9d34d11e4a  # pragma: allowlist secret
+    licence: https://www.chicago.gov/city/en/narr/foia/data_disclaimer.html
+    publisher: City of Chicago
+    names_people: true
+  # City of Chicago payments (s4vu-giwb), every row the portal created by the cut-off. Check dates
+  # are text in two forms and payments with old check dates arrive every day, so the cut-off is the
+  # portal's row-creation time. The City reloads the whole table when it rolls payments older than
+  # two years up by year, and a reload moves the hash.
+  chicago-payments:
+    query:
+      url: https://data.cityofchicago.org/resource/s4vu-giwb.csv?$limit=1000000
+      order: {$order: "voucher_number, check_date, amount, contract_number, vendor_name, department_name"}
+      cut_off: {$where: ":created_at <= '2026-10-31T23:59:59'"}
+    sha256: 840db59a961f62cc2ce514d9359acee13abdd6b16043f3b559d4a962405d8a53  # pragma: allowlist secret
     licence: https://www.chicago.gov/city/en/narr/foia/data_disclaimer.html
     publisher: City of Chicago
     names_people: true

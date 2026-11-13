@@ -27,13 +27,15 @@ LICENCE = "https://licence.example.org/open"
 
 class Site:
     """A local HTTP server: fixed files, redirects, one live table behind a query, a gzip-encoded
-    file, and a server that drips one byte at a time."""
+    file, a server that drips one byte at a time, and one that cuts its first `cuts` responses
+    short."""
 
     def __init__(self) -> None:
         self.files: dict[str, bytes] = {"/file.csv": FILE, "/encoded.csv": GZIPPED}
         self.redirects: dict[str, str] = {"/moved.csv": "/file.csv"}
         self.table: list[tuple[int, str]] = [(2, "-3.50"), (1, "10.00"), (3, "7.25")]
         self.requests: list[dict[str, Any]] = []
+        self.cuts = 0
         site = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -53,6 +55,12 @@ class Site:
                 if url.path == "/drip":
                     self.drip()
                     return
+                if url.path == "/cut.csv" and site.cuts > 0:
+                    site.cuts -= 1
+                    self.cut()
+                    return
+                if url.path == "/cut.csv":
+                    body = FILE
                 if body is None:
                     self.send_error(404)
                     return
@@ -74,6 +82,15 @@ class Site:
                         time.sleep(0.02)
                 except OSError:
                     pass
+
+            def cut(self) -> None:
+                """Promise the whole file, send half of it, and close the connection."""
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(FILE)))
+                self.end_headers()
+                self.wfile.write(FILE[: len(FILE) // 2])
+                self.wfile.flush()
+                self.close_connection = True
 
             def log_message(self, format: str, *args: Any) -> None:
                 pass
@@ -104,6 +121,11 @@ def site(monkeypatch: pytest.MonkeyPatch) -> Iterator[Site]:
     yield served
     served.server.shutdown()
     served.server.server_close()
+
+
+@pytest.fixture(autouse=True)
+def no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fetch, "BACKOFF", 0.0)
 
 
 @pytest.fixture
@@ -241,6 +263,61 @@ def test_an_error_status_fails_and_keeps_nothing(
     with pytest.raises(fetch.FetchError, match="404"):
         fetch.fetch("payments", landing)
     assert everything_under(landing) == []
+
+
+def test_a_download_the_server_cuts_short_lands_on_the_retry(
+    site: Site, landing: Path, write_sources: Callable[..., Path]
+) -> None:
+    site.cuts = 1
+    write_sources(payments=entry(f"{site.base}/cut.csv", sha256(FILE)))
+    assert fetch.fetch("payments", landing).read_bytes() == FILE
+    assert [r["path"] for r in site.requests] == ["/cut.csv", "/cut.csv"]
+
+
+def test_a_download_cut_short_every_time_fails_after_the_last_attempt(
+    site: Site, landing: Path, write_sources: Callable[..., Path]
+) -> None:
+    site.cuts = fetch.ATTEMPTS
+    write_sources(payments=entry(f"{site.base}/cut.csv", sha256(FILE)))
+    with pytest.raises(fetch.FetchError, match=f"after {fetch.ATTEMPTS} attempts"):
+        fetch.fetch("payments", landing)
+    assert len(site.requests) == fetch.ATTEMPTS
+    assert everything_under(landing) == []
+
+
+def test_an_error_status_is_not_retried(
+    site: Site, landing: Path, write_sources: Callable[..., Path]
+) -> None:
+    write_sources(payments=entry(f"{site.base}/gone.csv", sha256(FILE)))
+    with pytest.raises(fetch.FetchError, match="404"):
+        fetch.fetch("payments", landing)
+    assert len(site.requests) == 1
+
+
+def test_a_checksum_mismatch_is_not_retried(
+    site: Site, landing: Path, write_sources: Callable[..., Path]
+) -> None:
+    write_sources(payments=entry(f"{site.base}/file.csv", sha256(b"something else")))
+    with pytest.raises(fetch.ChecksumMismatchError):
+        fetch.fetch("payments", landing)
+    assert len(site.requests) == 1
+
+
+def test_the_deadline_holds_across_retries(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fetch, "DEADLINE", 0.3)
+    monkeypatch.setattr(fetch, "BACKOFF", 0.5)
+    site.cuts = fetch.ATTEMPTS
+    write_sources(payments=entry(f"{site.base}/cut.csv", sha256(FILE)))
+    started = time.monotonic()
+    with pytest.raises(fetch.FetchError, match="deadline"):
+        fetch.fetch("payments", landing)
+    assert time.monotonic() - started < 0.5
+    assert len(site.requests) == 1
 
 
 def test_every_host_gets_the_generic_client_name(
@@ -516,6 +593,24 @@ def test_a_set_lands_every_member_through_its_step_as_one_file(
         [f"{site.base}/file.csv", f"{site.base}/second.csv"]
     ], "the step gets each member by its URL, in the sources file's order, and no other source"
     assert everything_under(landing) == [landed]
+
+
+def test_a_set_member_whose_download_is_cut_short_lands_on_the_retry(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    site.cuts = 1
+    monkeypatch.setitem(fetch.SET_STEPS, "spend", lambda files: b"".join(files.values()))
+    write_sources(
+        **{
+            "spend-1": entry(f"{site.base}/file.csv", sha256(FILE)),
+            "spend-2": entry(f"{site.base}/cut.csv", sha256(FILE)),
+        }
+    )
+    assert fetch.fetch_set("spend", landing).read_bytes() == FILE + FILE
+    assert [r["path"] for r in site.requests] == ["/file.csv", "/cut.csv", "/cut.csv"]
 
 
 def test_a_set_with_one_drifted_member_lands_nothing_and_never_runs_its_step(
