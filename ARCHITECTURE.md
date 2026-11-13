@@ -16,13 +16,13 @@ A control plane (identity, tool policy, approval, guardrails, audit, traces, eva
 | ERP: posting engine and write target | Odoo in containers | the ERP's own API | not built yet |
 | Orchestrator | Airflow in containers | one DAG per pipeline calling the pieces above | not built yet |
 | `access/`: personas, their grants, policies, visibility tests | BigQuery row, column and masking rules | [`access/personas.yaml`](access/personas.yaml) | persona set and mapping built as data; identities and policies not built yet |
-| `semantics/`: governed metrics, glossary, verified queries | the platform's catalog, or a stand-in | metric definitions in the tree | not built yet |
+| `semantics/`: governed metrics, glossary, verified queries | the platform's catalog, or a stand-in | metric definitions in the tree; the glossary in [`semantics/glossary.yaml`](semantics/glossary.yaml) | glossary built as data; metrics and verified queries not built yet |
 | `agent/`: the governed data agent | the native data agent, own agent beside it | one question-to-answer interface | not built yet |
 | `workflow/`: proposals and human approval | containers | one proposal-to-approval interface | not built yet |
 | `controls/`: the controls catalogue | the tree | [`controls/catalogue.yaml`](controls/catalogue.yaml) | catalogue built as data; no control implemented yet |
 | `platform/`: GCP definitions, container stack, cost fences | GCP free tier and the session | configuration from the environment; the stack's entry point is `make stack-up [PROFILE=<service>]` / `make stack-down` over [`platform/stack/compose.yaml`](platform/stack/compose.yaml) | stack skeleton built (the shared database service, checked by `docker compose config`); GCP definitions and cost fences not built yet |
 
-The catalogues are YAML validated by a JSON Schema beside each file, and `tests/` checks their cross-references: every grant names a known persona, entity and product, every control's owner is a human persona, and a control is marked implemented only once its proving test exists.
+The catalogues are YAML validated by a JSON Schema beside each file, and `tests/` checks their cross-references: every grant names a known persona, entity and product, every control's owner and every glossary term's owner is a human persona, a glossary term's references name other terms, and a control is marked implemented only once its proving test exists.
 
 ## Choices
 

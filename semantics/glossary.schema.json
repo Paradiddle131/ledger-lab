@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Finance glossary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["terms"],
+  "$defs": {
+    "slug": {"type": "string", "pattern": "^[a-z][a-z0-9-]*[a-z0-9]$"},
+    "line": {
+      "description": "One line of plain text: no line break, no leading or trailing space.",
+      "type": "string",
+      "pattern": "^\\S(?:[^\\n]*\\S)?$"
+    }
+  },
+  "properties": {
+    "terms": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "term", "definition"],
+        "properties": {
+          "id": {"$ref": "#/$defs/slug"},
+          "term": {"$ref": "#/$defs/line"},
+          "definition": {"$ref": "#/$defs/line"},
+          "owner": {
+            "description": "The persona (access/personas.yaml) that owns the term's meaning.",
+            "$ref": "#/$defs/slug"
+          },
+          "see_also": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"$ref": "#/$defs/slug"}
+          }
+        }
+      }
+    }
+  }
+}

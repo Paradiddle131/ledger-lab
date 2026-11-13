@@ -29,5 +29,10 @@ def access() -> dict[str, Any]:
 
 
 @pytest.fixture(scope="session")
+def glossary() -> dict[str, Any]:
+    return load_checked(REPO / "semantics/glossary.yaml", REPO / "semantics/glossary.schema.json")
+
+
+@pytest.fixture(scope="session")
 def controls() -> dict[str, Any]:
     return load_checked(REPO / "controls/catalogue.yaml", REPO / "controls/schema.json")
