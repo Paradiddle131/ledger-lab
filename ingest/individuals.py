@@ -20,7 +20,6 @@ by `LEDGER_LAB_HASH_KEY`: fixed length, so it carries no part of the name and no
 Generate a key with `python -c "import secrets; print(secrets.token_hex(32))"`.
 """
 
-import hashlib
 import hmac
 import os
 import re
@@ -182,10 +181,20 @@ def _marker_spellings(words: list[str]) -> set[str]:
 
 
 def _classify(normalised: str, register: frozenset[str]) -> bool:
-    words = normalised.split()
-    if _marker_spellings(words) & PERSON_MARKERS:
+    if _marks_a_person(normalised):
         return False
-    return normalised in register or _has_legal_form(words)
+    return normalised in register or _has_legal_form(normalised.split())
+
+
+def _marks_a_person(normalised: str) -> bool:
+    return bool(_marker_spellings(normalised.split()) & PERSON_MARKERS)
+
+
+def marks_a_person(text: str) -> bool:
+    """True when the text carries one of the markers that make a name a person's wherever they
+    stand (an estate, executors, a deceased, trading as, also known as): a free-text cell that
+    does names a party who is or was a person."""
+    return _marks_a_person(normalise(text))
 
 
 def is_organisation(name: str, organisations: Iterable[str] = ()) -> bool:
@@ -196,18 +205,14 @@ def is_organisation(name: str, organisations: Iterable[str] = ()) -> bool:
     return _classify(normalise(name), frozenset(map(normalise, organisations)))
 
 
-def pseudonymiser(
-    env: Mapping[str, str] | None = None, organisations: Iterable[str] = ()
-) -> Callable[[str | None], str | None]:
+def pseudonymiser(env: Mapping[str, str] | None = None) -> Callable[[str | None], str | None]:
     """A function that passes an organisation's name through and hashes a person's.
 
     Reads the key first, so it raises before any name is seen.
-    `organisations` are names already known to be organisations, matched after normalisation.
     A missing payee (None, or nothing left after normalisation) stays None: it names nobody,
     and one shared hash for every blank would read as one person.
     """
-    key = hash_key(env)
-    register = frozenset(map(normalise, organisations))
+    as_person = person_hasher(env)
 
     def hide(name: str | None) -> str | None:
         if name is None:
@@ -215,9 +220,28 @@ def pseudonymiser(
         normalised = normalise(name)
         if not normalised:
             return None
-        if _classify(normalised, register):
+        if _classify(normalised, frozenset()):
             return name
-        digest = hmac.new(key, normalised.encode(), hashlib.sha256).hexdigest()
-        return f"person:{digest}"
+        return as_person(name)
 
     return hide
+
+
+def person_hasher(env: Mapping[str, str] | None = None) -> Callable[[str], str]:
+    """A function that hashes any name as a person's, whatever it reads as: `person:` and the HMAC
+    of the normalised name. Reads the key first."""
+    key = hash_key(env)
+    return lambda name: "person:" + _digest(key, normalise(name).encode())
+
+
+def identifier_hasher(env: Mapping[str, str] | None = None) -> Callable[[str], str]:
+    """A function that hashes a publisher's identifier of a person (a vendor id): `id:` and the HMAC
+    of the identifier with a label of its own before it, so no identifier's hash equals a name's.
+    It stays a join key between a publisher's tables but can no longer be looked up. Reads the key
+    first."""
+    key = hash_key(env)
+    return lambda ident: "id:" + _digest(key, b"id\0" + ident.strip().encode())
+
+
+def _digest(key: bytes, data: bytes) -> str:
+    return hmac.new(key, data, "sha256").hexdigest()

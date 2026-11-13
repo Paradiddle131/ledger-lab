@@ -261,7 +261,7 @@ def test_only_organisations_leave_in_clear() -> None:
         "Acme Widgets Ltd": "organisation",
         "Voorbeeld Holding B.V.": "organisation",
         "Acme, Inc.": "organisation",
-        "Gemeente Voorbeeldstad": "organisation",
+        "Gemeente Voorbeeldstad": "person",
         "DR JANE DOE": "person",
         "Doe, J.": "person",
         "Jane Doe t/a Doe Plumbing Ltd": "person",
@@ -271,7 +271,7 @@ def test_only_organisations_leave_in_clear() -> None:
         "Jane Doe c/o Roe Solicitors LLP": "person",
         "DOE N.V.": "person",
     }
-    hide = pseudonymiser(ENV, organisations=["Gemeente Voorbeeldstad"])
+    hide = pseudonymiser(ENV)
     hashes = set()
     for name, kind in payees.items():
         out = hide(name)
@@ -282,17 +282,16 @@ def test_only_organisations_leave_in_clear() -> None:
             hashes.add(out)
     assert len(hashes) == list(payees.values()).count("person"), "two people share a hash"
     with pytest.raises(NoHashKeyError):
-        pseudonymiser({}, organisations=["Gemeente Voorbeeldstad"])
+        pseudonymiser({})
 
 
 def test_an_organisation_passes_unchanged() -> None:
     assert pseudonymiser(ENV)("Acme Widgets Ltd") == "Acme Widgets Ltd"
 
 
-def test_a_register_match_passes_unchanged() -> None:
-    hide = pseudonymiser(ENV, organisations=["Gemeente Voorbeeldstad"])
-    assert hide("Gemeente Voorbeeldstad") == "Gemeente Voorbeeldstad"
-    assert HASHED.match(hide("Gemeente Elders") or "")
+def test_a_register_match_counts_as_an_organisation() -> None:
+    assert is_organisation("Gemeente Voorbeeldstad", {"Gemeente Voorbeeldstad"})
+    assert not is_organisation("Gemeente Elders", {"Gemeente Voorbeeldstad"})
 
 
 def test_the_same_name_and_key_give_the_same_hash() -> None:

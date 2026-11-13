@@ -38,14 +38,15 @@ Legal-entity records come from the GLEIF golden copy under [CC0 1.0](https://cre
 What lands here is a subset the lab derives from it (three countries, selected fields), not GLEIF's own data, and GLEIF does not endorse this project.
 Records that may name a person (sole proprietors, partnerships that are no separate legal person, and records without a real legal-form code whose legal name is not evidence of an organisation) and person-like other names are left out; legal names of records with a real legal-form code land as the register records them, and a record without a real legal-form code never vouches that a name is an organisation.
 
-To land a source, run its line below; a source that names people (Chicago's contracts) also needs `LEDGER_LAB_HASH_KEY` set (see `ingest/individuals.py`):
+To land a source, run its line below; a source that names people (Chicago's contracts and payments) also needs `LEDGER_LAB_HASH_KEY` set (see `ingest/individuals.py`):
 
 ```bash
 uv run python -m ingest.fetch chicago-contracts   # lands landing/chicago-contracts as Parquet
+uv run python -m ingest.fetch chicago-payments    # lands landing/chicago-payments as Parquet
 uv run python -m ingest.fetch ecb-rates           # lands landing/ecb-rates as Parquet
 uv run python -m ingest.fetch gleif-legal-entities  # lands landing/gleif-legal-entities as Parquet
 uv run python -m ingest.fetch nl-government-budget  # lands landing/nl-government-budget as Parquet
-uv run pytest -m landed                          # profiles what is landed
+uv run pytest -m landed                          # profiles what is landed and checks the Chicago files for names, with the same key
 ```
 
 ## Checks
