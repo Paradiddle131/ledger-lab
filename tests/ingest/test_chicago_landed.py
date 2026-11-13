@@ -157,8 +157,9 @@ def exposed(
 def test_the_cross_file_exposure_is_counted_and_consistent() -> None:
     """A name one file hashes may sit in clear in the other file's descriptions: each step sees
     only its own table, and a landing must not depend on another table's data. The count is the
-    known remaining gap, mostly organisations hashed for lack of evidence, which vendor matching
-    will shrink; it is reported, not asserted to be zero."""
+    known remaining gap, mostly organisations hashed for lack of evidence; a vendor the register
+    vouches for keeps its description, so the gap also holds what those descriptions name. It is
+    reported, not asserted to be zero."""
     contract_path, payment_path = landed("chicago-contracts"), landed("chicago-payments")
     as_person = person_hasher()
     from_contracts = hashes(contract_path, "vendor_name")

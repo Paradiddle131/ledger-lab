@@ -33,7 +33,7 @@ from ingest.gleif.legal_entities import (
     PARTNERSHIPS,
     SOLE_PROPRIETORSHIPS,
 )
-from ingest.individuals import KEY_VARIABLE, person_hasher
+from ingest.individuals import KEY_VARIABLE, person_hasher, pseudonymiser
 
 ENV = {KEY_VARIABLE: "k" * 32}
 # Codes from GLEIF's list: a California for-profit corporation, a British public limited company,
@@ -205,3 +205,11 @@ def test_a_hashed_name_still_blanks_a_vouched_organisations_description(
     )
     assert str(person["payee"]).startswith("person:")
     assert (hospital["payee"], hospital["note"], hospital["zip"]) == (HOSPITAL, None, "60601")
+
+
+def test_the_pseudonymiser_passes_a_known_name_but_a_person_marker_still_wins() -> None:
+    hide = pseudonymiser(ENV, [HOSPITAL, f"{HOSPITAL} T/A EXAMPLE CLINIC"])
+    assert hide(HOSPITAL.lower()) == HOSPITAL.lower()
+    assert hide(f"{HOSPITAL} T/A EXAMPLE CLINIC") == person_hasher(ENV)(
+        f"{HOSPITAL} T/A EXAMPLE CLINIC"
+    )
