@@ -7,15 +7,14 @@ OpenTofu.
 
 import ast
 import re
-from pathlib import Path
 from typing import Any
 
-import hcl2
 import pytest
 import yaml
+from fences import CONFIG, GCP, blocks, declared, local, one, unquote, variable
 
-REPO = Path(__file__).resolve().parents[2]
-GCP = REPO / "platform/gcp"
+REPO = GCP.parents[1]
+QUOTA = "google_service_usage_consumer_quota_override"
 FREE_REGIONS = {"us-west1", "us-central1", "us-east1"}
 FREE_MONTHLY_QUERY_MIB = 1024 * 1024  # 1 TiB
 # Every resource type the definitions may declare; none of them bills inside the free tier.
@@ -36,56 +35,6 @@ ACCOUNT_ID = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
 AGENT_MEMBER = "serviceAccount:${data.google_service_account.agent.email}"
 
 
-def unquote(value: Any) -> Any:
-    if isinstance(value, str) and len(value) >= 2 and value[0] == value[-1] == '"':
-        return value[1:-1]
-    return value
-
-
-def load() -> dict[str, list[Any]]:
-    merged: dict[str, list[Any]] = {}
-    for path in sorted(GCP.glob("*.tf")):
-        with path.open() as handle:
-            for key, value in hcl2.load(handle).items():
-                if isinstance(value, list):
-                    merged.setdefault(key, []).extend(value)
-    return merged
-
-
-CONFIG = load()
-
-
-def blocks(kind: str) -> dict[tuple[str, str], dict[str, Any]]:
-    """Resources (or data sources) by (type, name)."""
-    found = {}
-    for entry in CONFIG.get(kind, []):
-        for rtype, named in entry.items():
-            for name, body in named.items():
-                found[(unquote(rtype), unquote(name))] = body
-    return found
-
-
-def one(rtype: str) -> dict[str, Any]:
-    """The one resource of a type, declared once: no `count` or `for_each` multiplies it."""
-    matches = [body for (t, _), body in blocks("resource").items() if t == rtype]
-    assert len(matches) == 1, rtype
-    assert {"count", "for_each"} & set(matches[0]) == set(), rtype
-    return matches[0]
-
-
-def local(name: str) -> Any:
-    values = [entry[name] for entry in CONFIG["locals"] if name in entry]
-    assert len(values) == 1, name
-    return values[0]
-
-
-def variable(name: str) -> dict[str, Any]:
-    for entry in CONFIG["variable"]:
-        if f'"{name}"' in entry:
-            return entry[f'"{name}"']
-    raise KeyError(name)
-
-
 def test_only_allowlisted_resources_are_declared() -> None:
     declared = {rtype for rtype, _ in blocks("resource")}
     assert declared - ALLOWED == set()
@@ -95,6 +44,11 @@ def test_only_allowlisted_resources_are_declared() -> None:
 def test_no_module_is_used() -> None:
     # A module's resources are invisible to these checks, so none may hide a grant or a resource.
     assert "module" not in CONFIG
+
+
+def test_a_resource_read_as_single_refuses_count_and_for_each() -> None:
+    with pytest.raises(LookupError, match="multiplied"):
+        one("google_service_account_iam_member")
 
 
 def test_providers_are_pinned_exactly() -> None:
@@ -204,6 +158,27 @@ def test_identifiers_come_from_variables_with_no_default(name: str) -> None:
     assert "default" not in variable(name)
 
 
+def test_the_live_check_reads_its_expected_values_from_these_definitions() -> None:
+    expected = declared()
+    assert expected.query_cap_mib == int(unquote(one(QUOTA)["override_value"]))
+    assert expected.query_cap_metric == "bigquery.googleapis.com/quota/query/usage"
+    assert expected.query_cap_limit == "/d/project"
+    assert expected.region in FREE_REGIONS
+    assert expected.kill_threshold_bounds == (1, 10)
+    assert expected.budget_thresholds == tuple(
+        (t, "CURRENT_SPEND") for t in (0.01, 0.03, 0.05, 1.0)
+    )
+    assert expected.budget_period == "MONTH"
+    assert expected.kill_switch_roles == (
+        "roles/billing.projectManager",
+        "roles/eventarc.eventReceiver",
+        "roles/workflows.invoker",
+    )
+    assert expected.workflow_source == (GCP / "kill_switch.workflow.yaml").read_text()
+    unresolved = [k for k, v in vars(expected).items() if k != "workflow_source" and "${" in str(v)]
+    assert unresolved == []
+
+
 def persona_ids() -> list[str]:
     personas = yaml.safe_load((REPO / "access/personas.yaml").read_text())["personas"]
     return [p["id"] for p in personas]
@@ -233,12 +208,19 @@ def test_one_service_account_per_persona_and_no_more() -> None:
     assert persona["for_each"] == "${local.personas}"
     assert persona["account_id"] == "${each.key}"
     assert PERSONAS_FROM_FILE.fullmatch(local("personas"))
-    assert unquote(accounts["kill_switch"]["account_id"]) not in persona_ids()
+    # The live check names the kill switch's account, never a persona's.
+    kill_switch = unquote(accounts["kill_switch"]["account_id"])
+    assert declared().kill_switch_account == kill_switch
+    assert kill_switch not in persona_ids()
 
 
 def test_the_agent_account_is_referenced_by_a_variable_never_managed_here() -> None:
     agent = blocks("data")[("google_service_account", "agent")]
     assert agent["account_id"] == "${var.agent_account_id}"
+
+
+def attributes(body: dict[str, Any]) -> set[str]:
+    return set(body) - {"__is_block__"}
 
 
 def test_only_the_agent_mints_tokens_and_only_for_persona_accounts() -> None:
@@ -262,10 +244,6 @@ def test_no_project_level_role_reaches_anyone_but_the_kill_switch() -> None:
     ]
     assert members, "the kill switch's roles are project-level"
     assert set(members) == {"serviceAccount:${google_service_account.kill_switch.email}"}
-
-
-def attributes(body: dict[str, Any]) -> set[str]:
-    return set(body) - {"__is_block__"}
 
 
 def test_the_landing_bucket_is_free_tier_standard_private_and_named_from_the_project() -> None:
