@@ -1,13 +1,15 @@
-"""The register lands as Parquet for the vendors' countries, with no sole proprietor, no Dutch
-partnership and no other name that may be a person's in it.
+"""The register lands as Parquet for the vendors' countries, with no record and no other name
+that may be a person's in it.
 
 The organisations are real records of the register (CC0); every person-like name is invented.
 """
 
 import csv
 import io
+import os
 import re
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 import duckdb
@@ -15,10 +17,12 @@ import pytest
 
 from ingest import fetch
 from ingest.fetch import landing_path
+from ingest.gleif import legal_entities
 from ingest.gleif.legal_entities import (
     COLUMNS,
     COUNTRIES,
-    DUTCH_PARTNERSHIPS,
+    PARTNERSHIPS,
+    SOLE_PROPRIETORSHIPS,
     LegalEntitiesError,
     profile,
     step,
@@ -113,6 +117,19 @@ PARTNERSHIP = record(
 )
 
 
+@pytest.fixture(autouse=True)
+def landing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> Path:
+    """The landing path the step works under, empty and apart from the files the tests land; a
+    landed test keeps the real one."""
+    if request.node.get_closest_marker("landed"):
+        return landing_path()
+    path = tmp_path / "landing"
+    monkeypatch.setenv("LEDGER_LAB_LANDING", str(path))
+    return path
+
+
 def archive(*rows: dict[str, str], columns: tuple[str, ...] = SERVED, members: int = 1) -> bytes:
     text = io.StringIO()
     writer = csv.DictWriter(text, columns, quoting=csv.QUOTE_ALL)
@@ -175,8 +192,8 @@ def test_every_landed_record_has_an_lei_a_legal_name_a_legal_form_and_a_country(
 
 def test_the_profile_counts_a_record_without_a_legal_form(tmp_path: Path) -> None:
     formless = {**APPLE, "Entity.LegalForm.EntityLegalFormCode": ""}
-    unknown = {**ING, "Entity.LegalForm.EntityLegalFormCode": "9999"}
-    counts = profile(landed(tmp_path, formless, unknown, BARCLAYS))
+    unknown = {**BARCLAYS, "Entity.LegalForm.EntityLegalFormCode": "9999"}
+    counts = profile(landed(tmp_path, formless, unknown, ING))
     assert counts["incomplete"] == 1
     assert counts["legal_form_not_available"] == 1
 
@@ -200,18 +217,67 @@ def test_the_fetch_kit_lands_a_dated_golden_copy_only_through_this_step() -> Non
     assert re.match(dated, entry["url"])
 
 
-def test_a_dutch_partnership_never_lands_and_is_counted_by_form(tmp_path: Path) -> None:
+def test_a_partnership_never_lands_and_is_counted_by_form(tmp_path: Path) -> None:
     partners = {**PARTNERSHIP, "LEI": "0000EXAMPLE000000002", "Entity.LegalName": "Doe Partners"}
     limited = {**partners, "LEI": "0000EXAMPLE000000003"}
     limited["Entity.LegalForm.EntityLegalFormCode"] = "CODH"
-    path = landed(tmp_path, ING, PARTNERSHIP, partners, limited, SOLE_PROPRIETOR)
+    shipowners = {**partners, "LEI": "0000EXAMPLE000000004"}
+    shipowners["Entity.LegalForm.EntityLegalFormCode"] = "UNJ2"
+    general = {**APPLE, "LEI": "0000EXAMPLE000000005", "Entity.LegalName": "Doe And Roe"}
+    general["Entity.LegalForm.EntityLegalFormCode"] = "SQ7B"
+    path = landed(tmp_path, ING, PARTNERSHIP, partners, limited, shipowners, general)
     assert [r["LEI"] for r in rows(path)] == [ING["LEI"]]
     assert b"Voorbeeld" not in path.read_bytes()
     counts = profile(path)
-    assert counts["dropped_partnerships"] == {"62Y3": 2, "9AAK": 0, "CODH": 1}
-    assert counts["dropped_sole_proprietors"] == 1
-    assert counts["partnerships"] == 0
-    assert set(DUTCH_PARTNERSHIPS) == {"62Y3", "9AAK", "CODH"}
+    left_out = {k: v for k, v in counts["left_out"].items() if v}
+    assert left_out == {
+        "partnership 62Y3": 2,
+        "partnership CODH": 1,
+        "partnership UNJ2": 1,
+        "partnership SQ7B": 1,
+    }
+    assert counts["still_to_leave_out"] == {}
+    assert {"62Y3", "9AAK", "CODH", "UNJ2", "SQ7B", "QF4W"} <= set(PARTNERSHIPS)
+    assert "5WU6" not in PARTNERSHIPS, "a Dutch EEIG is a legal person"
+
+
+def test_a_sole_proprietorship_never_lands_whatever_its_category(tmp_path: Path) -> None:
+    filed_as_general = {**SOLE_PROPRIETOR, "LEI": "0000EXAMPLE000000006"}
+    filed_as_general["Entity.EntityCategory"] = "GENERAL"
+    maryland = {**APPLE, "LEI": "0000EXAMPLE000000007", "Entity.LegalName": "Jane Example"}
+    maryland["Entity.LegalForm.EntityLegalFormCode"] = "XHT1"
+    path = landed(tmp_path, ING, SOLE_PROPRIETOR, filed_as_general, maryland)
+    assert [r["LEI"] for r in rows(path)] == [ING["LEI"]]
+    left_out = {k: v for k, v in profile(path)["left_out"].items() if v}
+    assert left_out == {
+        "sole proprietor category": 1,
+        "sole proprietorship 4QXM": 1,
+        "sole proprietorship XHT1": 1,
+    }
+    assert set(SOLE_PROPRIETORSHIPS) == {"4QXM", "88XU", "AREY", "EQAQ", "XHT1"}
+
+
+@pytest.mark.parametrize("code", ["8888", "9999", ""])
+def test_a_record_without_a_real_legal_form_lands_only_on_its_name_as_evidence(
+    tmp_path: Path, code: str
+) -> None:
+    trader = {**BARCLAYS, "LEI": "0000EXAMPLE000000008", "Entity.LegalName": "Jane Example"}
+    company = {**BARCLAYS, "LEI": "0000EXAMPLE000000009", "Entity.LegalName": "Example Works Ltd"}
+    for row in (trader, company):
+        row["Entity.LegalForm.EntityLegalFormCode"] = code
+        row["Entity.LegalForm.OtherLegalForm"] = "Example form" if code == "8888" else ""
+    path = landed(tmp_path, trader, company)
+    assert [r["LEI"] for r in rows(path)] == [company["LEI"]]
+    assert b"Jane" not in path.read_bytes()
+    assert profile(path)["left_out"]["no legal form, GB"] == 1
+
+
+@pytest.mark.parametrize("category", ["", "SOMETHING_NEW"])
+def test_a_blank_or_unknown_category_never_lands(tmp_path: Path, category: str) -> None:
+    unknown = {**APPLE, "LEI": "0000EXAMPLE000000010", "Entity.EntityCategory": category}
+    path = landed(tmp_path, unknown, ING)
+    assert [r["LEI"] for r in rows(path)] == [ING["LEI"]]
+    assert profile(path)["left_out"]["unknown or blank category"] == 1
 
 
 def test_an_other_name_that_may_be_a_persons_is_blanked_with_its_language_and_type(
@@ -234,6 +300,37 @@ def test_an_other_name_that_may_be_a_persons_is_blanked_with_its_language_and_ty
     assert profile(path)["other_names_blanked"] == 2
 
 
+def test_the_step_works_in_a_private_folder_under_the_landing_path_and_leaves_nothing(
+    tmp_path: Path, landing: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[str, int]] = []
+    classify: Callable[[str], bool] = legal_entities.is_organisation
+
+    def watching(name: str) -> bool:
+        for entry in landing.iterdir():
+            seen.append((entry.name, entry.stat().st_mode & 0o777))
+        return classify(name)
+
+    monkeypatch.setattr(legal_entities, "is_organisation", watching)
+    landed(tmp_path, APPLE)
+    assert seen, "the step classified a name while its work folder existed"
+    assert all(name.startswith(".gleif-legal-entities.") for name, _ in seen)
+    assert {mode for _, mode in seen} == {0o700}
+    assert os.listdir(landing) == []
+
+
+def test_the_step_refuses_an_archive_that_declares_more_than_the_bound_unzipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert legal_entities.MAX_UNZIPPED > 5_060_480_759, "the pinned file passes"
+    served = archive(APPLE, BARCLAYS)
+    with zipfile.ZipFile(io.BytesIO(served)) as z:
+        size = z.infolist()[0].file_size
+    monkeypatch.setattr(legal_entities, "MAX_UNZIPPED", size - 1)
+    with pytest.raises(LegalEntitiesError, match="unzipped"):
+        step(served)
+
+
 @pytest.mark.landed
 def test_the_landed_register_holds_complete_records_for_the_vendors_countries() -> None:
     counts = profile(landing_path() / "gleif-legal-entities")
@@ -241,9 +338,8 @@ def test_the_landed_register_holds_complete_records_for_the_vendors_countries() 
     assert counts["incomplete"] == 0
     assert counts["malformed_leis"] == 0
     assert counts["duplicate_leis"] == 0
-    assert counts["sole_proprietors"] == 0
-    assert counts["partnerships"] == 0
-    assert counts["dropped_sole_proprietors"] > 0
-    assert all(n > 0 for n in counts["dropped_partnerships"].values())
+    assert counts["still_to_leave_out"] == {}
+    assert counts["left_out"]["sole proprietor category"] > 0
+    assert counts["left_out"]["partnership 62Y3"] > 0
     assert set(counts["rows_by_country"]) == set(COUNTRIES)
     assert min(counts["rows_by_country"].values()) > 100_000

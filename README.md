@@ -36,6 +36,7 @@ The ECB publishes them for information purposes only, and a figure translated wi
 
 Legal-entity records come from the GLEIF golden copy under [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) and the [LEI data terms of use](https://www.gleif.org/en/meta/lei-data-terms-of-use).
 What lands here is a subset the lab derives from it (three countries, selected fields), not GLEIF's own data, and GLEIF does not endorse this project.
+Records that may name a person (sole proprietors, partnerships that are no separate legal person, and records without a real legal-form code whose legal name is not evidence of an organisation) and person-like other names are left out; legal names of records with a real legal-form code land as the register records them, and a record without a real legal-form code never vouches that a name is an organisation.
 
 To land a source, set `LEDGER_LAB_HASH_KEY` (see `ingest/individuals.py`) and run:
 
