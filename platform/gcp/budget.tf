@@ -9,9 +9,24 @@ resource "google_pubsub_topic" "budget" {
 
 # A $1.00 budget on the lab project, credits included, alerting at 1, 3 and 5 cents and at the
 # dollar. Every notification, alert or not, also goes to the topic for the kill switch.
-resource "google_billing_budget" "lab" {
+# The budget's amount and the kill threshold are dollars, and the Budgets API refuses an amount in
+# another currency than the account's with a bare 400: name that cause before the call instead.
+data "google_billing_account" "lab" {
+  provider        = google.billing
   billing_account = var.billing_account
-  display_name    = "ledger-lab spend fence"
+}
+
+resource "google_billing_budget" "lab" {
+  provider        = google.billing
+  billing_account = var.billing_account
+
+  lifecycle {
+    precondition {
+      condition     = data.google_billing_account.lab.currency_code == "USD"
+      error_message = "The billing account bills in ${data.google_billing_account.lab.currency_code}, not USD: the budget and the kill threshold are dollar amounts."
+    }
+  }
+  display_name = "ledger-lab spend fence"
 
   budget_filter {
     projects               = ["projects/${data.google_project.lab.number}"]

@@ -147,11 +147,33 @@ def test_the_workflow_unlinks_billing_only_above_the_threshold() -> None:
     assert unlink["args"]["body"] == {"billingAccountName": ""}
 
 
-def test_every_api_call_is_billed_to_the_lab_project() -> None:
-    for provider in CONFIG["provider"]:
-        (body,) = provider.values()
-        assert body["billing_project"] == "${var.project}"
-        assert body["user_project_override"] is True
+def providers() -> dict[str, dict[str, Any]]:
+    """Provider bodies by name, an aliased one as `<name>.<alias>`."""
+    found = {}
+    for entry in CONFIG["provider"]:
+        ((name, body),) = entry.items()
+        alias = unquote(body.get("alias"))
+        found[f"{unquote(name)}.{alias}" if alias else unquote(name)] = body
+    return found
+
+
+def test_billing_account_calls_are_billed_to_the_lab_project() -> None:
+    billing = providers()["google.billing"]
+    assert billing["billing_project"] == "${var.project}"
+    assert billing["user_project_override"] is True
+    assert unquote(one("google_billing_budget")["provider"]) == "${google.billing}"
+
+
+def test_project_resources_carry_no_quota_override() -> None:
+    # Eventarc forwards the override to Pub/Sub as its service agent, which is refused.
+    for name in ("google", "google-beta"):
+        assert "user_project_override" not in providers()[name]
+
+
+def test_the_budget_refuses_an_account_that_does_not_bill_in_dollars() -> None:
+    (lifecycle,) = one("google_billing_budget")["lifecycle"]
+    (check,) = lifecycle["precondition"]
+    assert '== "USD"' in check["condition"]
 
 
 @pytest.mark.parametrize("name", ["project", "billing_account"])

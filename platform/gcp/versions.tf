@@ -15,16 +15,21 @@ terraform {
   }
 }
 
-# Bill every API call to the lab project: with a person's own login, APIs such as Budgets otherwise
-# charge their quota to whatever project the login defaults to, where the API may be off.
 provider "google" {
-  project               = var.project
-  region                = var.region
-  billing_project       = var.project
-  user_project_override = true
+  project = var.project
+  region  = var.region
 }
 
 provider "google-beta" {
+  project = var.project
+  region  = var.region
+}
+
+# Billing-account APIs (Budgets) charge their quota to the caller's default project, where the API
+# may be off: this alias bills them to the lab project. Only they use it: Eventarc forwards the
+# override to Pub/Sub as its own service agent, which may not use the project's quota (403).
+provider "google" {
+  alias                 = "billing"
   project               = var.project
   region                = var.region
   billing_project       = var.project
