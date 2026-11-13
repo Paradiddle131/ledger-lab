@@ -39,13 +39,16 @@ HASHED = re.compile(r"^person:[0-9a-f]{64}$")
         # Dutch legal forms.
         "Voorbeeld Holding B.V.",
         "Voorbeeld Holding BV",
-        "Voorbeeld N.V.",
+        "Voorbeeld Holding N.V.",
+        "Van Dijk Holding BV",
         "Stichting Voorbeeldfonds",
         "Vereniging Voorbeeld",
         "Coöperatie Voorbeeld U.A.",
         # US legal forms.
         "Acme Inc",
+        # A comma directly before the form, with nothing else joined.
         "Acme, Inc.",
+        "Acme Widgets, Ltd.",
         "Acme Incorporated",
         "Acme Corp.",
         "Acme Corporation",
@@ -54,6 +57,8 @@ HASHED = re.compile(r"^person:[0-9a-f]{64}$")
         "Jane Doe MD PLLC",
         # A company named after a person is still a separate legal person.
         "Jane Doe Ltd",
+        "J Doe Ltd",
+        "O’Doe Ltd",
     ],
 )
 def test_a_legal_form_marks_an_organisation(name: str) -> None:
@@ -78,6 +83,14 @@ def test_a_legal_form_marks_an_organisation(name: str) -> None:
         # Initials that spell a Dutch legal form after a comma are a surname and initials.
         "Voorbeeld, N.V.",
         "Voorbeeld, B.V.",
+        # A surname and initials that spell a Dutch form: one word before `bv` or `nv`, not
+        # counting name particles or single letters, is not enough evidence of a company.
+        "ROE BV",
+        "DOE N.V.",
+        "Doe NV",
+        "De Vries BV",
+        "van der Doe NV",
+        "Doe J BV",
     ],
 )
 def test_a_name_of_a_person_is_a_person(name: str) -> None:
@@ -125,6 +138,70 @@ def test_a_person_marker_wins_over_a_legal_form(name: str) -> None:
 )
 def test_an_unsure_name_counts_as_a_person(name: str) -> None:
     assert not is_organisation(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # A person joined to a company: settlement payees, care-of and listed parties.
+        "JANE DOE & ROE LAW GROUP LLC",
+        "JANE DOE AND HER ATTORNEY ROE LAW OFFICES LLC",
+        "Jane Doe c/o Roe Solicitors LLP",
+        "Mrs J Doe c/o Acme Ltd",
+        "Jane Doe, Acme Ltd",
+        "Jane Doe - Acme Ltd",
+        "Jane Doe – Acme Ltd",
+        "Jane Doe / Doe Plumbing Ltd",
+        "Jane Doe for Acme Ltd",
+        "Jane Doe en Roe Holding BV",
+        # Trading-as and also-known-as in any spelling.
+        "Jane Doe T/AS Doe Plumbing Ltd",
+        "Jane Doe (t/a Doe Plumbing Ltd)",
+        "Jane Doe T/A: Doe Plumbing Ltd",
+        "Jane Doe T.A. Doe Plumbing Ltd",
+        "Jane Doe TA Doe Plumbing Ltd",
+        "Jane Doe d.b.a. Roe LLC",
+        "Jane Doe a/k/a Roe LLC",
+        "Jane Doe AKA Roe LLC",
+        "Jane Doe known as Roe LLC",
+        "J. de Vries h.o.d.n. Vries Holding B.V.",
+        "Jane Doe hodn Vries Holding B.V.",
+        "Jane Doe t/a​ Doe Ltd",
+        "Jane Doe t​/a Doe Ltd",
+        # Estates, executors, trustees and trusts before the form.
+        "Exors of Jane Doe Ltd",
+        "Jane Doe Estate Ltd",
+        "Jane Doe Trustee Acme Ltd",
+        "Jane Doe ATF Doe Family Trust Ltd",
+        "Jane Doe Deceased Ltd",
+        # A title before the form.
+        "Mrs Jane Doe Ltd",
+        "Dhr J Voorbeeld Holding BV",
+        # The same joins after a leading Dutch form.
+        "Stichting Doe & Roe",
+        "Stichting Jane Doe c/o Acme",
+    ],
+)
+def test_a_second_party_before_the_legal_form_counts_as_a_person(name: str) -> None:
+    assert not is_organisation(name)
+    assert HASHED.match(pseudonymiser(ENV)(name) or ""), name
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # Real companies this rule hashes, on purpose: a join is no evidence of one party.
+        "Doe & Roe Ltd",
+        "Doe and Roe LLP",
+        "Acme (UK) Ltd",
+        "Rolls-Example Ltd",
+        "St. Example Holdings Ltd",
+        "Dr Example Drinks Ltd",
+    ],
+)
+def test_a_joined_company_is_hashed_unless_the_register_knows_it(name: str) -> None:
+    assert not is_organisation(name)
+    assert is_organisation(name, {name})
 
 
 def test_a_register_match_marks_an_organisation() -> None:
