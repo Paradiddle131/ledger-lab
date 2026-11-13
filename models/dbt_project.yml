@@ -11,6 +11,15 @@ clean-targets: ["target"]
 flags:
   send_anonymous_usage_stats: false
 
+# The fiscal years the calendars cover, the same for every entity, each labelled by the calendar
+# year it starts in; the period-status seed holds a row for every period of these years.
+vars:
+  fiscal_years:
+    first: 2023
+    last: 2026
+
 models:
   ledger_lab:
     +materialized: view
+    calendars:
+      +materialized: table
