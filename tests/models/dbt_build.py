@@ -99,7 +99,8 @@ def fixture_landing(path: Path) -> Path:
 
 
 def built(tmp_path: Path, landing: Path) -> Build:
-    """Seed, build and test the whole project on the local engine over this landing."""
+    """Seed, build and test the whole project on the local engine over this landing, with the
+    committed sample of ECB rates (the currency tests read the landed ones themselves)."""
     assert DBT.is_file(), "dbt is missing: run `uv sync`"
     database = tmp_path / "ledger_lab.duckdb"
     env = {k: v for k, v in os.environ.items() if k != "LEDGER_LAB_GCP_PROJECT"}
@@ -110,7 +111,7 @@ def built(tmp_path: Path, landing: Path) -> Build:
         "DBT_LOG_PATH": str(tmp_path / "logs"),
         "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
     }
-    result = dbt(env, tmp_path, "build")
+    result = dbt(env, tmp_path, "build", "--vars", json.dumps({"ecb_rates": "sample"}))
     assert result.returncode == 0, result.stdout + result.stderr
     run = json.loads((tmp_path / "target" / "run_results.json").read_text())
     results = {r["unique_id"].split(".")[2]: r["status"] for r in run["results"]}

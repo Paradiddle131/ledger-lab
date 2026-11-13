@@ -23,7 +23,7 @@ It turns public purchase-to-pay records into certified data products, gives each
 | GLEIF legal-entity register | matching vendor names to legal entities |
 | Annual filings of listed companies, from the regulator | an independent figure to tie out against |
 
-Every figure is a public record, fetched by a script that checks it against a recorded checksum; no data is committed.
+Every figure is a public record, fetched by a script that checks it against a recorded checksum; no data is committed but a sample whose licence allows it and a test needs (a fortnight of ECB rates).
 The ledger is derived: an open-source ERP posts the real documents into journal lines, and every derived row says so.
 Individuals among vendors are hashed before anything is written.
 
@@ -71,6 +71,8 @@ The dbt models build on DuckDB in the session by default, reading the landed Chi
 ```bash
 uv run dbt build --project-dir models --profiles-dir models
 ```
+
+Currency translation reads the ECB rates the fetch kit landed (`python -m ingest.fetch ecb-rates`), and the build fails on a missing file; the tests pass `--vars '{ecb_rates: sample}'` to read a committed fortnight of real rates instead, and `uv run pytest -m landed` runs the translation rules over the landed file.
 
 Each source is fetched by name from [`ingest/sources.yaml`](ingest/sources.yaml), which records its URL or pinned query, SHA-256, licence link, publisher and whether it names people; the file lands under `LEDGER_LAB_LANDING` (default `landing/`, outside git) only when its checksum matches, and the command exits non-zero otherwise:
 
