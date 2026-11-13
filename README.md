@@ -31,10 +31,14 @@ City of Chicago data comes from the City's data portal under its [Data Terms of 
 
 > This site provides applications using data that has been modified for use from its original source, www.cityofchicago.org, the official website of the City of Chicago. The City of Chicago makes no claims as to the content, accuracy, timeliness, or completeness of any of the data provided at this site. The data provided at this site is subject to change at any time. It is understood that the data provided at this site is being used at one's own risk.
 
-To land a source, set `LEDGER_LAB_HASH_KEY` (see `ingest/individuals.py`) and run:
+The euro reference rates come from the ECB data API under the ECB's [copyright and disclaimer](https://www.ecb.europa.eu/home/disclaimer/html/index.en.html); Source: European Central Bank.
+The ECB publishes them for information purposes only, and a figure translated with them is derived from them.
+
+To land a source, run its line below; a source that names people (Chicago's contracts) also needs `LEDGER_LAB_HASH_KEY` set (see `ingest/individuals.py`):
 
 ```bash
 uv run python -m ingest.fetch chicago-contracts   # lands landing/chicago-contracts as Parquet
+uv run python -m ingest.fetch ecb-rates           # lands landing/ecb-rates as Parquet
 uv run python -m ingest.fetch nl-government-budget  # lands landing/nl-government-budget as Parquet
 uv run pytest -m landed                          # profiles what is landed
 ```

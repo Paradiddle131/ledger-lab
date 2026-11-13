@@ -30,3 +30,13 @@ sources:
     licence: https://creativecommons.org/publicdomain/zero/1.0/
     publisher: Ministerie van Financiën
     names_people: false
+  # The ECB's daily euro reference rates for the pound and the US dollar, from the first covered
+  # year to a fixed end date, as CSV, which carries no generated timestamp: a re-fetch serves the
+  # same bytes, and a rate the ECB changed behind the end date shows as a drift. A later end date
+  # is a new pin, with a new hash.
+  ecb-rates:
+    url: https://data-api.ecb.europa.eu/service/data/EXR/D.GBP+USD.EUR.SP00.A?startPeriod=2023-01-01&endPeriod=2026-10-31&format=csvdata&detail=dataonly
+    sha256: d1aadebbba9390aa9acda3288e3c766ce28aee2164de7f216e1b2ac37ed22077  # pragma: allowlist secret
+    licence: https://www.ecb.europa.eu/home/disclaimer/html/index.en.html
+    publisher: European Central Bank
+    names_people: false
