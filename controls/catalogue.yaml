@@ -71,6 +71,6 @@ controls:
   - id: lab-spend-fenced
     layer: Cost and abuse
     owner: group-controller
-    asserts: The lab project's applied fences match platform/gcp — a budget alerting from the first cent, a daily query-bytes cap inside the free tier and a kill switch that unlinks billing — and its month-to-date cost is $0.00.
-    proven_by: tests/platform/test_fences_live.py::test_the_applied_fences_match_their_definitions
-    status: not-implemented
+    asserts: make cost-check reads the lab project's month-to-date cost from the billing export and its applied fences live, and fails unless the cost is $0.00, the daily query-bytes cap, the kill switch workflow, its trigger and the budget topic each match platform/gcp, and the agent's own account holds no permission that could move a fence; the budget is compared with its definition where this account may read it and reported as not checked where it may not.
+    proven_by: tests/platform/test_cost_check.py::test_the_applied_fences_match_their_definitions
+    status: implemented

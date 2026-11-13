@@ -6,14 +6,13 @@ OpenTofu.
 
 import ast
 import re
-from pathlib import Path
 from typing import Any
 
-import hcl2
 import pytest
 import yaml
+from fences import CONFIG, GCP, blocks, declared, one, unquote, variable
 
-GCP = Path(__file__).resolve().parents[2] / "platform/gcp"
+QUOTA = "google_service_usage_consumer_quota_override"
 FREE_REGIONS = {"us-west1", "us-central1", "us-east1"}
 FREE_MONTHLY_QUERY_MIB = 1024 * 1024  # 1 TiB
 # Every resource type the fences may declare; none of them bills inside the free tier.
@@ -26,48 +25,6 @@ ALLOWED = {
     "google_workflows_workflow",
     "google_eventarc_trigger",
 }
-
-
-def unquote(value: Any) -> Any:
-    if isinstance(value, str) and len(value) >= 2 and value[0] == value[-1] == '"':
-        return value[1:-1]
-    return value
-
-
-def load() -> dict[str, list[Any]]:
-    merged: dict[str, list[Any]] = {}
-    for path in sorted(GCP.glob("*.tf")):
-        with path.open() as handle:
-            for key, value in hcl2.load(handle).items():
-                if isinstance(value, list):
-                    merged.setdefault(key, []).extend(value)
-    return merged
-
-
-CONFIG = load()
-
-
-def blocks(kind: str) -> dict[tuple[str, str], dict[str, Any]]:
-    """Resources (or data sources) by (type, name)."""
-    found = {}
-    for entry in CONFIG.get(kind, []):
-        for rtype, named in entry.items():
-            for name, body in named.items():
-                found[(unquote(rtype), unquote(name))] = body
-    return found
-
-
-def one(rtype: str) -> dict[str, Any]:
-    matches = [body for (t, _), body in blocks("resource").items() if t == rtype]
-    assert len(matches) == 1, rtype
-    return matches[0]
-
-
-def variable(name: str) -> dict[str, Any]:
-    for entry in CONFIG["variable"]:
-        if f'"{name}"' in entry:
-            return entry[f'"{name}"']
-    raise KeyError(name)
 
 
 def test_only_allowlisted_resources_are_declared() -> None:
@@ -181,3 +138,16 @@ def test_the_budget_refuses_an_account_whose_unit_is_far_from_a_dollar() -> None
 @pytest.mark.parametrize("name", ["project", "billing_account"])
 def test_identifiers_come_from_variables_with_no_default(name: str) -> None:
     assert "default" not in variable(name)
+
+
+def test_the_live_check_reads_its_expected_values_from_these_definitions() -> None:
+    expected = declared()
+    assert expected.query_cap_mib == int(unquote(one(QUOTA)["override_value"]))
+    assert expected.query_cap_metric == "bigquery.googleapis.com/quota/query/usage"
+    assert expected.query_cap_limit == "/d/project"
+    assert expected.region in FREE_REGIONS
+    assert expected.kill_threshold_bounds == (1, 10)
+    assert expected.budget_thresholds == (0.01, 0.03, 0.05, 1.0)
+    assert expected.workflow_source == (GCP / "kill_switch.workflow.yaml").read_text()
+    unresolved = [k for k, v in vars(expected).items() if k != "workflow_source" and "${" in str(v)]
+    assert unresolved == []
