@@ -53,7 +53,8 @@ make stack-down               # stop everything and drop its volumes
 ```
 
 The lab's GCP project comes only from `LEDGER_LAB_GCP_PROJECT`; `make cost-check` prints its month-to-date cost (with `LEDGER_LAB_BILLING_EXPORT` naming the billing export's `dataset.table`), and $0.00 without any GCP call while no project is set.
-The project's spend fences live in `platform/gcp/` as OpenTofu definitions; `make fences-validate` installs the pinned OpenTofu and validates them offline, and only the owner applies them.
+The project's spend fences, one service account per persona, the agent account's right to mint their tokens and the landing bucket live in `platform/gcp/` as OpenTofu definitions; `make fences-validate` installs the pinned OpenTofu and validates them offline, and only the owner applies them.
+Applying takes the project, the billing account and the agent account's id as variables (`-var project=... -var billing_account=... -var agent_account_id=...`); the agent account itself is made by hand and only referenced.
 
 ## Licence
 
