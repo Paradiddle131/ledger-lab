@@ -4,7 +4,7 @@
 LOADOUT ?= $(or $(shell sed -n 's/^The collection .* is cloned at `\([^`]*\)`.*/\1/p' $(HOME)/.claude/CLAUDE.md 2>/dev/null),../loadout)
 GUARDS := $(LOADOUT)/cloud/githooks
 
-.PHONY: check sync lint typecheck test ids portable scan stack-up stack-down cost-check fresh-clone
+.PHONY: check sync lint typecheck test ids portable scan stack-up stack-down cost-check fresh-clone tofu fences-validate
 
 check: lint typecheck test ids portable scan
 	@echo "make check: all passed"
@@ -50,3 +50,15 @@ cost-check:
 # Clone the committed HEAD and prove it holds no secret, identifier or data (also a test in `test`).
 fresh-clone: sync
 	@uv run python platform/fresh_clone.py
+
+# The lab project's spend fences (platform/gcp): the pinned OpenTofu validates them with no backend
+# and no credentials; only the owner plans and applies them.
+TOFU := $(HOME)/.local/bin/tofu
+
+tofu:
+	@bash platform/gcp/install-tofu.sh
+
+fences-validate: tofu
+	$(TOFU) -chdir=platform/gcp fmt -check
+	$(TOFU) -chdir=platform/gcp init -backend=false -input=false >/dev/null
+	$(TOFU) -chdir=platform/gcp validate

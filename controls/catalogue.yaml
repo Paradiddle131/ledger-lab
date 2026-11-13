@@ -68,3 +68,9 @@ controls:
     asserts: Every query and every model call has a cap, and a runaway join stops at the byte cap.
     proven_by: tests/agent/test_cost.py::test_runaway_join_stops_at_the_cap
     status: not-implemented
+  - id: lab-spend-fenced
+    layer: Cost and abuse
+    owner: group-controller
+    asserts: The lab project's applied fences match platform/gcp — a budget alerting from the first cent, a daily query-bytes cap inside the free tier and a kill switch that unlinks billing — and its month-to-date cost is $0.00.
+    proven_by: tests/platform/test_fences_live.py::test_the_applied_fences_match_their_definitions
+    status: not-implemented
