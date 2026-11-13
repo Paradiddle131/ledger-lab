@@ -9,10 +9,11 @@ a company name appears once in clear beside the company and once as a hash besid
 hash, and nothing links the two without the key. On a hashed row the cells that describe or locate
 the payee are blanked. Columns no consumer needs and that hold contact people (street addresses)
 are dropped from every row. A description on any row is blanked when a run of its words, in any
-order and whatever punctuation sits between them, is a hashed payee's name, or when it carries
+order and whatever punctuation sits between them, is a name this table hashes, or when it carries
 one of the classifier's person markers (an estate, a deceased, trading as). A description of an
 organisation's row is otherwise landed as served: it is the known remaining place a person's name
-could sit.
+could sit, including a name another table hashes, since each table's landing reads only its own
+data.
 """
 
 import csv
