@@ -8,6 +8,8 @@ landing/
 # and in platform/fresh_clone.py, which refuses any other data file or `!` line.
 !/models/seeds/calendars/fiscal_year_starts.csv
 !/models/seeds/calendars/period_status.csv
+# Real ECB rates, a licence-allowed sample (free use with the source cited) the translation tests need.
+!/models/seeds/reference/fx/ecb_rates_sample.csv
 *.tsv
 *.xlsx
 *.xls
