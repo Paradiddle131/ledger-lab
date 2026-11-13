@@ -66,8 +66,10 @@ def blocks(kind: str) -> dict[tuple[str, str], dict[str, Any]]:
 
 
 def one(rtype: str) -> dict[str, Any]:
+    """The one resource of a type, declared once: no `count` or `for_each` multiplies it."""
     matches = [body for (t, _), body in blocks("resource").items() if t == rtype]
     assert len(matches) == 1, rtype
+    assert {"count", "for_each"} & set(matches[0]) == set(), rtype
     return matches[0]
 
 
@@ -88,6 +90,11 @@ def test_only_allowlisted_resources_are_declared() -> None:
     declared = {rtype for rtype, _ in blocks("resource")}
     assert declared - ALLOWED == set()
     assert declared == ALLOWED, "a fence is missing"
+
+
+def test_no_module_is_used() -> None:
+    # A module's resources are invisible to these checks, so none may hide a grant or a resource.
+    assert "module" not in CONFIG
 
 
 def test_providers_are_pinned_exactly() -> None:
@@ -235,7 +242,12 @@ def test_the_agent_account_is_referenced_by_a_variable_never_managed_here() -> N
 
 
 def test_only_the_agent_mints_tokens_and_only_for_persona_accounts() -> None:
-    grant = one("google_service_account_iam_member")
+    grants = [
+        b for (t, _), b in blocks("resource").items() if t == "google_service_account_iam_member"
+    ]
+    assert len(grants) == 1
+    (grant,) = grants
+    assert attributes(grant) == {"for_each", "service_account_id", "role", "member"}
     assert grant["for_each"] == "${google_service_account.persona}"
     assert grant["service_account_id"] == "${each.value.name}"
     assert unquote(grant["role"]) == "roles/iam.serviceAccountTokenCreator"
@@ -252,20 +264,38 @@ def test_no_project_level_role_reaches_anyone_but_the_kill_switch() -> None:
     assert set(members) == {"serviceAccount:${google_service_account.kill_switch.email}"}
 
 
+def attributes(body: dict[str, Any]) -> set[str]:
+    return set(body) - {"__is_block__"}
+
+
 def test_the_landing_bucket_is_free_tier_standard_private_and_named_from_the_project() -> None:
     bucket = one("google_storage_bucket")
+    # Exactly these settings: autoclass, a lifecycle rule, a customer key, logging, a retention
+    # lock or versioning could each move the bucket off the free allowance or out of reach.
+    assert attributes(bucket) == {
+        "name",
+        "location",
+        "storage_class",
+        "uniform_bucket_level_access",
+        "public_access_prevention",
+        "soft_delete_policy",
+    }
+    (soft_delete,) = bucket["soft_delete_policy"]
+    assert attributes(soft_delete) == {"retention_duration_seconds"}
     assert bucket["location"] == "${var.region}"
     assert unquote(bucket["storage_class"]) == "STANDARD"
     assert bucket["uniform_bucket_level_access"] is True
     assert unquote(bucket["public_access_prevention"]) == "enforced"
     assert unquote(bucket["name"]).startswith("${var.project}")
     # Soft-deleted bytes bill as storage: keeping none leaves only live objects on the allowance.
-    assert bucket["soft_delete_policy"][0]["retention_duration_seconds"] == 0
-    assert "versioning" not in bucket
+    assert soft_delete["retention_duration_seconds"] == 0
 
 
-def test_only_the_agent_holds_object_rights_and_only_on_the_landing_bucket() -> None:
+def test_the_only_grant_declared_on_the_landing_bucket_is_the_agents_object_rights() -> None:
+    # Cloud Storage's default bindings still give the project's viewers, editors and owners their
+    # legacy bucket roles; this configuration adds only the agent's.
     access = one("google_storage_bucket_iam_member")
+    assert attributes(access) == {"bucket", "role", "member"}
     assert access["bucket"] == "${google_storage_bucket.landing.name}"
     assert unquote(access["role"]) == "roles/storage.objectUser"
     assert unquote(access["member"]) == AGENT_MEMBER

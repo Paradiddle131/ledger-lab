@@ -14,8 +14,9 @@ resource "google_storage_bucket" "landing" {
   }
 }
 
-# Object rights for the agent on this bucket only: it lands and replaces files, and can change
-# neither the bucket nor who may use it.
+# The only grant this configuration adds on the bucket: object rights for the agent, which lands
+# and replaces files and can change neither the bucket nor who may use it. Cloud Storage's default
+# bindings still give the project's viewers, editors and owners their legacy bucket roles.
 resource "google_storage_bucket_iam_member" "agent_lands_objects" {
   bucket = google_storage_bucket.landing.name
   role   = "roles/storage.objectUser"
