@@ -1,5 +1,6 @@
 """The `vendor_entity` model maps each landed vendor name to a legal entity or to none, with the
-rule and score that matched it, and is precise on a labelled sample of public companies.
+rule and score that matched it, and makes no wrong match on a labelled sample of public
+companies.
 
 `vendor_sample.yaml` holds the sample: organisation names as the landed files spell them, each
 with the LEI it should match (none where the register has no record of it), and every record of
@@ -12,6 +13,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import pytest
 import yaml
 
@@ -22,9 +24,10 @@ from ingest.uk_transport.spend import BODIES
 from tests.models.dbt_build import HASHED, SAMPLE, Build, built, dbt, query
 
 SOURCES = ("chicago-contracts", "chicago-payments", "uk-transport-spend-2025")
-# The precision the matching must reach on the sample: of the names it matches, the share matched
-# to the expected legal entity.
-PRECISION = 0.95
+# Of the sample's names that have a legal entity, the share the rules match to it: a floor set just
+# under what they reach, so a rule that stops matching what it matched turns the test red. Wrong
+# matches (a name matched to another entity than its own, or to any when it has none) must be none.
+RECALL = 0.80
 
 
 def labelled() -> list[dict[str, Any]]:
@@ -41,6 +44,7 @@ def scored(build: Build) -> dict[str, Any]:
     }
     by_rule: dict[str, dict[str, int]] = {}
     matched = right = expected = 0
+    wrong = []
     for vendor in labelled():
         lei, rule = found[(vendor["entity"], vendor["name"])]
         counts = by_rule.setdefault(rule, {"names": 0, "right": 0})
@@ -50,10 +54,14 @@ def scored(build: Build) -> dict[str, Any]:
         if lei is not None:
             matched += 1
             right += lei == vendor["lei"]
+            if lei != vendor["lei"]:
+                wrong.append(vendor["name"])
     return {
         "precision": right / matched,
         "recall": right / expected,
         "matched": matched,
+        "expected": expected,
+        "wrong": wrong,
         "by rule": by_rule,
     }
 
@@ -68,10 +76,11 @@ def test_the_sample_holds_fifty_organisations_with_their_expected_match() -> Non
     assert {v["lei"] for v in vendors if v["lei"]} <= leis
 
 
-def test_the_matching_is_precise_on_the_labelled_sample(build: Build) -> None:
+def test_the_matching_makes_no_wrong_match_on_the_labelled_sample(build: Build) -> None:
     score = scored(build)
     print("labelled sample:", score)
-    assert score["precision"] >= PRECISION
+    assert score["wrong"] == []
+    assert score["recall"] >= RECALL
     assert not any(rule.startswith("hashed") for rule in score["by rule"])
 
 
@@ -85,35 +94,44 @@ def test_a_hashed_name_is_never_matched(build: Build) -> None:
     assert rows == [(None, "hashed", None, None)] * 2
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "Apple Inc.",
-        "ACME (U.K.) LTD",
-        "Doe & Roe,  Limited",
-        "Coöperatie Example U.A.",
-        "Ex_ample's  Garage—North",
-        "“Example”   Holdings",
-    ],
-)
-def test_the_models_key_is_the_landings_key(build: Build, name: str) -> None:
-    sql = "{{ vendor_match_key(\"'" + name.replace("'", "''") + "'\") }}"
+def model_keys(build: Build, names: list[str]) -> list[str]:
+    """Each name's key by the models' own `vendor_match_key`, compiled by dbt and run on DuckDB."""
     result = dbt(
         build.env,
         build.cwd,
-        "show",
+        "compile",
         "--inline",
-        f"select {sql} as k",
+        "select {{ vendor_match_key('n') }} as k from names order by i",
         "--output",
-        "json",
-        "--log-format",
         "json",
         "--quiet",
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    shown = [json.loads(line)["data"] for line in result.stdout.splitlines() if line.strip()]
-    (row,) = json.loads(next(d["preview"] for d in shown if "preview" in d))
-    assert row["k"] == match_key(name)
+    sql = json.loads(result.stdout)["compiled"]
+    con = duckdb.connect()
+    con.execute("create table names (i bigint, n varchar)")
+    con.executemany("insert into names values (?, ?)", list(enumerate(names)))
+    return [str(k) for (k,) in con.execute(sql).fetchall()]
+
+
+def test_the_models_key_is_the_landings_key(build: Build) -> None:
+    names = [
+        "Apple Inc.",
+        "ACME (U.K.) LTD",
+        "Doe & Roe,  Limited",
+        "Coöperatie Example U.A.",
+        "Coo\u0308peratie Example",
+        "Ex_ample's  Garage—North",
+        "“Example”   Holdings",
+        "Example² Holdings",
+        "Großhandel Example GmbH",
+        "Example™ Brands",
+        "ＥＸＡＭＰＬＥ ＬＴＤ",
+        "Example\u200bWidgets",
+        "Example\u00a0Widgets",
+        "İstanbul Example",
+    ]
+    assert model_keys(build, names) == [match_key(n) for n in names]
 
 
 @pytest.mark.landed
@@ -127,7 +145,8 @@ def test_the_real_landing_matches_the_sample_and_every_vouched_name(tmp_path: Pa
     build = built(tmp_path, landing)
     score = scored(build)
     print("labelled sample on the real register:", score)
-    assert score["precision"] >= PRECISION
+    assert score["wrong"] == []
+    assert score["recall"] >= RECALL
     by_rule = query(
         build,
         "select entity_id, match_status, match_rule, count(*), sum(landed_rows)"
@@ -148,3 +167,21 @@ def test_the_real_landing_matches_the_sample_and_every_vouched_name(tmp_path: Pa
     assert clear, "the register vouches for some names"
     assert all(register.vouches(name) for name, _ in clear), "no clear name lacks evidence"
     assert {rule for _, rule in clear} == {"exact"}, "the model finds each vouching record"
+    names = [
+        str(n)
+        for (n,) in query(
+            build,
+            "select distinct vendor_name from vendor_entity where match_status <> 'hashed'",
+        )
+    ]
+    names += [
+        str(n)
+        for (n,) in duckdb.connect()
+        .execute(
+            'select distinct "Entity.LegalName" from read_parquet(?)', [str(landing / REGISTER)]
+        )
+        .fetchall()
+    ]
+    differ = sum(a != match_key(n) for a, n in zip(model_keys(build, names), names, strict=True))
+    print(f"names whose model key differs from the landing's: {differ} of {len(names)}")
+    assert differ == 0

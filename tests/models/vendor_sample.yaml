@@ -3,11 +3,19 @@
 # by any of the model's rules), and every record of the pinned GLEIF register (CC0) the model's
 # rules could consider for them, so a build over these alone finds the candidates the real
 # register gives. Some names (no legal form, or a joined name) land in clear only because the
-# register vouches for them.
+# register vouches for them. The expected LEI was looked up in the register by hand, whatever the
+# rules find: a company whose legal name is spelt otherwise (`IBM CORPORATION`) still has one,
+# which the rules miss, so recall is measured. Traps: two registrations of one name
+# (`TRANE U.S. INC`, no single right answer, so null), a same-name company in another country
+# (`MICROSOFT LIMITED`, `DAF Trucks Limited`, `Arcadis LLP`, `HUGHES NETWORK SYSTEMS LLC`: none in
+# the entity's own country, so null), the same name in two countries (`KPMG LLP`, `Deloitte LLP`),
+# an active and a lapsed record (`CISCO SYSTEMS, INC.`, `URS CORPORATION`, `ACXIOM CORPORATION`),
+# and sister companies with similar names (`AECOM` and its subsidiaries, `CBRE`, `NTT DATA`).
 vendors:
   - {entity: chicago, name: "3M COMPANY", lei: "LUZQVYP4VS22CLWDAR65"}
   - {entity: chicago, name: "ABBOTT LABORATORIES INC", lei: "HQD377W2YR662HK5JX27"}
   - {entity: chicago, name: "ACCENTURE LLP", lei: "5493001DEL3O9DI4EG75"}
+  - {entity: chicago, name: "ACXIOM CORPORATION", lei: "76MIROMHC0FSWDR2G072"}
   - {entity: chicago, name: "AECOM INC", lei: "0EEB8GF0W0NPCIHZX097"}
   - {entity: chicago, name: "AECOM TECHNICAL SERVICES, INC.", lei: null}
   - {entity: chicago, name: "AECOM USA INC", lei: null}
@@ -15,7 +23,7 @@ vendors:
   - {entity: chicago, name: "AON RISK SERVICES CENTRAL INC", lei: null}
   - {entity: chicago, name: "ARUP NORTH AMERICA LIMITED", lei: null}
   - {entity: chicago, name: "AT&T CORP", lei: "4PD8YHHBETYIBWD91168"}
-  - {entity: chicago, name: "BOEING COMPANY, INC.", lei: null}
+  - {entity: chicago, name: "BOEING COMPANY, INC.", lei: "RVHJWBXLJ1RFUBSY1F30"}
   - {entity: chicago, name: "CANON SOLUTIONS AMERICA INC", lei: null}
   - {entity: chicago, name: "CANON U.S.A., INC", lei: "Z3PC5WD1FUBKAMQF0M66"}
   - {entity: chicago, name: "CBRE GOVERNMENT SERVICES LLC", lei: null}
@@ -41,9 +49,10 @@ vendors:
   - {entity: chicago, name: "HERC RENTALS INC", lei: "549300PT6NAGYIL3VL19"}
   - {entity: chicago, name: "HNTB CORPORATION", lei: null}
   - {entity: chicago, name: "HOME DEPOT U.S.A., INC.", lei: "549300FEMQDH6Q0NT330"}
-  - {entity: chicago, name: "HOME DEPOT USA, INC.", lei: null}
-  - {entity: chicago, name: "HONEYWELL INC", lei: null}
-  - {entity: chicago, name: "IBM CORPORATION", lei: null}
+  - {entity: chicago, name: "HOME DEPOT USA, INC.", lei: "549300FEMQDH6Q0NT330"}
+  - {entity: chicago, name: "HONEYWELL INC", lei: "ISRPG12PN4EIEOEMW547"}
+  - {entity: chicago, name: "HUGHES NETWORK SYSTEMS LLC", lei: null}
+  - {entity: chicago, name: "IBM CORPORATION", lei: "VGRQXHF3J8VDLUA7XE92"}
   - {entity: chicago, name: "IRON MOUNTAIN INC", lei: "SQL3F6CKNNBM3SQGHX24"}
   - {entity: chicago, name: "JACOBS ENGINEERING GROUP INC", lei: "549300CZ8QS1GE53O776"}
   - {entity: chicago, name: "JOHNSON CONTROLS INC", lei: "3LB2NG8VUULSCV2NO430"}
@@ -69,6 +78,7 @@ vendors:
   - {entity: chicago, name: "TARGET CORPORATION", lei: "8WDDFXB5T1Z6J0XC1L66"}
   - {entity: chicago, name: "TETRA TECH INC", lei: "549300UJ1LP7JGJC5P32"}
   - {entity: chicago, name: "THE HUNTINGTON NATIONAL BANK", lei: "2WHM8VNJH63UN14OL754"}
+  - {entity: chicago, name: "TRANE U.S. INC", lei: null}
   - {entity: chicago, name: "Tyler Technologies, Inc", lei: "25490040SMU4Z8LBCW70"}
   - {entity: chicago, name: "UNISYS CORPORATION", lei: "549300T21W22FIJJOW08"}
   - {entity: chicago, name: "UNITED AIRLINES INC", lei: "K1OQBWM7XEOO08LDNP29"}
@@ -78,11 +88,11 @@ vendors:
   - {entity: chicago, name: "W.W. GRAINGER, INC", lei: "549300TWZSP6O1IH2V34"}
   - {entity: chicago, name: "WELLS FARGO FINANCIAL LEASING, INC.", lei: null}
   - {entity: chicago, name: "WSP USA INC.", lei: null}
-  - {entity: chicago, name: "Wells Fargo & Company", lei: "PBLD0EJDB5FWOLXP3B76"}
   - {entity: uk-transport, name: "AECOM LIMITED", lei: "2WKCM9EOCM4UGJU1F243"}
   - {entity: uk-transport, name: "AFFINITY WATER LIMITED", lei: "213800C5H514C3AD9V36"}
   - {entity: uk-transport, name: "ARRIVA MIDLANDS LTD", lei: "5299006CEBPKXNB8RO42"}
   - {entity: uk-transport, name: "ATOS IT Services UK Limited", lei: null}
+  - {entity: uk-transport, name: "Arcadis LLP", lei: null}
   - {entity: uk-transport, name: "BALFOUR BEATTY CIVIL ENGINEERING LIMITED", lei: null}
   - {entity: uk-transport, name: "BRITISH TELECOMMUNICATIONS PLC", lei: "549300OWFMSO9NYV4H90"}
   - {entity: uk-transport, name: "CBRE LIMITED", lei: "254900PB732MC7F9B754"}
@@ -91,18 +101,21 @@ vendors:
   - {entity: uk-transport, name: "COSTAIN LIMITED", lei: "213800W83HVYOHLDZU72"}
   - {entity: uk-transport, name: "Capgemini UK PLC", lei: "549300DQNEKL21S3OK30"}
   - {entity: uk-transport, name: "Colas Limited", lei: "2138002EOZ35VO4XSU29"}
+  - {entity: uk-transport, name: "DAF Trucks Limited", lei: null}
   - {entity: uk-transport, name: "DELOITTE LLP", lei: "213800GFW5ZLF5G5OH34"}
   - {entity: uk-transport, name: "DHL Parcel UK Ltd", lei: null}
+  - {entity: uk-transport, name: "Deloitte LLP", lei: "213800GFW5ZLF5G5OH34"}
   - {entity: uk-transport, name: "FORD MOTOR COMPANY LIMITED", lei: "549300ZGWE2VQHZWVW14"}
   - {entity: uk-transport, name: "GALLIFORD TRY CONSTRUCTION LIMITED", lei: null}
   - {entity: uk-transport, name: "GOVIA THAMESLINK RAILWAY LIMITED", lei: null}
   - {entity: uk-transport, name: "Holcim UK Limited", lei: "5299003HDZGUE0FFRA54"}
-  - {entity: uk-transport, name: "JACOBS UK LIMITED", lei: null}
+  - {entity: uk-transport, name: "JACOBS UK LIMITED", lei: "549300J4QH5S6D8UWM06"}
   - {entity: uk-transport, name: "KAINOS SOFTWARE LIMITED", lei: null}
   - {entity: uk-transport, name: "KIER TRANSPORTATION LIMITED", lei: null}
   - {entity: uk-transport, name: "KPMG LLP", lei: "213800S5DHQ6VQ38DY65"}
   - {entity: uk-transport, name: "KUEHNE + NAGEL LIMITED", lei: "2138008YVE8CBATFFY09"}
   - {entity: uk-transport, name: "LEGAL AND GENERAL ASSURANCE SOCIETY LIMITED", lei: "213800LKFXEMM8WLMA04"}
+  - {entity: uk-transport, name: "MICROSOFT LIMITED", lei: null}
   - {entity: uk-transport, name: "MITIE FM LIMITED", lei: null}
   - {entity: uk-transport, name: "NETWORK RAIL INFRASTRUCTURE LTD", lei: "2138002K8ZAZY9QUKH59"}
   - {entity: uk-transport, name: "NORTHERN TRAINS LIMITED", lei: "213800ZAEBCEML28T645"}
@@ -133,6 +146,7 @@ register:
   - {lei: "2138008YVE8CBATFFY09", legal_name: "KUEHNE + NAGEL LIMITED", form: "H0PO", country: GB, category: GENERAL, status: "ACTIVE"}
   - {lei: "213800BVVQOBUSJXSB53", legal_name: "S&P Global Limited", form: "H0PO", country: GB, category: GENERAL, status: "ACTIVE"}
   - {lei: "213800C5H514C3AD9V36", legal_name: "AFFINITY WATER LIMITED", form: "H0PO", country: GB, category: GENERAL, status: "ACTIVE"}
+  - {lei: "213800EEI44VYU4FCS24", legal_name: "HUGHES NETWORK SYSTEMS LIMITED", form: "H0PO", country: GB, category: GENERAL, status: "ACTIVE"}
   - {lei: "213800F6SC8OY4DJ8L50", legal_name: "KONE INC.", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "213800GFW5ZLF5G5OH34", legal_name: "DELOITTE LLP", form: "Z0EY", country: GB, category: GENERAL, status: "ACTIVE"}
   - {lei: "213800GOJRCFL3KB3U80", legal_name: "COMPUTACENTER (UK) LIMITED", form: "H0PO", country: GB, category: GENERAL, status: "ACTIVE"}
@@ -166,8 +180,8 @@ register:
   - {lei: "5299006CEBPKXNB8RO42", legal_name: "ARRIVA MIDLANDS LIMITED", form: "H0PO", country: GB, category: GENERAL, status: "ACTIVE"}
   - {lei: "529900F8EMK5BOGLGO13", legal_name: "Siemens Mobility B.V.", form: "54M6", country: NL, category: GENERAL, status: "ACTIVE"}
   - {lei: "529900IJ8WUYDPAEUT28", legal_name: "SIEMENS MOBILITY LIMITED", form: "H0PO", country: GB, category: GENERAL, status: "ACTIVE"}
-  - {lei: "54930004W6Z9H2LPE588", legal_name: "WELLS FARGO & COMPANY", form: "XTIQ", country: US, category: GENERAL, status: "NULL"}
   - {lei: "54930014QNWWH8OAC930", legal_name: "GODADDY.COM, LLC", form: "HZEH", country: US, category: GENERAL, status: "ACTIVE"}
+  - {lei: "549300150FDXNCCHI040", legal_name: "TRANE U.S. INC.", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "5493001DEL3O9DI4EG75", legal_name: "ACCENTURE LLP", form: "VUXH", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "54930036C8MWP850MI84", legal_name: "Norfolk Southern Corporation", form: "HOV4", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "5493003PVCIGA21K0K42", legal_name: "KPMG LLP", form: "1HXP", country: US, category: GENERAL, status: "ACTIVE"}
@@ -175,6 +189,7 @@ register:
   - {lei: "54930066LOJG0DN53B57", legal_name: "URS Corporation", form: "9999", country: US, category: GENERAL, status: "NULL"}
   - {lei: "549300696OECXEGRWD69", legal_name: "NAVISTAR FINANCIAL CORPORATION", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "5493006V1WJAQ5DU6C50", legal_name: "Ericsson Inc.", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
+  - {lei: "5493007N6NQOFYTMHK57", legal_name: "Acxiom Corporation", form: "9999", country: US, category: GENERAL, status: "NULL"}
   - {lei: "5493008EQ5VV5PMQ8T84", legal_name: "HONEYWELL B.V.", form: "54M6", country: NL, category: GENERAL, status: "ACTIVE"}
   - {lei: "549300BWDBVD7HK3EA55", legal_name: "SKANSKA CONSTRUCTION UK LIMITED", form: "H0PO", country: GB, category: GENERAL, status: "ACTIVE"}
   - {lei: "549300CAC2Q10UXA7517", legal_name: "KONICA MINOLTA BUSINESS SOLUTIONS U.S.A., INC.", form: "PJ10", country: US, category: GENERAL, status: "ACTIVE"}
@@ -189,6 +204,8 @@ register:
   - {lei: "549300IIO4TTC5QH7V41", legal_name: "SIEMENS INDUSTRY, INC.", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "549300IOY1KKX4KLK978", legal_name: "Serco Inc.", form: "XSNP", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "549300ISWFZLDPTW6Q75", legal_name: "CUMMINS LTD.", form: "H0PO", country: GB, category: GENERAL, status: "ACTIVE"}
+  - {lei: "549300J4QH5S6D8UWM06", legal_name: "JACOBS U.K. LIMITED", form: "H0PO", country: GB, category: GENERAL, status: "ACTIVE"}
+  - {lei: "549300J6XLKHOHLU6N77", legal_name: "DAF TRUCKS N.V.", form: "54M6", country: NL, category: GENERAL, status: "ACTIVE"}
   - {lei: "549300KCO24ZX5TKY880", legal_name: "TOTALENERGIES GAS & POWER LIMITED", form: "H0PO", country: GB, category: GENERAL, status: "ACTIVE"}
   - {lei: "549300KY09TR3J12JU49", legal_name: "SS&C TECHNOLOGIES, INC.", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "549300L22M2RCLXON143", legal_name: "NATIONAL GRID ELECTRICITY DISTRIBUTION (WEST MIDLANDS) PLC", form: "B6ES", country: GB, category: GENERAL, status: "ACTIVE"}
@@ -211,26 +228,31 @@ register:
   - {lei: "549300ZGWE2VQHZWVW14", legal_name: "FORD MOTOR COMPANY LIMITED", form: "H0PO", country: GB, category: GENERAL, status: "ACTIVE"}
   - {lei: "549300ZUXGERWHQ3UR90", legal_name: "COLAS INC.", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "6S552MUG6KGJVEBSEC55", legal_name: "MOTOROLA SOLUTIONS, INC.", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
+  - {lei: "7245000UZH70GO047N03", legal_name: "ARCADIS N.V.", form: "B5PM", country: NL, category: GENERAL, status: "ACTIVE"}
   - {lei: "7245004QF7AQYCDM7Z89", legal_name: "Kuehne + Nagel N.V.", form: "B5PM", country: NL, category: GENERAL, status: "ACTIVE"}
   - {lei: "7245009606AHNPP8R618", legal_name: "Maximus B.V.", form: "54M6", country: NL, category: GENERAL, status: "ACTIVE"}
   - {lei: "724500FAHRDV0X0ZCB49", legal_name: "Target B.V.", form: "54M6", country: NL, category: GENERAL, status: "ACTIVE"}
   - {lei: "724500I023KQSJ1DOI98", legal_name: "KPMG N.V.", form: "B5PM", country: NL, category: GENERAL, status: "ACTIVE"}
+  - {lei: "76MIROMHC0FSWDR2G072", legal_name: "Acxiom Corporation", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "8945002VXC401INDLA89", legal_name: "DUN & BRADSTREET LIMITED", form: "H0PO", country: GB, category: GENERAL, status: "ACTIVE"}
   - {lei: "894500U2QHMX2DY8OM17", legal_name: "Dun & Bradstreet B.V.", form: "54M6", country: NL, category: GENERAL, status: "ACTIVE"}
   - {lei: "8E6NF1YAL0WT6CWXXV93", legal_name: "CISCO SYSTEMS, INC.", form: "H1UM", country: US, category: GENERAL, status: "INACTIVE"}
   - {lei: "8WDDFXB5T1Z6J0XC1L66", legal_name: "Target Corporation", form: "S2K8", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "9845006FF4C40R05B003", legal_name: "CVS Pharmacy, Inc.", form: "Z54A", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "9845006VCCB5D3888C93", legal_name: "ACCENTURE INC.", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
+  - {lei: "98450073HF7FAB5EB755", legal_name: "TRANE U.S. INC.", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "984500F6388Y39F8EA05", legal_name: "UNISYS LIMITED", form: "H0PO", country: GB, category: GENERAL, status: "ACTIVE"}
   - {lei: "HQD377W2YR662HK5JX27", legal_name: "ABBOTT LABORATORIES", form: "AZUK", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "INR2EJN1ERAN0W5ZP974", legal_name: "MICROSOFT CORPORATION", form: "NHYA", country: US, category: GENERAL, status: "ACTIVE"}
+  - {lei: "ISRPG12PN4EIEOEMW547", legal_name: "HONEYWELL INTERNATIONAL INC.", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "K1OQBWM7XEOO08LDNP29", legal_name: "UNITED AIRLINES, INC.", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "LUZQVYP4VS22CLWDAR65", legal_name: "3M COMPANY", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "NGIZXNT70J2LYT3FBI09", legal_name: "UNITED RENTALS (NORTH AMERICA), INC.", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
-  - {lei: "PBLD0EJDB5FWOLXP3B76", legal_name: "WELLS FARGO & COMPANY", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "QFROUN1UWUYU0DVIWD51", legal_name: "Fifth Third Bank, National Association", form: "N566", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "RT6OUD7RUINWGQHPI970", legal_name: "URS Corporation", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
+  - {lei: "RVHJWBXLJ1RFUBSY1F30", legal_name: "THE BOEING COMPANY", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "SQL3F6CKNNBM3SQGHX24", legal_name: "IRON MOUNTAIN INCORPORATED", form: "XTIQ", country: US, category: GENERAL, status: "ACTIVE"}
+  - {lei: "VGRQXHF3J8VDLUA7XE92", legal_name: "INTERNATIONAL BUSINESS MACHINES CORPORATION", form: "PJ10", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "Y6X4K52KMJMZE7I7MY94", legal_name: "S&P GLOBAL INC.", form: "PJ10", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "Z3PC5WD1FUBKAMQF0M66", legal_name: "Canon U.S.A., Inc.", form: "PJ10", country: US, category: GENERAL, status: "ACTIVE"}
   - {lei: "ZUNI8PYC725B6H8JU438", legal_name: "CUMMINS INC.", form: "R0BI", country: US, category: GENERAL, status: "ACTIVE"}

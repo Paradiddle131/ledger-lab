@@ -4,8 +4,8 @@ A payee is hashed unless there is evidence it is an organisation (`ingest/indivi
 record of the register is such evidence for one name only, and only when all of these hold:
 
 - its legal name and the payee's name have the same matching key (`match_key`): the whole name,
-  word for word, after the pseudonymiser's normalisation, with punctuation between the words
-  ignored and `&` kept as a word. Nothing else is stripped: a legal-form suffix the register
+  word for word, lower-cased in its NFC form, with punctuation between the words ignored and `&`
+  kept as a word. Nothing else is stripped: a legal-form suffix the register
   carries and the payee lacks (`Example Ltd` for `Example`) does not match, since that is how a
   person sharing a company's name would come out in clear;
 - its legal-form code makes a separate legal person (`LEGAL_PERSONS`; a code not listed never
@@ -28,6 +28,7 @@ hashes payees refuses to run until it is landed.
 """
 
 import re
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -215,9 +216,15 @@ class RegisterError(StepError):
 
 
 def match_key(name: str) -> str:
-    """The name's words after the pseudonymiser's normalisation, punctuation between them
-    ignored, `&` kept as a word, joined by single spaces."""
-    return " ".join(TOKEN.findall(normalise(name)))
+    """The name's runs of letters and digits, and `&`, in its NFC form lower-cased, joined by single
+    spaces: punctuation, spacing and invisible characters between words are ignored. It is the
+    `vendor_match_key` macro's key exactly (a landed test compares the two over every landed
+    name), which is why it is NFC and lower case, the forms both engines have; a name written in
+    compatibility characters (full-width letters) then matches no record and stays hashed."""
+    # `İ` is the one letter whose full lower case (`i` and a combining dot) differs from the simple
+    # one (`i`) the SQL engines use.
+    lowered = unicodedata.normalize("NFC", name).replace("İ", "i").lower()
+    return " ".join(TOKEN.findall(lowered))
 
 
 def person_shaped(name: str) -> bool:

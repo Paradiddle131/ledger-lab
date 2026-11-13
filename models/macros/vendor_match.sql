@@ -1,9 +1,8 @@
 {#- The keys vendor names are matched to legal names on.
 
-    `vendor_match_key`: the name's runs of letters and digits, and `&`, lower-cased and joined by
-    single spaces; the landing's `ingest.entities.match_key` on names whose Unicode forms and case
-    folding agree (a test holds the two to the same keys). DuckDB has only the NFC form, BigQuery
-    the NFKC one the landing uses.
+    `vendor_match_key`: the name's runs of letters and digits, and `&`, in its NFC form lower-cased,
+    joined by single spaces; the landing's `ingest.entities.match_key` exactly, which a landed test
+    checks over every landed name.
     `vendor_base_key`: that key without its final legal-form words (`ltd`, `inc`, `l l c` and the
     like), never down to nothing.
     `vendor_legal_form`: those final words, each spelling of a form written one way. -#}
@@ -17,7 +16,7 @@
 {%- endmacro %}
 
 {% macro default__vendor_match_key(column) -%}
-    array_to_string(regexp_extract_all(lower(normalize({{ column }}, NFKC)), r'[\p{L}\p{N}]+|&'), ' ')
+    array_to_string(regexp_extract_all(lower(normalize({{ column }}, NFC)), r'[\p{L}\p{N}]+|&'), ' ')
 {%- endmacro %}
 
 {% macro duckdb__vendor_match_key(column) -%}
