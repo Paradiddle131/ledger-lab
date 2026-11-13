@@ -44,6 +44,15 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
             metafunc.parametrize(name, personas)
 
 
+def load_columns() -> dict[str, Any]:
+    return load_checked(REPO / "access/columns.yaml", REPO / "access/columns.schema.json")
+
+
+@pytest.fixture(scope="session")
+def columns() -> dict[str, Any]:
+    return load_columns()
+
+
 @pytest.fixture(scope="session")
 def glossary() -> dict[str, Any]:
     return load_checked(REPO / "semantics/glossary.yaml", REPO / "semantics/glossary.schema.json")

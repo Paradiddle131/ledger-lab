@@ -1,0 +1,49 @@
+# The policy tags the warehouse puts on sensitive columns: what each tag marks, the masking rule a
+# masked reader sees, and which personas read its columns in clear or masked. `platform/gcp`
+# declares one policy tag, one masking rule and these readers' grants per tag from this file.
+# Every persona that reads the warehouse (a `read` or `edit` grant in personas.yaml) is a clear or
+# a masked reader of every tag, so no query a persona may run fails on a tagged column; a persona
+# that reads nothing in the warehouse is neither. The account that builds the models reads every
+# tag in clear, since a model copying a masked value would store the mask. Shape:
+# access/columns.schema.json.
+#
+# Masking rules: nullify (the cell reads as null), hash (SHA-256 of the value, so equal values
+# still join and count), last-four (only the last four characters).
+
+tags:
+  - id: bank-account-number
+    marks: A vendor's bank account number, as the ERP holds it to pay the vendor.
+    masking: last-four
+    clear: [payables-clerk, auditor]
+    masked:
+      - accountant-chicago
+      - accountant-uk-transport
+      - accountant-nl-government
+      - group-controller
+      - approver
+      - metric-owner
+      - agent-operator
+  - id: bank-account-holder
+    marks: The name on a vendor's bank account, which is a person's name when the vendor is one.
+    masking: nullify
+    clear: [payables-clerk, auditor]
+    masked:
+      - accountant-chicago
+      - accountant-uk-transport
+      - accountant-nl-government
+      - group-controller
+      - approver
+      - metric-owner
+      - agent-operator
+  - id: individual-id
+    marks: The keyed hash that stands for a vendor or payee who may be a person, and their vendor id.
+    masking: hash
+    clear: [payables-clerk, auditor]
+    masked:
+      - accountant-chicago
+      - accountant-uk-transport
+      - accountant-nl-government
+      - group-controller
+      - approver
+      - metric-owner
+      - agent-operator
