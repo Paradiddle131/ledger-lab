@@ -1,50 +1,41 @@
 -- From the first publication date to the last, every day has exactly one rate per currency,
 -- carried no more than four days from a publication date, and the euro's is 1: a run of closed
--- days longer than four (a gap in the published rates) fails here instead of translating to
--- null, and no day outside the publication dates has a rate.
+-- days longer than four (a gap in the published rates) fails here instead of failing the
+-- translation, and no day outside the publication dates has a rate. The days are counted from
+-- the published rates themselves, whatever years they cover.
 with bounds as (
     select
+        currency,
         min(published_on) as first_day,
         max(published_on) as last_day
     from {{ ref('fx_published_rates') }}
+    group by currency
 ),
 
-days as (
-    {{ fiscal_spine('day') }}
-),
-
-expected as (
+covered as (
     select
-        cast(days.date_day as date) as rate_on,
-        currencies.currency
-    from days
-    cross join bounds
-    cross join (select distinct currency from {{ ref('fx_published_rates') }}) as currencies
-    where cast(days.date_day as date) between bounds.first_day and bounds.last_day
-),
-
-counted as (
-    select
-        expected.rate_on,
-        expected.currency,
-        count(fx_rates.rate_on) as rates
-    from expected
-    left join {{ ref('fx_rates') }} as fx_rates
-        on expected.rate_on = fx_rates.rate_on and expected.currency = fx_rates.currency
-    group by expected.rate_on, expected.currency
+        currency,
+        count(*) as rates,
+        count(distinct rate_on) as days
+    from {{ ref('fx_rates') }}
+    group by currency
 )
 
 select
-    rate_on,
-    currency
-from counted
-where rates != 1
+    bounds.currency,
+    bounds.first_day as rate_on
+from bounds
+left join covered on bounds.currency = covered.currency
+where
+    covered.days is null
+    or covered.rates != covered.days
+    or covered.days != {{ dbt.datediff('bounds.first_day', 'bounds.last_day', 'day') }} + 1
 union all
 select
-    fx_rates.rate_on,
-    fx_rates.currency
+    fx_rates.currency,
+    fx_rates.rate_on
 from {{ ref('fx_rates') }} as fx_rates
-cross join bounds
+inner join bounds on fx_rates.currency = bounds.currency
 where
     {{ dbt.datediff('fx_rates.published_on', 'fx_rates.rate_on', 'day') }} not between 0 and 4
     or (fx_rates.currency = 'EUR' and fx_rates.units_per_euro != 1)

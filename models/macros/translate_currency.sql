@@ -10,9 +10,11 @@
     through the euro: the amount divided by the from-currency's units per euro and multiplied by
     the to-currency's, rounded once, half away from zero, to two decimal places.
 
-    A currency or day the rates lack (an unknown currency, a day before the first publication or
-    after the last) translates to null, never to a far-away rate: a model using this macro gives
-    `translated_amount` a not_null test, so such a row fails the build. -#}
+    A row with an amount that the rates cannot translate (an unknown or missing currency, a day
+    before the first publication date or after the last) stops the query with an error naming
+    the currencies and the day, never a far-away rate or a null a sum would skip; a null amount
+    translates to null. Both engines spell the raise `error(message)` and evaluate it only on the
+    row whose case reaches it. -#}
 {% macro translate_currency(
     relation, amount, from_currency, to_currency, rate_date=none, constant_rates_on=none
 ) %}
@@ -39,13 +41,28 @@
             published_on as fx_published_on
         from {{ ref('fx_rates') }}
     {%- endset -%}
+    {%- set missing -%}
+        {{ dbt.concat([
+            "'translate_currency: no ECB rate from '",
+            "coalesce(cast((" ~ from_currency ~ ") as " ~ dbt.type_string() ~ "), 'no currency')",
+            "' to '",
+            "coalesce(cast((" ~ to_currency ~ ") as " ~ dbt.type_string() ~ "), 'no currency')",
+            "' on '",
+            "coalesce(cast(" ~ on ~ " as " ~ dbt.type_string() ~ "), 'no date')",
+        ]) }}
+    {%- endset -%}
     select
         untranslated.*,
-        cast({{ convert_through_euro(
-            "cast((" ~ amount ~ ") as " ~ dbt.type_numeric() ~ ")",
-            "from_leg.fx_units_per_euro",
-            "to_leg.fx_units_per_euro",
-        ) }} as {{ dbt.type_numeric() }}) as translated_amount,
+        case
+            when ({{ amount }}) is null then null
+            when from_leg.fx_units_per_euro is null or to_leg.fx_units_per_euro is null
+                then error({{ missing }})
+            else cast({{ convert_through_euro(
+                "cast((" ~ amount ~ ") as " ~ dbt.type_numeric() ~ ")",
+                "from_leg.fx_units_per_euro",
+                "to_leg.fx_units_per_euro",
+            ) }} as {{ dbt.type_numeric() }})
+        end as translated_amount,
         case
             when from_leg.fx_published_on is not null then to_leg.fx_published_on
         end as rates_published_on
@@ -61,15 +78,20 @@
 {% endmacro %}
 
 {#- `amount` times `to_rate` divided by `from_rate`, rounded half away from zero to two decimal
-    places, exactly: BigQuery divides NUMERIC as decimals; DuckDB divides decimals as floats,
-    which misround a half cent, so on DuckDB the quotient is taken in 128-bit integers of
-    millionths (the scale of the amount and both rates). -#}
+    places: DuckDB divides decimals as floats, which misround a half cent, so there the quotient
+    is taken exactly in 128-bit integers of millionths (the scale of the amount and both rates);
+    BigQuery divides in BIGNUMERIC (38 decimal places), so the quotient is rounded to cents from
+    38 places, not from NUMERIC's 9, which could round twice near a half cent. -#}
 {% macro convert_through_euro(amount, from_rate, to_rate) %}
     {{ return(adapter.dispatch('convert_through_euro')(amount, from_rate, to_rate)) }}
 {% endmacro %}
 
 {% macro default__convert_through_euro(amount, from_rate, to_rate) %}
     round({{ amount }} * {{ to_rate }} / {{ from_rate }}, 2)
+{% endmacro %}
+
+{% macro bigquery__convert_through_euro(amount, from_rate, to_rate) %}
+    round(cast({{ amount }} as bignumeric) * {{ to_rate }} / {{ from_rate }}, 2)
 {% endmacro %}
 
 {% macro duckdb__convert_through_euro(amount, from_rate, to_rate) %}

@@ -3,8 +3,9 @@ sources:
     description: >
       The ECB's daily euro reference rates as the fetch kit lands them (`python -m ingest.fetch
       ecb-rates`), one row per publication date and currency, every field the publisher's text.
-      Read only when the `ecb_rates` var is `landed`; on DuckDB from the landing path the kit
-      uses. Source: European Central Bank; published for information purposes only.
+      Read unless the `ecb_rates` var is `sample`; on DuckDB from the landing path the kit uses,
+      so a build with nothing landed fails on the missing file. Source: European Central Bank;
+      published for information purposes only.
     tables:
       - name: rates
         config:
@@ -34,7 +35,7 @@ models:
     description: >
       One row per calendar day and currency from the first publication date to the last: that
       day's rates, or on a closed day the previous business day's, carried at most four days.
-      `translate_currency` reads it; a day it lacks translates to null.
+      `translate_currency` reads it; an amount on a day it lacks stops the query.
     columns:
       - name: rate_on
         data_tests:
@@ -54,7 +55,8 @@ seeds:
     description: >
       Real ECB reference rates for 25 March to 8 April 2024, as the fetch kit lands them (a
       weekend, and Good Friday to Easter Monday closed): the rates the translation tests need
-      inside `make check`, where no landed file exists. Source: European Central Bank; published
+      inside `make check`, where no landed file exists, read when the `ecb_rates` var is
+      `sample`. Source: European Central Bank; published
       for information purposes only, copied unchanged.
     config:
       column_types:

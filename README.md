@@ -72,7 +72,7 @@ The dbt models build on DuckDB in the session by default; setting `LEDGER_LAB_GC
 uv run dbt build --project-dir models --profiles-dir models
 ```
 
-Currency translation reads a committed fortnight of real ECB rates by default; `--vars '{ecb_rates: landed}'` reads the file the fetch kit landed instead, and `uv run pytest -m landed` runs the translation rules over it.
+Currency translation reads the ECB rates the fetch kit landed (`python -m ingest.fetch ecb-rates`), and the build fails on a missing file; the tests pass `--vars '{ecb_rates: sample}'` to read a committed fortnight of real rates instead, and `uv run pytest -m landed` runs the translation rules over the landed file.
 
 Each source is fetched by name from [`ingest/sources.yaml`](ingest/sources.yaml), which records its URL or pinned query, SHA-256, licence link, publisher and whether it names people; the file lands under `LEDGER_LAB_LANDING` (default `landing/`, outside git) only when its checksum matches, and the command exits non-zero otherwise:
 
