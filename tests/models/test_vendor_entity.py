@@ -9,6 +9,7 @@ fixture build sees the same candidates the real one does. The landed test runs t
 against the real landing.
 """
 
+import csv
 import json
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,7 @@ from ingest.entities import REGISTER, Register, match_key
 from ingest.fetch import landing_path
 from ingest.individuals import is_organisation
 from ingest.uk_transport.spend import BODIES
-from tests.models.dbt_build import HASHED, SAMPLE, Build, built, dbt, query
+from tests.models.dbt_build import HASHED, SAMPLE, SEEDS, Build, built, dbt, query
 
 SOURCES = ("chicago-contracts", "chicago-payments", "uk-transport-spend-2025")
 # Of the sample's names that have a legal entity, the share the rules match to it: a floor set just
@@ -72,7 +73,18 @@ def test_the_sample_holds_fifty_organisations_with_their_expected_match() -> Non
     assert len({(v["entity"], v["name"]) for v in vendors}) == len(vendors)
     assert sum(v["lei"] is not None for v in vendors) >= 40
     assert any(v["lei"] is None for v in vendors), "some names have no record to match"
-    leis = {r["lei"] for r in yaml.safe_load(SAMPLE.read_text())["register"]}
+    seeded = {
+        name: [row for row in csv.DictReader((SEEDS / f"{name}.csv").open())]
+        for name in ("vendor_contracts_sample", "vendor_suppliers_sample")
+    }
+    names = {("chicago", r["vendor_name"]) for r in seeded["vendor_contracts_sample"]}
+    names |= {("uk-transport", r["supplier"]) for r in seeded["vendor_suppliers_sample"]}
+    assert {(v["entity"], v["name"]) for v in vendors} | {
+        ("chicago", HASHED),
+        ("uk-transport", HASHED),
+    } == names, "the seeds hold the labelled names as landed vendors, and nothing else"
+    with (SEEDS / "vendor_legal_entities_sample.csv").open() as records:
+        leis = {r["LEI"] for r in csv.DictReader(records)}
     assert {v["lei"] for v in vendors if v["lei"]} <= leis
 
 
@@ -142,7 +154,7 @@ def test_the_real_landing_matches_the_sample_and_every_vouched_name(tmp_path: Pa
     for name in (*SOURCES, REGISTER):
         if not (landing / name).exists():
             pytest.skip(f"{name} is not landed")
-    build = built(tmp_path, landing)
+    build = built(tmp_path, "landed", landing)
     score = scored(build)
     print("labelled sample on the real register:", score)
     assert score["wrong"] == []

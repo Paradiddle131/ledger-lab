@@ -52,7 +52,7 @@ def environment(tmp_path: Path) -> dict[str, str]:
 def build_fx(tmp_path: Path, rates: str) -> dict[str, str]:
     """Build the rates models and run every rule over the `rates` set; each result by name."""
     env = environment(tmp_path)
-    result = dbt(env, tmp_path, "build", *SELECTION, "--vars", json.dumps({"ecb_rates": rates}))
+    result = dbt(env, tmp_path, "build", *SELECTION, "--vars", json.dumps({"source_rows": rates}))
     assert result.returncode == 0, result.stdout + result.stderr
     run = json.loads((tmp_path / "target" / "run_results.json").read_text())
     return {r["unique_id"].split(".")[-1]: r["status"] for r in run["results"]}
@@ -85,7 +85,7 @@ def compiled(sample: Sample, arguments: str) -> str:
         "--inline",
         f"{{{{ {call} }}}}",
         "--vars",
-        json.dumps({"ecb_rates": "sample"}),
+        json.dumps({"source_rows": "sample"}),
         "--output",
         "json",
         "--quiet",

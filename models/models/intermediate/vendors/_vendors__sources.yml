@@ -2,7 +2,8 @@ sources:
   - name: landing
     description: >
       The landed files under the landing path (`LEDGER_LAB_LANDING`, default `landing/`), read in
-      place as Parquet; `python -m ingest.fetch <source>` lands each.
+      place as Parquet when the `source_rows` var is `landed`; `python -m ingest.fetch <source>`
+      lands each. With `sample`, the vendor seeds below stand in for them.
     meta:
       external_location: "read_parquet('{{ env_var('LEDGER_LAB_LANDING', 'landing') }}/{name}')"
     tables:
@@ -10,3 +11,21 @@ sources:
       - name: chicago-payments
       - name: uk-transport-spend-2025
       - name: gleif-legal-entities
+
+seeds:
+  - name: vendor_contracts_sample
+    description: >
+      The labelled sample's Chicago names (`tests/models/vendor_sample.yaml`) as landed contract
+      vendors, and one hashed name, which is never matched: public companies' names only.
+  - name: vendor_payments_sample
+    description: The hashed name alone, as a landed payee.
+  - name: vendor_suppliers_sample
+    description: >
+      The labelled sample's UK names as landed suppliers, and one hashed name: public companies'
+      names only.
+  - name: vendor_legal_entities_sample
+    description: >
+      Every record of the pinned GLEIF register (CC0) the rules could consider for a sample name,
+      and each expected record they miss, in the landed register's columns the model reads.
+    config:
+      quote_columns: true
