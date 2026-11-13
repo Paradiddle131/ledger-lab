@@ -22,3 +22,13 @@ sources:
     licence: https://www.chicago.gov/city/en/narr/foia/data_disclaimer.html
     publisher: City of Chicago
     names_people: true
+  # The GLEIF register's golden copy published 2026-11-01 00:00 UTC (LEI-CDF 3.1, every record in
+  # the world, 507,213,646 bytes): a dated file the publisher writes once and keeps serving, so a
+  # re-fetch verifies; a re-pin is a later dated file and moves the hash. Its step keeps the
+  # vendors' countries and leaves sole proprietors out.
+  gleif-legal-entities:
+    url: https://goldencopy.gleif.org/storage/golden-copy-files/2026/11/01/1295525/20261101-0000-gleif-goldencopy-lei2-golden-copy.csv.zip
+    sha256: 478014c91f99cab99e3d01f503aacdc7d0b0557173dfc1d0e5613230678dc325  # pragma: allowlist secret
+    licence: https://www.gleif.org/en/meta/lei-data-terms-of-use
+    publisher: GLEIF
+    names_people: true
