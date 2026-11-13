@@ -27,6 +27,8 @@ models:
     +materialized: view
     calendars:
       +materialized: table
+    intermediate:
+      +materialized: table
     reference:
       +materialized: table
     marts:

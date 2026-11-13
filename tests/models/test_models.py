@@ -2,27 +2,21 @@
 
 The calendar rules (one period per day, contiguous periods, the UK year's boundaries, a status
 for every period) are dbt data tests in `models/`; these tests run them and check they ran.
-The build runs with the lab project variable removed and the local target named, so this test
-never reaches BigQuery whatever the session's environment holds.
+The build (`dbt_build.py`) runs with the lab project variable removed and the local target named, so
+these tests never reach BigQuery whatever the session's environment holds.
 """
 
 import csv
 import json
-import os
-import subprocess
-import sys
-from dataclasses import dataclass
 from datetime import date
-from pathlib import Path
 from typing import Any
 
-import duckdb
 import jinja2
 import pytest
 import yaml
 
-PROJECT = Path(__file__).resolve().parents[1] / "models"
-DBT = Path(sys.executable).with_name("dbt")
+from tests.models.dbt_build import PROJECT, Build, dbt, query
+
 with (PROJECT / "seeds" / "calendars" / "fiscal_year_starts.csv").open() as starts:
     ENTITIES = {row["entity_id"] for row in csv.DictReader(starts)}
 
@@ -53,54 +47,6 @@ def test_the_bigquery_target_caps_every_job() -> None:
     outputs = yaml.safe_load((PROJECT / "profiles.yml").read_text())["ledger_lab"]["outputs"]
     assert "maximum_bytes_billed" in outputs["bigquery"]
     assert "LEDGER_LAB_GCP_PROJECT" in outputs["bigquery"]["project"]
-
-
-@dataclass(frozen=True)
-class Build:
-    stdout: str
-    database: Path
-    results: dict[str, str]
-    env: dict[str, str]
-    cwd: Path
-
-
-def dbt(env: dict[str, str], cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [str(DBT), *args, "--project-dir", str(PROJECT), "--profiles-dir", str(PROJECT)]
-        + ["--target", "local"],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-        cwd=cwd,
-    )
-
-
-@pytest.fixture(scope="module")
-def build(tmp_path_factory: pytest.TempPathFactory) -> Build:
-    """Seed, build and test the whole project once on the local engine, with the committed samples
-    of ECB rates and Dutch budget rows in place of landed files."""
-    assert DBT.is_file(), "dbt is missing: run `uv sync`"
-    tmp_path = tmp_path_factory.mktemp("dbt")
-    database = tmp_path / "ledger_lab.duckdb"
-    env = {k: v for k, v in os.environ.items() if k != "LEDGER_LAB_GCP_PROJECT"}
-    env |= {
-        "LEDGER_LAB_DUCKDB_PATH": str(database),
-        "DBT_TARGET_PATH": str(tmp_path / "target"),
-        "DBT_LOG_PATH": str(tmp_path / "logs"),
-        "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
-    }
-    samples = {"source_rows": "sample"}
-    result = dbt(env, tmp_path, "build", "--vars", json.dumps(samples))
-    assert result.returncode == 0, result.stdout + result.stderr
-    run = json.loads((tmp_path / "target" / "run_results.json").read_text())
-    results = {r["unique_id"].split(".")[2]: r["status"] for r in run["results"]}
-    return Build(result.stdout, database, results, env, tmp_path)
-
-
-def query(build: Build, sql: str, *params: object) -> list[tuple[Any, ...]]:
-    with duckdb.connect(str(build.database), read_only=True) as db:
-        return db.execute(sql, list(params)).fetchall()
 
 
 def test_every_model_seed_and_data_test_passes_on_the_local_engine(build: Build) -> None:

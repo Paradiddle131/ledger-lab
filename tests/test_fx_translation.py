@@ -20,9 +20,9 @@ from typing import Any
 
 import duckdb
 import pytest
-from test_models import dbt
+from conftest import landed_file
 
-from ingest.fetch import landing_path
+from tests.models.dbt_build import dbt
 
 RULES = [
     "a_weekend_takes_fridays_rate",
@@ -197,6 +197,7 @@ def test_the_macro_refuses_a_call_without_exactly_one_rate_date(
 def test_the_rules_hold_over_every_landed_rate(tmp_path: Path) -> None:
     """Over the whole landed file: every rule passes, and every day from the first rate to the
     last has one rate per currency, carried at most four days."""
+    rates = landed_file("ecb-rates")
     results = build_fx(tmp_path, "landed")
     assert {rule: results.get(rule) for rule in RULES} == dict.fromkeys(RULES, "pass")
     with duckdb.connect(str(tmp_path / "ledger_lab.duckdb"), read_only=True) as db:
@@ -205,9 +206,7 @@ def test_the_rules_hold_over_every_landed_rate(tmp_path: Path) -> None:
             " count(*) filter (where rate_on != published_on) from fx_rates group by currency"
             " order by currency"
         ).fetchall()
-        landed = db.execute(
-            "select count(*) from read_parquet(?)", [str(landing_path() / "ecb-rates")]
-        ).fetchall()[0][0]
+        landed = db.execute("select count(*) from read_parquet(?)", [str(rates)]).fetchall()[0][0]
     for currency, count, first, last, carried, filled in days:
         assert count == (last - first) // timedelta(days=1) + 1
         assert carried <= 4

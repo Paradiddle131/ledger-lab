@@ -18,11 +18,13 @@ from typing import Any
 import duckdb
 import httpx
 import pytest
+from conftest import landed_file
 
 from ingest import fetch
-from ingest.fetch import landing_path
-from ingest.individuals import KEY_VARIABLE, normalise
+from ingest.entities import Record, Register, person_shaped
+from ingest.individuals import KEY_VARIABLE, is_organisation, normalise
 from ingest.uk_transport.spend import (
+    BODIES,
     COLUMNS,
     LAYOUTS,
     SET,
@@ -32,6 +34,8 @@ from ingest.uk_transport.spend import (
 )
 
 ENV = {KEY_VARIABLE: "k" * 32}
+# A register that vouches for no name, so only the classifier decides.
+NONE = Register(())
 STANDARD, DEPARTMENTAL_FAMILY, EXPENSE_AREA_SPACED = LAYOUTS
 GRANT = (
     "Department for Transport,Department for Transport,30/04/2025,Grt Aid to NDPBs,"
@@ -110,7 +114,7 @@ def year_files(months: dict[str, bytes], drop: tuple[str, ...] = ()) -> dict[str
 
 def land(tmp_path: Path, months: dict[str, bytes]) -> Path:
     path = tmp_path / SET
-    path.write_bytes(step(year_files(months), ENV))
+    path.write_bytes(step(year_files(months), ENV, NONE))
     return path
 
 
@@ -129,7 +133,7 @@ def one_month(tmp_path: Path, *lines: str, header: tuple[str, ...] = STANDARD) -
 def refused(april: bytes) -> str:
     """The step's refusal of a year whose April is this file."""
     with pytest.raises(SpendError) as raised:
-        step(year_files({"2025-04": april}), ENV)
+        step(year_files({"2025-04": april}), ENV, NONE)
     return str(raised.value)
 
 
@@ -212,7 +216,7 @@ def test_a_file_spanning_two_months_is_refused() -> None:
 def test_two_files_for_one_month_are_refused() -> None:
     april = filler("2025-04")
     with pytest.raises(SpendError, match="2025-05.csv: a second file for 2025-04"):
-        step(year_files({"2025-05": april}), ENV)
+        step(year_files({"2025-05": april}), ENV, NONE)
 
 
 def test_a_row_with_a_missing_field_is_refused() -> None:
@@ -221,14 +225,14 @@ def test_a_row_with_a_missing_field_is_refused() -> None:
 
 def test_a_year_missing_a_month_is_refused() -> None:
     with pytest.raises(SpendError, match="11 months, not the twelve of one April-to-March year"):
-        step(year_files({}, drop=("2025-09",)), ENV)
+        step(year_files({}, drop=("2025-09",)), ENV, NONE)
 
 
 def test_twelve_months_that_do_not_open_in_april_are_refused() -> None:
     files = year_files({}, drop=("2025-04",))
     files[url("2026-04.csv")] = filler("2026-04")
     with pytest.raises(SpendError, match="12 months, not the twelve of one April-to-March year"):
-        step(files, ENV)
+        step(files, ENV, NONE)
 
 
 @pytest.mark.parametrize(
@@ -460,15 +464,37 @@ def test_the_departments_own_bodies_are_known_organisations(tmp_path: Path) -> N
     assert landed[0]["item_text"] == "Maritime and Coastguard"
 
 
+def test_a_supplier_the_register_vouches_for_lands_in_clear_and_a_person_stays_hashed(
+    tmp_path: Path,
+) -> None:
+    """Both register records are invented, filed as British private companies; the person-shaped
+    one stays hashed."""
+    company = "EXAMPLE RAIL INFRASTRUCTURE OF BRITAIN"
+    register = Register(
+        (Record(company.title(), "GENERAL", "H0PO"), Record("Jane Example", "GENERAL", "H0PO"))
+    )
+    april = served(
+        person_row(supplier=company, item="Track renewals"), person_row(item="Settlement")
+    )
+    path = tmp_path / SET
+    path.write_bytes(step(year_files({"2025-04": april}), ENV, register))
+    vouched, person = rows(path, "2025-04")
+    assert (vouched["supplier"], vouched["item_text"]) == (company, "Track renewals")
+    assert vouched["postal_code"] == "ZZ1 1ZZ"
+    assert vouched["transaction_number"] == "4400123"
+    assert str(person["supplier"]).startswith("person:")
+    assert (person["item_text"], person["postal_code"]) == (None, None)
+
+
 def test_the_step_refuses_without_the_hash_key() -> None:
     with pytest.raises(Exception, match=KEY_VARIABLE):
-        step(year_files({}), {})
+        step(year_files({}), {}, NONE)
 
 
 def test_the_step_writes_nothing_to_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TMPDIR", str(tmp_path))
-    step(year_files({"2025-04": served(person_row(), GRANT)}), ENV)
+    step(year_files({"2025-04": served(person_row(), GRANT)}), ENV, NONE)
     assert list(tmp_path.rglob("*")) == []
 
 
@@ -531,6 +557,7 @@ def named_in(cell: str, spellings: set[str]) -> bool:
 @pytest.fixture(scope="module")
 def real() -> Iterator[tuple[dict[str, bytes], list[dict[str, Any]]]]:
     """The served files, downloaded again and verified in memory, and the landed set's rows."""
+    path = landed_file(SET)
     sources = fetch.load_sources(fetch.SOURCES)
     files = {}
     for name, entry in sources.items():
@@ -538,13 +565,13 @@ def real() -> Iterator[tuple[dict[str, bytes], list[dict[str, Any]]]]:
             raw = fetch.download(entry)
             fetch.verify(name, entry, raw)
             files[entry["url"]] = raw
-    yield files, rows(landing_path() / SET)
+    yield files, rows(path)
 
 
 @pytest.mark.landed
 def test_every_month_of_the_year_is_landed_once(real: tuple) -> None:
     files, _ = real
-    counts = profile(landing_path() / SET)
+    counts = profile(landed_file(SET))
     print(counts)
     assert list(counts["months"]) == FISCAL_MONTHS
     assert counts["files"] == len(files) == 12
@@ -635,3 +662,13 @@ def test_no_hashed_supplier_is_named_anywhere_in_the_landed_set(real: tuple) -> 
     assert {normalise(n) for n in hashed_names} & {
         normalise(r["supplier"]) for r in landed
     } == set()
+    register = Register.landed()
+    vouched = {
+        r["supplier"]
+        for r in landed
+        if not r["supplier"].startswith("person:")
+        and r["supplier"] != "REDACTED"
+        and not is_organisation(r["supplier"], BODIES)
+    }
+    print(f"{len(vouched)} clear suppliers on the register's word alone")
+    assert {n for n in vouched if not register.vouches(n) or person_shaped(n)} == set()

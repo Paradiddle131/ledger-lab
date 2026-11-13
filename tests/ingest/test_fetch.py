@@ -586,13 +586,120 @@ def test_a_set_lands_every_member_through_its_step_as_one_file(
             "spending": entry(f"{site.base}/file.csv", sha256(FILE)),
         }
     )
-    landed = fetch.fetch_set("spend", landing)
+    (landed,) = fetch.fetch_set("spend", landing)
     assert landed == landing / "spend"
     assert landed.read_bytes() == FILE + FILE.upper()
     assert [list(files) for files in seen] == [
         [f"{site.base}/file.csv", f"{site.base}/second.csv"]
     ], "the step gets each member by its URL, in the sources file's order, and no other source"
     assert everything_under(landing) == [landed]
+
+
+def test_a_set_step_may_land_one_file_per_member(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    site.files["/second.csv"] = FILE.upper()
+    monkeypatch.setitem(
+        fetch.SET_STEPS, "spend", lambda files: {"spend-1": b"one", "spend-2": b"two"}
+    )
+    write_sources(
+        **{
+            "spend-1": entry(f"{site.base}/file.csv", sha256(FILE), names_people=True),
+            "spend-2": entry(f"{site.base}/second.csv", sha256(FILE.upper()), names_people=True),
+        }
+    )
+    landed = fetch.fetch_set("spend", landing)
+    assert landed == [landing / "spend-1", landing / "spend-2"]
+    assert [path.read_bytes() for path in landed] == [b"one", b"two"]
+    assert everything_under(landing) == landed
+
+
+@pytest.mark.parametrize("failing", ["first", "second"])
+def test_files_that_fail_to_land_together_leave_the_old_ones_as_they_were(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    """A rename that fails, of either file, leaves both old files in place, and nothing else."""
+    first, second = tmp_path / "set-1", tmp_path / "set-2"
+    first.write_bytes(b"old one")
+    second.write_bytes(b"old two")
+    target = first if failing == "first" else second
+    rename = Path.replace
+
+    def replace(self: Path, to: Path) -> Path:
+        if Path(to) == target and self.name.startswith(f".{target.name}.new."):
+            raise OSError(28, "No space left on device")
+        return rename(self, to)
+
+    monkeypatch.setattr(Path, "replace", replace)
+    with pytest.raises(fetch.FetchError, match="cannot write"):
+        fetch.land_all("set", {first: b"new one", second: b"new two"})
+    assert (first.read_bytes(), second.read_bytes()) == (b"old one", b"old two")
+    assert everything_under(tmp_path) == [first, second]
+
+
+def test_files_whose_rollback_fails_too_keep_the_old_ones_aside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second new file cannot be placed and the old first one cannot be moved back: neither new
+    file stays, and both old files stay whole under their hidden names, which the error names."""
+    first, second = tmp_path / "set-1", tmp_path / "set-2"
+    first.write_bytes(b"old one")
+    second.write_bytes(b"old two")
+    rename = Path.replace
+
+    def replace(self: Path, to: Path) -> Path:
+        if Path(to) == second and self.name.startswith(".set-2.new."):
+            raise OSError(28, "No space left on device")
+        if Path(to) == first and self.name.startswith(".set-1.old."):
+            raise OSError(5, "Input/output error")
+        return rename(self, to)
+
+    monkeypatch.setattr(Path, "replace", replace)
+    with pytest.raises(fetch.FetchError, match="kept as"):
+        fetch.land_all("set", {first: b"new one", second: b"new two"})
+    kept = sorted(p.read_bytes() for p in tmp_path.glob(".set-*.old.*"))
+    assert kept == [b"old one", b"old two"]
+    assert not first.exists() and not second.exists()
+    assert not list(tmp_path.glob(".*.new.*"))
+
+
+def test_files_that_land_together_replace_the_old_ones_and_leave_nothing_else(
+    tmp_path: Path,
+) -> None:
+    first, second = tmp_path / "set-1", tmp_path / "set-2"
+    first.write_bytes(b"old one")
+    fetch.land_all("set", {first: b"new one", second: b"new two"})
+    assert (first.read_bytes(), second.read_bytes()) == (b"new one", b"new two")
+    assert everything_under(tmp_path) == [first, second]
+
+
+@pytest.mark.parametrize("name", sorted(fetch.READS_THE_REGISTER))
+def test_a_set_that_reads_the_register_is_refused_before_any_download_without_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    def no_download(entry: dict) -> bytes:
+        raise AssertionError("nothing is downloaded")
+
+    monkeypatch.setattr(fetch, "download", no_download)
+    with pytest.raises(fetch.SourcesError, match="land it first"):
+        fetch.fetch_set(name, tmp_path)
+    assert everything_under(tmp_path) == []
+
+
+def test_a_set_step_naming_a_file_that_is_no_member_lands_nothing(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(fetch.SET_STEPS, "spend", lambda files: {"spend-1": b"1", "other": b"2"})
+    write_sources(**{"spend-1": entry(f"{site.base}/file.csv", sha256(FILE), names_people=True)})
+    with pytest.raises(fetch.FetchError, match="no member"):
+        fetch.fetch_set("spend", landing)
+    assert everything_under(landing) == []
 
 
 def test_a_set_member_whose_download_is_cut_short_lands_on_the_retry(
@@ -609,7 +716,7 @@ def test_a_set_member_whose_download_is_cut_short_lands_on_the_retry(
             "spend-2": entry(f"{site.base}/cut.csv", sha256(FILE)),
         }
     )
-    assert fetch.fetch_set("spend", landing).read_bytes() == FILE + FILE
+    assert fetch.fetch_set("spend", landing)[0].read_bytes() == FILE + FILE
     assert [r["path"] for r in site.requests] == ["/file.csv", "/cut.csv", "/cut.csv"]
 
 

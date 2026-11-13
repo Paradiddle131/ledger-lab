@@ -1,15 +1,17 @@
-"""The landed Chicago files: their profiles, a leak check across each file's rows, and a count of
-what one file hashes and the other shows in clear.
+"""The landed Chicago files: their profiles, and a leak check across each file's rows and across
+the two files, which land together as one set.
 
-These need the files landed under the landing path and `LEDGER_LAB_HASH_KEY` set to the key they
-were landed with (`pytest -m landed`). The leak check finds a cell's words with its own reading of
-the cell (letters and digits by `str.isalnum`, plus every stretch of the cell as served from one
-word's start to a later word's end) and hashes each run as a person's name, so it shares no
-tokenising with the step. It cannot see a hashed name written in another order; the step blanks
-those, and nothing checks them here. It asserts on free-text descriptions and code columns, and
-only counts vendor, department and city cells, where a clear organisation's name may contain a
-hashed name by design. Across the two files it only counts: a name one file hashes may sit in
-clear in the other's descriptions, the known remaining gap.
+These need the files landed under the landing path, the legal-entity register among them, and
+`LEDGER_LAB_HASH_KEY` set to the key they were landed with (`pytest -m landed`). Every clear vendor
+name is an organisation by its legal form or by the register's word, never a person-shaped name.
+The leak check finds a cell's words with its own reading of the cell (letters and digits by
+`str.isalnum`, plus every stretch of the cell as served from one word's start to a later word's
+end) and hashes each run as a person's name, so it shares no tokenising with the step. It cannot
+see a hashed name written in another order; the step blanks those, and nothing checks them here.
+It asserts on free-text descriptions and code columns, and only counts vendor, department and city
+cells, where a clear organisation's name may contain a hashed name by design.
+Across the two files it asserts that no description holds a name the other file hashes, and only
+counts vendor names holding one, which an organisation's name may by design.
 """
 
 from collections.abc import Callable
@@ -17,20 +19,14 @@ from pathlib import Path
 
 import duckdb
 import pytest
+from conftest import landed_file
 
 from ingest.chicago import contracts, payments
-from ingest.fetch import landing_path
+from ingest.entities import Register, person_shaped
 from ingest.individuals import is_organisation, person_hasher
 
 pytestmark = pytest.mark.landed
 LONGEST = 8
-
-
-def landed(name: str) -> Path:
-    path = landing_path() / name
-    if not path.exists():
-        pytest.skip(f"{name} is not landed")
-    return path
 
 
 def cells(path: Path, column: str) -> list[tuple[str, int]]:
@@ -86,13 +82,19 @@ def holding(
 
 
 def clear_names_are_organisations(path: Path, column: str) -> None:
+    """Every clear name is an organisation by its legal form or by the landed register's word, and
+    the register's word is never taken for a person-shaped name."""
     in_clear = [cell for cell, _ in cells(path, column)]
     assert in_clear, "some names are organisations by evidence"
-    assert [n for n in in_clear if not is_organisation(n)] == []
+    register = Register.landed()
+    vouched = [n for n in in_clear if not is_organisation(n)]
+    print(f"{len(vouched)} clear names on the register's word alone")
+    assert [n for n in vouched if not register.vouches(n)] == []
+    assert not any(person_shaped(n) for n in vouched)
 
 
 def test_the_landed_contracts_carry_their_mess_and_no_hashed_name_in_a_description() -> None:
-    path = landed("chicago-contracts")
+    path = landed_file("chicago-contracts")
     counts = contracts.profile(path)
     print(counts)
     assert sum(counts["order_number_formats"].values()) == counts["rows"]
@@ -112,7 +114,7 @@ def test_the_landed_contracts_carry_their_mess_and_no_hashed_name_in_a_descripti
 
 
 def test_the_landed_payments_carry_their_roll_ups_and_no_hashed_name_in_a_code() -> None:
-    path = landed("chicago-payments")
+    path = landed_file("chicago-payments")
     counts = payments.profile(path)
     print(counts)
     assert counts["itemised_rows"] + counts["rolled_up_rows"] == counts["rows"]
@@ -145,12 +147,11 @@ def exposed(
     return names, rows
 
 
-def test_the_cross_file_exposure_is_counted_and_consistent() -> None:
-    """A name one file hashes may sit in clear in the other file's descriptions: each step sees
-    only its own table, and a landing must not depend on another table's data. The count is the
-    known remaining gap, mostly organisations hashed for lack of evidence, which vendor matching
-    will shrink; it is reported, not asserted to be zero."""
-    contract_path, payment_path = landed("chicago-contracts"), landed("chicago-payments")
+def test_no_description_holds_a_name_the_other_file_hashes() -> None:
+    """The two tables land together, so a description in either holds no name the other hashes
+    (payments carry no description); a clear vendor name may hold one, as an organisation's name
+    may, and is only counted."""
+    contract_path, payment_path = landed_file("chicago-contracts"), landed_file("chicago-payments")
     as_person = person_hasher()
     from_contracts = hashes(contract_path, "vendor_name")
     from_payments = hashes(payment_path, "vendor_name")
@@ -183,3 +184,5 @@ def test_the_cross_file_exposure_is_counted_and_consistent() -> None:
         assert (rows == 0) == (not names)
         report[label] = {"distinct names": len(names), "rows": rows}
     print("names the other file hashes, in clear here:", report)
+    assert report["contract descriptions"] == {"distinct names": 0, "rows": 0}
+    assert report["payment descriptions"] == {"distinct names": 0, "rows": 0}

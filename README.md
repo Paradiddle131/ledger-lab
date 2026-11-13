@@ -41,15 +41,15 @@ Records that may name a person (sole proprietors, partnerships that are no separ
 The UK Department for Transport's spending over £25,000 comes from its monthly files on [GOV.UK](https://www.gov.uk/government/collections/dft-departmental-spending-over-25000): Contains public sector information licensed under the [Open Government Licence v3.0](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).
 What lands is the twelve files of one fiscal year in one shape, with every supplier who may be a person hashed and what describes or locates them left out.
 
-To land a source, run its line below; a source that names people (Chicago's contracts and payments, the UK spend) also needs `LEDGER_LAB_HASH_KEY` set (see `ingest/individuals.py`).
+To land a source, run its line below; a source that names people (Chicago's contracts and payments, the UK spend) also needs `LEDGER_LAB_HASH_KEY` set (see `ingest/individuals.py`) and the legal-entity register landed first, since a payee the register vouches for as an organisation lands in clear (see `ingest/entities.py`).
+With one key, a name hashes the same in every landing.
 A set's name lands every source whose name it prefixes (`<set>-<member>`) as one file, through the set's step, once every member has verified.
 The landed tests need the key the files were landed with for Chicago, and the network for the UK spend, whose files they download again; the pages test reads each pinned UK month's GOV.UK page:
 
 ```bash
-uv run python -m ingest.fetch chicago-contracts   # lands landing/chicago-contracts as Parquet
-uv run python -m ingest.fetch chicago-payments    # lands landing/chicago-payments as Parquet
-uv run python -m ingest.fetch ecb-rates           # lands landing/ecb-rates as Parquet
 uv run python -m ingest.fetch gleif-legal-entities  # lands landing/gleif-legal-entities as Parquet
+uv run python -m ingest.fetch chicago             # lands landing/chicago-contracts and landing/chicago-payments together as Parquet
+uv run python -m ingest.fetch ecb-rates           # lands landing/ecb-rates as Parquet
 uv run python -m ingest.fetch nl-government-budget  # lands landing/nl-government-budget as Parquet
 uv run python -m ingest.fetch uk-transport-spend-2025  # lands April 2025 to March 2026 as one Parquet set
 uv run pytest -m landed                          # profiles what is landed and checks it for hashed names left in clear
@@ -66,13 +66,13 @@ make check        # lint, types, tests, process-id and owner checks, secret scan
 make fresh-clone  # clone HEAD and prove it holds no secret, identifier or data
 ```
 
-The dbt models build on DuckDB in the session by default; setting `LEDGER_LAB_GCP_PROJECT` (with `uv sync --group bigquery`) moves them to BigQuery:
+The dbt models build on DuckDB in the session by default, reading the landed files in place under `LEDGER_LAB_LANDING`; setting `LEDGER_LAB_GCP_PROJECT` (with `uv sync --group bigquery`) moves them to BigQuery:
 
 ```bash
 uv run dbt build --project-dir models --profiles-dir models
 ```
 
-Every model that reads a fetched source reads the file the fetch kit landed (`python -m ingest.fetch ecb-rates`, `python -m ingest.fetch nl-government-budget`), and the build fails on a missing file; the tests pass `--vars '{source_rows: sample}'` to read the committed samples of real rows instead (a fortnight of ECB rates, and Dutch budget rows chosen for their mess), and `uv run pytest -m landed` runs the translation and budget rules over the landed files.
+Every model that reads a fetched source reads the file the fetch kit landed (`python -m ingest.fetch ecb-rates`, `python -m ingest.fetch nl-government-budget`, and for the vendors' legal entities `chicago`, `uk-transport-spend-2025` and `gleif-legal-entities`), and the build fails on a missing file; the tests pass `--vars '{source_rows: sample}'` to read the committed samples of real rows instead (a fortnight of ECB rates, and Dutch budget rows chosen for their mess), and `uv run pytest -m landed` runs the translation and budget rules over the landed files.
 The Dutch budget against outturn shows the figures as the file serves them: a zero the file may serve in place of a figure is flagged on its line (`has_doubtful_zero`), and the landed tests count the figures the file serves wrong.
 
 Each source is fetched by name from [`ingest/sources.yaml`](ingest/sources.yaml), which records its URL or pinned query, SHA-256, licence link, publisher and whether it names people; the file lands under `LEDGER_LAB_LANDING` (default `landing/`, outside git) only when its checksum matches, and the command exits non-zero otherwise:

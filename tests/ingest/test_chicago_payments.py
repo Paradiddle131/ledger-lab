@@ -12,11 +12,22 @@ import duckdb
 import pytest
 
 from ingest import fetch
-from ingest.chicago.payments import COLUMNS, profile, step
-from ingest.chicago.table import TableError
+from ingest.chicago import together
+from ingest.chicago.payments import COLUMNS, TABLE, profile
+from ingest.chicago.table import TableError, land_all
+from ingest.entities import Register
 from ingest.individuals import KEY_VARIABLE
 
 ENV = {KEY_VARIABLE: "k" * 32}
+# A register that vouches for no name, so only the classifier decides.
+NONE = Register(())
+
+
+def step(raw: bytes, env: dict[str, str], register: Register) -> bytes:
+    """The table landed on its own, as the set's landing scrubs it."""
+    return land_all({"t": (raw, TABLE)}, env, register)["t"]
+
+
 ITEMISED = {
     "voucher_number": "PV84248442063",
     "amount": "45111.74",
@@ -65,7 +76,7 @@ def served(*rows: dict[str, str], columns: tuple[str, ...] = COLUMNS) -> bytes:
 
 def landed(tmp_path: Path, *rows: dict[str, str]) -> Path:
     path = tmp_path / "chicago-payments"
-    path.write_bytes(step(served(*rows), ENV))
+    path.write_bytes(step(served(*rows), ENV, NONE))
     return path
 
 
@@ -102,19 +113,19 @@ def test_an_organisation_without_a_legal_form_is_hashed_as_a_person(tmp_path: Pa
 
 def test_the_step_refuses_without_the_hash_key() -> None:
     with pytest.raises(Exception, match=KEY_VARIABLE):
-        step(served(PERSON), {})
+        step(served(PERSON), {}, NONE)
 
 
 def test_the_step_refuses_a_table_whose_columns_changed() -> None:
     with pytest.raises(TableError):
-        step(served(ITEMISED, columns=(*COLUMNS, "payee_address")), ENV)
+        step(served(ITEMISED, columns=(*COLUMNS, "payee_address")), ENV, NONE)
 
 
 @pytest.mark.parametrize("column", ["voucher_number", "contract_number"])
 @pytest.mark.parametrize("words", ["JANE EXAMPLE", "EXAMPLE", "JANE 2"])
 def test_the_step_refuses_a_code_column_that_reads_as_words(column: str, words: str) -> None:
     with pytest.raises(TableError, match=column):
-        step(served({**PERSON, column: words}), ENV)
+        step(served({**PERSON, column: words}), ENV, NONE)
 
 
 @pytest.mark.parametrize(
@@ -130,8 +141,9 @@ def test_a_contract_number_with_a_dash_lands(tmp_path: Path) -> None:
     assert row["contract_number"] == "B-12345"
 
 
-def test_the_fetch_kit_lands_the_payments_only_through_this_step() -> None:
-    assert fetch.STEPS["chicago-payments"] is step
+def test_the_fetch_kit_lands_the_table_only_in_the_chicago_set() -> None:
+    assert "chicago-payments" not in fetch.STEPS
+    assert "chicago-payments".startswith(f"{together.SET}-")
     assert fetch.load_sources(fetch.SOURCES)["chicago-payments"]["names_people"] is True
 
 

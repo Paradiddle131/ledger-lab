@@ -13,6 +13,8 @@
 # A live table is ordered by its content, every column, never by the portal's row id, which the
 # City reassigns when it recreates rows; rows that tie on every column are identical bytes.
 sources:
+  # Chicago's contracts and payments land together as the set chicago, through its step, so neither
+  # table's descriptions name a payee the other hashes; neither lands alone.
   # City of Chicago contracts (rsxa-ify5), every row approved by the cut-off. The table is live:
   # a row the City edits changes the bytes, and a re-pin moves the hash.
   chicago-contracts:

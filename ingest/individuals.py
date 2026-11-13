@@ -10,7 +10,8 @@ A name counts as an organisation only on positive evidence, and doubt always mea
   degree, a role such as executor or guardian, a trust).
 - Before a final `B.V.` or `N.V.`, which also read as a surname's initials, the name needs two
   words that are neither single letters nor Dutch name particles.
-- A name the caller already knows is an organisation counts as one.
+- A name the caller already knows is an organisation counts as one: a paying body the step lists,
+  or a name the legal-entity register vouches for (`ingest/entities.py`).
 - A trading-as or also-known-as part, an estate, executors or a deceased overrides all of these.
 
 A company named after a person (`Jane Doe Ltd`) is a separate legal person and passes in clear.
@@ -192,12 +193,14 @@ def _marker_spellings(words: list[str]) -> set[str]:
 
 
 def _classify(normalised: str, register: frozenset[str]) -> bool:
-    if _marks_a_person(normalised):
+    if marks_a_person(normalised):
         return False
     return normalised in register or _has_legal_form(normalised.split())
 
 
-def _marks_a_person(normalised: str) -> bool:
+def marks_a_person(normalised: str) -> bool:
+    """True when a normalised payee's name carries a person marker (trading as, an estate,
+    executors, a deceased), which no legal form or register overrides."""
     return bool(_marker_spellings(normalised.split()) & PERSON_MARKERS)
 
 
@@ -228,14 +231,18 @@ def is_organisation(name: str, organisations: Iterable[str] = ()) -> bool:
     return _classify(normalise(name), frozenset(map(normalise, organisations)))
 
 
-def pseudonymiser(env: Mapping[str, str] | None = None) -> Callable[[str | None], str | None]:
-    """A function that passes an organisation's name through and hashes a person's.
+def pseudonymiser(
+    env: Mapping[str, str] | None = None, organisations: Iterable[str] = ()
+) -> Callable[[str | None], str | None]:
+    """A function that passes an organisation's name through and hashes a person's; the names in
+    `organisations` are known ones (a person marker still overrides them).
 
     Reads the key first, so it raises before any name is seen.
     A missing payee (None, or nothing left after normalisation) stays None: it names nobody,
     and one shared hash for every blank would read as one person.
     """
     as_person = person_hasher(env)
+    known = frozenset(map(normalise, organisations))
 
     def hide(name: str | None) -> str | None:
         if name is None:
@@ -243,7 +250,7 @@ def pseudonymiser(env: Mapping[str, str] | None = None) -> Callable[[str | None]
         normalised = normalise(name)
         if not normalised:
             return None
-        if _classify(normalised, frozenset()):
+        if _classify(normalised, known):
             return name
         return as_person(name)
 
