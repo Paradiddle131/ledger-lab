@@ -31,12 +31,22 @@ City of Chicago data comes from the City's data portal under its [Data Terms of 
 
 > This site provides applications using data that has been modified for use from its original source, www.cityofchicago.org, the official website of the City of Chicago. The City of Chicago makes no claims as to the content, accuracy, timeliness, or completeness of any of the data provided at this site. The data provided at this site is subject to change at any time. It is understood that the data provided at this site is being used at one's own risk.
 
-To land a source, set `LEDGER_LAB_HASH_KEY` (see `ingest/individuals.py`) and run:
+The euro reference rates come from the ECB data API under the ECB's [copyright and disclaimer](https://www.ecb.europa.eu/home/disclaimer/html/index.en.html); Source: European Central Bank.
+The ECB publishes them for information purposes only, and a figure translated with them is derived from them.
+
+Legal-entity records come from the GLEIF golden copy under [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) and the [LEI data terms of use](https://www.gleif.org/en/meta/lei-data-terms-of-use).
+What lands here is a subset the lab derives from it (three countries, selected fields), not GLEIF's own data, and GLEIF does not endorse this project.
+Records that may name a person (sole proprietors, partnerships that are no separate legal person, and records without a real legal-form code whose legal name is not evidence of an organisation) and person-like other names are left out; legal names of records with a real legal-form code land as the register records them, and a record without a real legal-form code never vouches that a name is an organisation.
+
+To land a source, run its line below; a source that names people (Chicago's contracts and payments) also needs `LEDGER_LAB_HASH_KEY` set (see `ingest/individuals.py`):
 
 ```bash
 uv run python -m ingest.fetch chicago-contracts   # lands landing/chicago-contracts as Parquet
 uv run python -m ingest.fetch chicago-payments    # lands landing/chicago-payments as Parquet
-uv run pytest -m landed                          # profiles what is landed and checks it for names, with the same key
+uv run python -m ingest.fetch ecb-rates           # lands landing/ecb-rates as Parquet
+uv run python -m ingest.fetch gleif-legal-entities  # lands landing/gleif-legal-entities as Parquet
+uv run python -m ingest.fetch nl-government-budget  # lands landing/nl-government-budget as Parquet
+uv run pytest -m landed                          # profiles what is landed and checks the Chicago files for names, with the same key
 ```
 
 ## Checks

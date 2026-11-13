@@ -31,6 +31,9 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from ingest.chicago import contracts, payments
+from ingest.ecb import rates
+from ingest.gleif import legal_entities
+from ingest.nl_government import budget
 
 HERE = Path(__file__).resolve().parent
 SOURCES = HERE / "sources.yaml"
@@ -57,6 +60,9 @@ DROPPED = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError
 STEPS: dict[str, Callable[[bytes], bytes]] = {
     "chicago-contracts": contracts.step,
     "chicago-payments": payments.step,
+    "ecb-rates": rates.step,
+    "gleif-legal-entities": legal_entities.step,
+    "nl-government-budget": budget.step,
 }
 
 
