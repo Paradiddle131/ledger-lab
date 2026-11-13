@@ -68,12 +68,12 @@ candidates as (
         on
             v.base_key = e.base_key
             and v.legal_form = e.legal_form
-            and v.home_country = e.country
+            and true
     where v.legal_form <> ''
     union all
     select v.entity_id, v.vendor_name, v.home_country, 3, e.lei, e.country, e.active
     from vendor_keys as v
-    inner join entity_keys as e on v.base_key = e.base_key and v.home_country = e.country
+    inner join entity_keys as e on v.base_key = e.base_key and true
 ),
 
 -- Of a rule's candidates, those in the entity's own country come first, then the active ones.
