@@ -87,11 +87,13 @@ def test_the_matching_makes_no_wrong_match_on_the_labelled_sample(build: Build) 
 def test_a_hashed_name_is_never_matched(build: Build) -> None:
     rows = query(
         build,
-        "select lei, match_status, match_rule, match_score from vendor_entity"
-        " where vendor_name = ?",
-        HASHED,
+        "select entity_id, lei, match_status, match_rule, match_score from vendor_entity"
+        " where vendor_name like 'person:%' order by entity_id",
     )
-    assert rows == [(None, "hashed", None, None)] * 2
+    assert rows == [(e, None, "hashed", None, None) for e in ("chicago", "uk-transport")]
+    assert query(build, "select count(*) from vendor_entity where vendor_name = ?", HASHED) == [
+        (1,)
+    ]
 
 
 def model_keys(build: Build, names: list[str]) -> list[str]:

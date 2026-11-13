@@ -31,3 +31,5 @@ models:
       +materialized: table
     reference:
       +materialized: table
+    marts:
+      +materialized: table

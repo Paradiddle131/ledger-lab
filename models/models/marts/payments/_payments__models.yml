@@ -1,0 +1,58 @@
+models:
+  - name: payments
+    description: >
+      The payments data product: one row per payment of every entity, in the entity's own
+      currency, with the contract it was made against and that contract's award after revisions.
+      Rows are as the source serves them: refunds stay negative, a payment the source serves twice
+      stays twice, and a row the source gives only a year (Chicago's rolled-up payments) stays,
+      with no day. Each entity's intermediate model brings its rows in this column shape; the
+      City of Chicago's detail (rolled-up rows, department) stays in `int_chicago__payments`.
+    columns:
+      - name: payment_key
+        description: "{{ doc('payment_key') }}"
+        data_tests:
+          - unique
+          - not_null
+      - name: entity_id
+        description: "{{ doc('payment_entity_id') }}"
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('fiscal_year_starts')
+                field: entity_id
+      - name: currency
+        description: "{{ doc('payment_currency') }}"
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [USD, GBP, EUR]
+      - name: payment_date
+        description: "{{ doc('payment_date') }}"
+      - name: fiscal_year
+        description: "{{ doc('payment_fiscal_year') }}"
+      - name: fiscal_period
+        description: "{{ doc('payment_fiscal_period') }}"
+      - name: amount
+        description: "{{ doc('payment_amount') }}"
+        data_tests:
+          - not_null
+      - name: vendor_name
+        description: "{{ doc('payment_vendor_name') }}"
+        data_tests:
+          - not_null
+      - name: vendor_is_hashed
+        description: "{{ doc('payment_vendor_is_hashed') }}"
+        data_tests:
+          - not_null
+      - name: document_number
+        description: "{{ doc('payment_document_number') }}"
+      - name: contract_number
+        description: "{{ doc('payment_contract_number') }}"
+      - name: award_after_revisions
+        description: "{{ doc('payment_award_after_revisions') }}"
+      - name: source_table
+        description: "{{ doc('payment_source_table') }}"
+        data_tests:
+          - not_null
