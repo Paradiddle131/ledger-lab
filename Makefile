@@ -4,7 +4,7 @@
 LOADOUT ?= $(or $(shell sed -n 's/^The collection .* is cloned at `\([^`]*\)`.*/\1/p' $(HOME)/.claude/CLAUDE.md 2>/dev/null),../loadout)
 GUARDS := $(LOADOUT)/cloud/githooks
 
-.PHONY: check sync lint typecheck test ids portable scan stack-up stack-down cost-check fresh-clone tofu fences-validate
+.PHONY: check sync lint typecheck test ids portable scan stack-up stack-down stack-test cost-check fresh-clone tofu fences-validate
 
 check: lint typecheck test ids portable scan
 	@echo "make check: all passed"
@@ -35,13 +35,30 @@ scan: sync
 	@echo "scan: $$(git ls-files | wc -l) tracked files, no secret"
 
 # The container stack: the shared database always, one more service per PROFILE=<name>.
-STACK := docker compose -f platform/stack/compose.yaml
+# Each checkout is its own Compose project (containers, network, volume) and the database takes a
+# free loopback port unless LEDGER_LAB_DB_PORT names one, so checkouts sharing a daemon never meet.
+# The database password comes from LEDGER_LAB_DB_PASSWORD, else from a file generated at the first
+# start, ignored by git and deleted by `make stack-down` with the volume it unlocks.
+STACK_ENV := $(CURDIR)/platform/stack/.env.generated
+STACK_TARGETS := stack-up stack-down stack-test
+$(STACK_TARGETS): export COMPOSE_FILE := $(CURDIR)/platform/stack/compose.yaml
+$(STACK_TARGETS): export COMPOSE_PROJECT_NAME := ledger-lab-$(shell printf '%s' '$(CURDIR)' | cksum | cut -d' ' -f1)
+$(STACK_TARGETS): export COMPOSE_ENV_FILES := $(STACK_ENV)
 
-stack-up:
-	$(STACK) $(if $(PROFILE),--profile $(PROFILE)) up -d --wait
+$(STACK_ENV):
+	@umask 077 && printf 'LEDGER_LAB_DB_PASSWORD=%s\n' "$$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" > $@
 
-stack-down:
-	$(STACK) --profile '*' down --volumes
+stack-up: $(STACK_ENV)
+	docker compose $(if $(PROFILE),--profile $(PROFILE)) up -d --wait
+	@echo "stack-up: project $$COMPOSE_PROJECT_NAME, database at $$(docker compose port db 5432)"
+
+stack-down: $(STACK_ENV)
+	docker compose --profile '*' down --volumes --remove-orphans
+	rm -f $(STACK_ENV)
+
+# The live stack test against this checkout's running database; kept out of `make check`.
+stack-test: sync stack-up
+	uv run pytest -m stack
 
 # The lab's month-to-date GCP cost: $0.00 by absence while LEDGER_LAB_GCP_PROJECT is unset.
 cost-check:
