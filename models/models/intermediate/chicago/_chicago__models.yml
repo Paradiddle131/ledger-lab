@@ -1,0 +1,101 @@
+models:
+  - name: int_chicago__contract_revisions
+    description: >
+      One row per contract and revision of the City of Chicago's contracts: the original award or
+      one change to it. A revision the publisher serves on several rows (41 on the pinned files,
+      each under two spellings of the vendor or a hashed and a clear one, with the same amount and
+      day) counts once; rows of one revision that disagree on the amount or the day would make two
+      rows here, which the unique test refuses.
+    data_tests:
+      - unique:
+          arguments:
+            column_name: "contract_number || '|' || revision_number"
+    columns:
+      - name: contract_number
+        description: The contract number, as served.
+        data_tests:
+          - not_null
+      - name: revision_number
+        description: >
+          `0` for the original award, a number for a later revision, or the legacy system's
+          document number of a modification or time extension, as served.
+        data_tests:
+          - not_null
+      - name: award_amount
+        description: The US dollars the revision adds to the award; negative when it takes money off.
+      - name: approved_on
+        description: The day the revision was approved.
+      - name: served_rows
+        description: How many landed rows serve this revision (more than one on a repeated revision).
+
+  - name: int_chicago__contracts
+    description: >
+      One row per contract of the City of Chicago, with its award after revisions and what the
+      reconciliation reads about its revisions.
+    columns:
+      - name: contract_number
+        description: The contract number, as served.
+        data_tests:
+          - unique
+          - not_null
+      - name: award_after_revisions
+        description: >
+          The US dollars awarded once every revision is applied: the sum of the original award and
+          each revision's amount, each revision counted once, since every row of the contracts
+          table is a change to the award, not a new total (the publisher marks reductions by
+          negative amounts, and paid totals match the sum to the cent, not the latest row). A
+          revision whose number is not a number (`T1`) is a modification from the legacy system and
+          counts like any other.
+        data_tests:
+          - not_null
+      - name: revision_count
+        description: How many revisions the contract has, its original award included.
+      - name: negative_revision_count
+        description: How many of them take money off the award.
+      - name: first_approved_on
+        description: The day the first of them was approved.
+      - name: last_approved_on
+        description: The day the latest of them was approved.
+
+  - name: int_chicago__payments
+    description: >
+      One row per payment of the City of Chicago, in the payments mart's columns and order
+      (described on the mart), then the City's own detail. Payments join their contract on the
+      served contract number against one row per contract, so the join repeats no payment.
+    columns:
+      - name: payment_key
+        description: "{{ doc('payment_key') }}"
+      - name: entity_id
+        description: "{{ doc('payment_entity_id') }}"
+      - name: currency
+        description: "{{ doc('payment_currency') }}"
+      - name: payment_date
+        description: "{{ doc('payment_date') }}"
+      - name: fiscal_year
+        description: "{{ doc('payment_fiscal_year') }}"
+      - name: fiscal_period
+        description: "{{ doc('payment_fiscal_period') }}"
+      - name: amount
+        description: "{{ doc('payment_amount') }}"
+      - name: vendor_name
+        description: "{{ doc('payment_vendor_name') }}"
+      - name: vendor_is_hashed
+        description: "{{ doc('payment_vendor_is_hashed') }}"
+      - name: document_number
+        description: "{{ doc('payment_document_number') }}"
+      - name: contract_number
+        description: "{{ doc('payment_contract_number') }}"
+      - name: award_after_revisions
+        description: "{{ doc('payment_award_after_revisions') }}"
+      - name: source_table
+        description: "{{ doc('payment_source_table') }}"
+      - name: is_rolled_up
+        description: >
+          True on a row the publisher rolled up: the payments of one vendor, contract and year in
+          one amount, with no day and no voucher.
+      - name: rolled_up_year
+        description: >
+          The year a rolled-up row covers, as served; 2002 holds every payment from 1996 to 2002.
+          Null on an itemised payment.
+      - name: department_name
+        description: The City department that paid, where served.
