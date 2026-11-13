@@ -2,7 +2,6 @@
 # The shared database is the core and always starts; every heavier service (ERP, lineage backend,
 # orchestrator, tracing) joins under a profile named after it and starts only when asked for.
 # Configuration comes from the environment; nothing here names an account or holds a credential.
-name: ledger-lab
 
 services:
   db:
@@ -10,12 +9,19 @@ services:
     environment:
       POSTGRES_USER: ${LEDGER_LAB_DB_USER:-ledger_lab}
       POSTGRES_PASSWORD: ${LEDGER_LAB_DB_PASSWORD:?set LEDGER_LAB_DB_PASSWORD for the stack's database}
+      # One database per planned service, created when the server first starts:
+      # the ERP, the lineage backend, the orchestrator, the agent's session store and the
+      # workflow's checkpointer.
+      LEDGER_LAB_DATABASES: erp lineage orchestrator agent_sessions workflow_checkpoints
     ports:
-      - "127.0.0.1:${LEDGER_LAB_DB_PORT:-55432}:5432"
+      # A free loopback port unless LEDGER_LAB_DB_PORT names one; `docker compose port db 5432`.
+      - "127.0.0.1:${LEDGER_LAB_DB_PORT:-}:5432"
     volumes:
       - db-data:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\""]
+      # Over TCP: while the init scripts run, the first-start server listens on its socket only.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\""]
       interval: 2s
       timeout: 3s
       retries: 30
