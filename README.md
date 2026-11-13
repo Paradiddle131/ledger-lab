@@ -38,13 +38,19 @@ Legal-entity records come from the GLEIF golden copy under [CC0 1.0](https://cre
 What lands here is a subset the lab derives from it (three countries, selected fields), not GLEIF's own data, and GLEIF does not endorse this project.
 Records that may name a person (sole proprietors, partnerships that are no separate legal person, and records without a real legal-form code whose legal name is not evidence of an organisation) and person-like other names are left out; legal names of records with a real legal-form code land as the register records them, and a record without a real legal-form code never vouches that a name is an organisation.
 
-To land a source, run its line below; a source that names people (Chicago's contracts) also needs `LEDGER_LAB_HASH_KEY` set (see `ingest/individuals.py`):
+The UK Department for Transport's spending over £25,000 comes from its monthly files on [GOV.UK](https://www.gov.uk/government/collections/dft-departmental-spending-over-25000): Contains public sector information licensed under the [Open Government Licence v3.0](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).
+What lands is the twelve files of one fiscal year in one shape, with every supplier who may be a person hashed and what describes or locates them left out.
+
+To land a source, run its line below; a source that names people (Chicago's contracts, the UK spend) also needs `LEDGER_LAB_HASH_KEY` set (see `ingest/individuals.py`).
+A set's name lands every source whose name it prefixes (`<set>-<member>`) as one file, through the set's step, once every member has verified.
+The UK spend's landed tests download its files again and read their GOV.UK pages, so they need the network:
 
 ```bash
 uv run python -m ingest.fetch chicago-contracts   # lands landing/chicago-contracts as Parquet
 uv run python -m ingest.fetch ecb-rates           # lands landing/ecb-rates as Parquet
 uv run python -m ingest.fetch gleif-legal-entities  # lands landing/gleif-legal-entities as Parquet
 uv run python -m ingest.fetch nl-government-budget  # lands landing/nl-government-budget as Parquet
+uv run python -m ingest.fetch uk-transport-spend-2025  # lands April 2025 to March 2026 as one Parquet set
 uv run pytest -m landed                          # profiles what is landed
 ```
 
