@@ -34,6 +34,7 @@ Prerequisites: [uv](https://docs.astral.sh/uv/), GNU make, git, and a clone of t
 ```bash
 uv sync
 make check        # lint, types, tests, process-id and owner checks, secret scan
+make fresh-clone  # clone HEAD and prove it holds no secret, identifier or data
 ```
 
 The dbt models build on DuckDB in the session by default; setting `LEDGER_LAB_GCP_PROJECT` (with `uv sync --group bigquery`) moves them to BigQuery:

@@ -4,7 +4,7 @@
 LOADOUT ?= $(or $(shell sed -n 's/^The collection .* is cloned at `\([^`]*\)`.*/\1/p' $(HOME)/.claude/CLAUDE.md 2>/dev/null),../loadout)
 GUARDS := $(LOADOUT)/cloud/githooks
 
-.PHONY: check sync lint typecheck test ids portable scan stack-up stack-down cost-check
+.PHONY: check sync lint typecheck test ids portable scan stack-up stack-down cost-check fresh-clone
 
 check: lint typecheck test ids portable scan
 	@echo "make check: all passed"
@@ -46,3 +46,7 @@ stack-down:
 # The lab's month-to-date GCP cost: $0.00 by absence while LEDGER_LAB_GCP_PROJECT is unset.
 cost-check:
 	@uv run --no-sync python platform/cost_check.py
+
+# Clone the committed HEAD and prove it holds no secret, identifier or data (also a test in `test`).
+fresh-clone: sync
+	@uv run python platform/fresh_clone.py
