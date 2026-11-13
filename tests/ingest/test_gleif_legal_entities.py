@@ -1,6 +1,7 @@
-"""The register lands as Parquet for the vendors' countries, with no sole proprietor in it.
+"""The register lands as Parquet for the vendors' countries, with no sole proprietor, no Dutch
+partnership and no other name that may be a person's in it.
 
-The organisations are real records of the register (CC0); the sole proprietor is invented.
+The organisations are real records of the register (CC0); every person-like name is invented.
 """
 
 import csv
@@ -17,12 +18,14 @@ from ingest.fetch import landing_path
 from ingest.gleif.legal_entities import (
     COLUMNS,
     COUNTRIES,
+    DUTCH_PARTNERSHIPS,
     LegalEntitiesError,
     profile,
     step,
 )
 
 OTHER_NAME = "Entity.OtherEntityNames.OtherEntityName.1"
+TRANSLITERATED = "Entity.TransliteratedOtherEntityNames.TransliteratedOtherEntityName.1"
 # A column the register serves that the matching does not need, so it never lands.
 CITY = "Entity.LegalAddress.City"
 SERVED = (*COLUMNS[:3], CITY, *COLUMNS[3:])
@@ -96,6 +99,16 @@ SOLE_PROPRIETOR = record(
         "Entity.LegalJurisdiction": "NL",
         "Entity.EntityCategory": "SOLE_PROPRIETOR",
         "Entity.LegalForm.EntityLegalFormCode": "4QXM",
+    }
+)
+
+PARTNERSHIP = record(
+    {
+        "LEI": "0000EXAMPLE000000001",
+        "Entity.LegalName": "Voorbeeld en Example",
+        "Entity.LegalAddress.Country": "NL",
+        "Entity.LegalJurisdiction": "NL",
+        "Entity.LegalForm.EntityLegalFormCode": "62Y3",
     }
 )
 
@@ -187,6 +200,40 @@ def test_the_fetch_kit_lands_a_dated_golden_copy_only_through_this_step() -> Non
     assert re.match(dated, entry["url"])
 
 
+def test_a_dutch_partnership_never_lands_and_is_counted_by_form(tmp_path: Path) -> None:
+    partners = {**PARTNERSHIP, "LEI": "0000EXAMPLE000000002", "Entity.LegalName": "Doe Partners"}
+    limited = {**partners, "LEI": "0000EXAMPLE000000003"}
+    limited["Entity.LegalForm.EntityLegalFormCode"] = "CODH"
+    path = landed(tmp_path, ING, PARTNERSHIP, partners, limited, SOLE_PROPRIETOR)
+    assert [r["LEI"] for r in rows(path)] == [ING["LEI"]]
+    assert b"Voorbeeld" not in path.read_bytes()
+    counts = profile(path)
+    assert counts["dropped_partnerships"] == {"62Y3": 2, "9AAK": 0, "CODH": 1}
+    assert counts["dropped_sole_proprietors"] == 1
+    assert counts["partnerships"] == 0
+    assert set(DUTCH_PARTNERSHIPS) == {"62Y3", "9AAK", "CODH"}
+
+
+def test_an_other_name_that_may_be_a_persons_is_blanked_with_its_language_and_type(
+    tmp_path: Path,
+) -> None:
+    trading = {
+        **ING,
+        OTHER_NAME: "Jan Voorbeeld",
+        f"{OTHER_NAME}.xmllang": "nl",
+        f"{OTHER_NAME}.type": "TRADING_OR_OPERATING_NAME",
+        TRANSLITERATED: "Jan Voorbeeld",
+    }
+    path = landed(tmp_path, trading, APPLE)
+    ing, apple = rows(path)
+    assert [ing[OTHER_NAME], ing[f"{OTHER_NAME}.xmllang"], ing[f"{OTHER_NAME}.type"]] == [None] * 3
+    assert ing[TRANSLITERATED] is None
+    assert ing["Entity.LegalName"] == "ING GROEP N.V."
+    assert apple[OTHER_NAME] == "Apple Computer, Inc."
+    assert b"Voorbeeld" not in path.read_bytes()
+    assert profile(path)["other_names_blanked"] == 2
+
+
 @pytest.mark.landed
 def test_the_landed_register_holds_complete_records_for_the_vendors_countries() -> None:
     counts = profile(landing_path() / "gleif-legal-entities")
@@ -195,5 +242,8 @@ def test_the_landed_register_holds_complete_records_for_the_vendors_countries() 
     assert counts["malformed_leis"] == 0
     assert counts["duplicate_leis"] == 0
     assert counts["sole_proprietors"] == 0
+    assert counts["partnerships"] == 0
+    assert counts["dropped_sole_proprietors"] > 0
+    assert all(n > 0 for n in counts["dropped_partnerships"].values())
     assert set(counts["rows_by_country"]) == set(COUNTRIES)
     assert min(counts["rows_by_country"].values()) > 100_000
