@@ -1,5 +1,5 @@
-# The controls catalogue: each control, its owner, what it asserts and the test that proves it.
-# A control is `implemented` only when its test exists; tests/test_controls.py checks it.
+# The controls catalogue: each control, its owner, what it asserts and the tests that prove it.
+# A control is `implemented` only when its tests exist; tests/test_controls.py checks it.
 # Shape: controls/schema.json. Owners are persona ids from access/personas.yaml.
 
 layers:
@@ -18,65 +18,71 @@ controls:
     layer: Identity and delegation
     owner: agent-operator
     asserts: Every agent query runs on the asking persona's identity; two personas asking the same question get different rows, and a question without a user identity gets no answer.
-    proven_by: tests/agent/test_identity.py::test_two_personas_same_question_different_rows
+    proven_by: [tests/agent/test_identity.py::test_two_personas_same_question_different_rows]
     status: not-implemented
   - id: warehouse-enforces-visibility
     layer: Data access
     owner: group-controller
     asserts: The warehouse, never the prompt, decides what each persona sees; every persona against every entity and sensitive column is clear, masked, aggregate only or denied as access/personas.yaml says.
-    proven_by: tests/access/test_visibility.py::test_every_persona_sees_its_matrix
+    proven_by: [tests/access/test_visibility.py::test_every_persona_sees_its_matrix]
     status: not-implemented
   - id: individuals-hashed-before-landing
     layer: Data access
     owner: group-controller
     asserts: The pseudonymiser in ingest/individuals.py returns a vendor or payee name in clear only on evidence of a single organisation (a legal form with no second party joined, a known organisation, or a legal-entity register record of a separate legal person with the whole name, for a name not shaped like a person's); it replaces every other name with an HMAC-SHA-256 keyed from the environment, gives two people two hashes, and refuses to start without the key.
-    proven_by: tests/ingest/test_individuals.py::test_only_organisations_leave_in_clear
+    proven_by:
+      - tests/ingest/test_individuals.py::test_only_organisations_leave_in_clear
+      - tests/ingest/test_entities.py::test_a_register_record_with_a_persons_exact_name_never_vouches
+      - tests/ingest/test_entities.py::test_nothing_else_is_vouched_for
+      - tests/ingest/test_entities.py::test_a_vouched_organisation_lands_in_clear_with_what_describes_it
+      - tests/ingest/test_chicago_set.py::test_a_payee_hashed_in_payments_blanks_a_contract_description_naming_them
+      - tests/ingest/test_uk_transport_spend.py::test_a_supplier_the_register_vouches_for_lands_in_clear_and_a_person_stays_hashed
     status: implemented
   - id: one-person-one-session
     layer: The conversation
     owner: agent-operator
     asserts: No answer recalls another session, and the purge removes transcripts past their retention.
-    proven_by: tests/agent/test_sessions.py::test_no_cross_session_recall
+    proven_by: [tests/agent/test_sessions.py::test_no_cross_session_recall]
     status: not-implemented
   - id: untrusted-content-cannot-instruct
     layer: Injection and tool authorisation
     owner: agent-operator
     asserts: An instruction planted in a cell, a column description or a glossary entry changes no tool call; tools are read-only and denied by default.
-    proven_by: tests/agent/test_injection.py::test_planted_instructions_are_ignored
+    proven_by: [tests/agent/test_injection.py::test_planted_instructions_are_ignored]
     status: not-implemented
   - id: answers-cite-and-re-execute
     layer: Answer integrity
     owner: metric-owner
     asserts: Every number in an answer cites its metric version, query and freshness, and re-running the logged query returns it.
-    proven_by: tests/agent/test_answer_integrity.py::test_logged_query_reproduces_the_answer
+    proven_by: [tests/agent/test_answer_integrity.py::test_logged_query_reproduces_the_answer]
     status: not-implemented
   - id: scored-by-execution
     layer: Evaluation and monitoring
     owner: metric-owner
     asserts: Answers are scored by executing their queries against a golden set, and a metric change that moves the score is reported.
-    proven_by: tests/agent/test_evaluation.py::test_metric_change_shows_as_drift
+    proven_by: [tests/agent/test_evaluation.py::test_metric_change_shows_as_drift]
     status: not-implemented
   - id: release-ships-as-one-unit
     layer: Change management
     owner: approver
     asserts: Prompt, model, tools and metric definitions ship and roll back together, and a failed gate blocks the release.
-    proven_by: tests/operations/test_release.py::test_failed_gate_blocks_release
+    proven_by: [tests/operations/test_release.py::test_failed_gate_blocks_release]
     status: not-implemented
   - id: answer-rebuilt-from-audit
     layer: Accountability
     owner: group-controller
     asserts: One answer can be rebuilt end to end from its audit record alone, by someone who did not produce it.
-    proven_by: tests/agent/test_audit.py::test_answer_rebuilt_from_its_audit_record
+    proven_by: [tests/agent/test_audit.py::test_answer_rebuilt_from_its_audit_record]
     status: not-implemented
   - id: spend-is-capped
     layer: Cost and abuse
     owner: agent-operator
     asserts: Every query and every model call has a cap, and a runaway join stops at the byte cap.
-    proven_by: tests/agent/test_cost.py::test_runaway_join_stops_at_the_cap
+    proven_by: [tests/agent/test_cost.py::test_runaway_join_stops_at_the_cap]
     status: not-implemented
   - id: lab-spend-fenced
     layer: Cost and abuse
     owner: group-controller
     asserts: make cost-check fails unless the billing export holds rows for the lab project and its month-to-date cost, credits included, is $0.00 under a fixed byte cap; unless the daily query-bytes cap, the budget topic, the kill switch workflow (state, source, account, threshold range), its trigger and subscription, the kill switch account (present, enabled) and that account's project roles each match platform/gcp as read live; and unless testIamPermissions shows the agent's own account holds none of the listed permissions on the project, the billing account and the kill switch account that could move a fence. The budget is compared with its definition (scope, period, amount, thresholds, topic) only where this account may read it, and the budget or the project roles are reported as not checked, neither passing nor failing, where it may not.
-    proven_by: tests/platform/test_cost_check.py::test_the_applied_fences_match_their_definitions
+    proven_by: [tests/platform/test_cost_check.py::test_the_applied_fences_match_their_definitions]
     status: implemented
