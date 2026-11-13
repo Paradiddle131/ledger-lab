@@ -60,6 +60,20 @@ class Build:
     stdout: str
     database: Path
     results: dict[str, str]
+    env: dict[str, str]
+    cwd: Path
+
+
+def dbt(env: dict[str, str], cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(DBT), *args, "--project-dir", str(PROJECT), "--profiles-dir", str(PROJECT)]
+        + ["--target", "local"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+        cwd=cwd,
+    )
 
 
 @pytest.fixture(scope="module")
@@ -75,19 +89,11 @@ def build(tmp_path_factory: pytest.TempPathFactory) -> Build:
         "DBT_LOG_PATH": str(tmp_path / "logs"),
         "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
     }
-    result = subprocess.run(
-        [str(DBT), "build", "--project-dir", str(PROJECT), "--profiles-dir", str(PROJECT)]
-        + ["--target", "local"],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-        cwd=tmp_path,
-    )
+    result = dbt(env, tmp_path, "build")
     assert result.returncode == 0, result.stdout + result.stderr
     run = json.loads((tmp_path / "target" / "run_results.json").read_text())
     results = {r["unique_id"].split(".")[2]: r["status"] for r in run["results"]}
-    return Build(result.stdout, database, results)
+    return Build(result.stdout, database, results, env, tmp_path)
 
 
 def query(build: Build, sql: str, *params: object) -> list[tuple[Any, ...]]:
@@ -96,7 +102,9 @@ def query(build: Build, sql: str, *params: object) -> list[tuple[Any, ...]]:
 
 
 def test_every_model_seed_and_data_test_passes_on_the_local_engine(build: Build) -> None:
-    assert "PASS=31 WARN=0 ERROR=0 SKIP=0" in build.stdout
+    assert "WARN=0 ERROR=0 SKIP=0" in build.stdout
+    assert build.results
+    assert {status for status in build.results.values()} <= {"success", "pass"}
 
 
 def test_the_smoke_model_runs_the_models_dialect(build: Build) -> None:
@@ -113,6 +121,9 @@ def test_the_smoke_model_runs_the_models_dialect(build: Build) -> None:
         "calendar_year_entities_match_the_calendar",
         "period_status_names_each_period_once",
         "not_null_fiscal_periods_status",
+        "accepted_values_fiscal_periods_status__open__closed",
+        "dates_in_fiscal_calendar_fiscal_periods_period_start",
+        "dates_in_fiscal_calendar_fiscal_periods_period_end",
     ],
 )
 def test_each_calendar_rule_ran_and_passed(build: Build, rule: str) -> None:
@@ -151,3 +162,33 @@ def test_the_calendars_cover_the_fiscal_years_the_project_names(build: Build) ->
 
 def test_the_calendars_use_the_entity_ids_of_the_access_mapping(access: dict[str, Any]) -> None:
     assert {e["id"] for e in access["entities"]} == ENTITIES
+
+
+def test_a_date_outside_the_calendar_fails_the_date_test(build: Build) -> None:
+    """The reusable test reports each date its entity's calendar lacks, and only those."""
+    probe = (
+        "(select 'chicago' as entity_id, cast('2019-06-30' as date) as posted_on"
+        " union all select 'chicago', cast('2024-06-30' as date)"
+        " union all select 'uk-transport', cast('2023-03-31' as date)"
+        " union all select 'uk-transport', cast('2027-03-31' as date))"
+    )
+    sql = f"{{{{ test_dates_in_fiscal_calendar(model={probe!r}, column_name='posted_on') }}}}"
+    result = dbt(
+        build.env,
+        build.cwd,
+        "show",
+        "--inline",
+        sql,
+        "--output",
+        "json",
+        "--log-format",
+        "json",
+        "--quiet",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    shown = [json.loads(line)["data"] for line in result.stdout.splitlines() if line.strip()]
+    rows = json.loads(next(d["preview"] for d in shown if "preview" in d))
+    assert sorted((r["entity_id"], r["checked_date"]) for r in rows) == [
+        ("chicago", "2019-06-30"),
+        ("uk-transport", "2023-03-31"),
+    ]

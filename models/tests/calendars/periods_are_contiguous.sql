@@ -36,7 +36,7 @@ left join days
         and ordered.fiscal_year = days.fiscal_year
         and ordered.fiscal_period = days.fiscal_period
 where
-    ordered.next_start != {{ dbt.dateadd('day', 1, 'ordered.period_end') }}
+    ordered.next_start != cast({{ dbt.dateadd('day', 1, 'ordered.period_end') }} as date)
     or (ordered.fiscal_period = 1 and ordered.previous_period != 12)
     or (ordered.fiscal_period = 1 and ordered.previous_year != ordered.fiscal_year - 1)
     or (ordered.fiscal_period > 1 and ordered.previous_period != ordered.fiscal_period - 1)

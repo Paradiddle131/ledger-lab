@@ -1,10 +1,12 @@
 """`make fresh-clone`: clone the committed `HEAD` and prove it holds no secret, identifier or data.
 
 A clone sees only what is committed, so this checks what a stranger would get. It fails on:
+- a tracked file with a data extension (`DATA_EXTENSIONS`, matched in any letter case) other than
+  the dbt seeds listed in `SEEDS`, whatever `.gitignore` says, so narrowing or deleting an ignore
+  rule lets no data in;
 - a tracked file that `.gitignore` excludes (data, credentials and tool state can only get in by
   `git add -f`);
-- a `.gitignore` exception (a `!` line) other than the authored dbt seeds, so no other data file
-  can be let in by widening the ignore rules;
+- a `.gitignore` exception (a `!` line) other than one naming a listed seed in the root file;
 - an email address, other than on the reserved example domains;
 - a GCP project id written as a value (a `project` setting, a `projects/<id>` path, a service
   account's domain), other than the documented placeholders;
@@ -38,9 +40,26 @@ KEY_MARKERS = [
     re.compile(r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----"),
 ]
 
-# The only files a `.gitignore` may take back from its exclusions: dbt seeds, reference tables
-# authored in the tree, not downloaded.
-ALLOWED_EXCEPTIONS = {"!/models/seeds/**/*.csv"}
+# The extensions `.gitignore` names as data; a tracked file ending in one is refused.
+DATA_EXTENSIONS = (
+    ".csv",
+    ".tsv",
+    ".xlsx",
+    ".xls",
+    ".parquet",
+    ".zip",
+    ".gz",
+    ".db",
+    ".sqlite",
+    ".duckdb",
+)
+# The only data files the tree holds: dbt seeds, reference tables authored here, not downloaded.
+# Each is named exactly, here and in `.gitignore`, so a new seed is a reviewed change to both.
+SEEDS = {
+    "models/seeds/calendars/fiscal_year_starts.csv",
+    "models/seeds/calendars/period_status.csv",
+}
+ALLOWED_EXCEPTIONS = {f"!/{seed}" for seed in SEEDS}
 
 DETECT_SECRETS = Path(sys.executable).with_name("detect-secrets-hook")
 
@@ -63,15 +82,21 @@ def ignored_but_tracked(repo: Path) -> list[str]:
     return [p for p in out.split("\0") if p]
 
 
+def data_files(files: list[str]) -> Iterable[str]:
+    for name in files:
+        if name.lower().endswith(DATA_EXTENSIONS) and name not in SEEDS:
+            yield f"{name}: data file outside the listed seeds"
+
+
 def widened_ignores(repo: Path, files: list[str]) -> Iterable[str]:
-    """Every `!` line of a tracked `.gitignore` but the seed exception in the root one."""
+    """Every `!` line of a tracked `.gitignore` but a listed seed's in the root one."""
     for name in files:
         if Path(name).name != ".gitignore":
             continue
         allowed = ALLOWED_EXCEPTIONS if name == ".gitignore" else set()
         for number, line in enumerate((repo / name).read_text().splitlines(), 1):
             if line.startswith("!") and line.strip() not in allowed:
-                yield f"{name}:{number}: exception {line.strip()!r} beyond the authored dbt seeds"
+                yield f"{name}:{number}: exception {line.strip()!r} beyond the listed seeds"
 
 
 def text_of(path: Path) -> str | None:
@@ -112,6 +137,7 @@ def problems(repo: Path) -> list[str]:
     found = [
         f"{name}: tracked although .gitignore excludes it" for name in ignored_but_tracked(repo)
     ]
+    found.extend(data_files(files))
     found.extend(widened_ignores(repo, files))
     for name in files:
         text = text_of(repo / name)

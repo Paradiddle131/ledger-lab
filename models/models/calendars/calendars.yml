@@ -3,14 +3,12 @@ models:
     description: >
       One row per entity and fiscal period: twelve calendar months a year from the entity's first
       month, each year labelled by the calendar year it starts in, each period open or closed.
+      Covers the fiscal years {{ var('fiscal_years').first }} to {{ var('fiscal_years').last }}
+      (the `fiscal_years` var) and nothing outside them.
     columns:
       - name: entity_id
         data_tests:
           - not_null
-          - relationships:
-              arguments:
-                to: ref('fiscal_year_starts')
-                field: entity_id
       - name: fiscal_year
         data_tests:
           - not_null
@@ -24,9 +22,11 @@ models:
       - name: period_start
         data_tests:
           - not_null
+          - dates_in_fiscal_calendar
       - name: period_end
         data_tests:
           - not_null
+          - dates_in_fiscal_calendar
       - name: status
         description: Every period has one; the period-status seed sets it.
         data_tests:
@@ -36,7 +36,11 @@ models:
                 values: [open, closed]
 
   - name: fiscal_calendar
-    description: One row per entity and day, with the fiscal year and period the day falls in.
+    description: >
+      One row per entity and day, with the fiscal year and period the day falls in, for the fiscal
+      years {{ var('fiscal_years').first }} to {{ var('fiscal_years').last }} only: a date outside
+      them has no row, so a model joining dates to it tests each date column with
+      `dates_in_fiscal_calendar`, which fails on a date the calendar lacks.
     columns:
       - name: entity_id
         data_tests:
@@ -68,11 +72,6 @@ seeds:
                 quote: false
 
   - name: period_status
-    description: Whether each entity's fiscal period is open or closed, one row per period.
-    columns:
-      - name: status
-        data_tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: [open, closed]
+    description: >
+      Whether each entity's fiscal period is open or closed, one row per period; fiscal_periods
+      carries and tests the status.

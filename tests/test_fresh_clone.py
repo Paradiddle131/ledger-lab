@@ -5,6 +5,7 @@ Planted values are built from pieces so this file's own lines never match what i
 
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -22,12 +23,19 @@ def git(repo: Path, *args: str) -> None:
     )
 
 
-def repo_with(tmp_path: Path, name: str, content: str, *, force: bool = False) -> Path:
-    """A repo holding this repo's .gitignore, a README, and one planted file, committed."""
+def repo_with(
+    tmp_path: Path,
+    name: str,
+    content: str,
+    *,
+    force: bool = False,
+    rules: Callable[[str], str] = lambda text: text,
+) -> Path:
+    """A repo holding this repo's .gitignore (edited by `rules`), a README, and one planted file."""
     repo = tmp_path / "planted"
     repo.mkdir()
     git(repo, "init", "--quiet")
-    shutil.copy(REPO / ".gitignore", repo / ".gitignore")
+    (repo / ".gitignore").write_text(rules((REPO / ".gitignore").read_text()))
     (repo / "README.md").write_text("A clean file.\n")
     target = repo / name
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -44,7 +52,7 @@ def test_a_fresh_clone_of_head_is_clean() -> None:
 
 AT = "@"
 PLANTS = {
-    "data file": ("data/payments.csv", "vendor,amount\nA,1\n", True, "excludes it"),
+    "data file": ("data/payments.csv", "vendor,amount\nA,1\n", True, "data file"),
     "email": ("notes.md", "Ask person" + AT + "lab-mail.net.\n", False, "email address"),
     "project path": ("app.py", 'x = "projects/' + 'acme-ledger-prod/datasets"\n', False, "acme"),
     "project flag": ("run.sh", "bq --project_id=" + "acme-ledger-prod query\n", False, "acme"),
@@ -58,7 +66,14 @@ PLANTS = {
     "key file": ("sa.txt", '{"type": "' + 'service_account"}\n', False, "key material"),
     "private key": ("k.pem.txt", "-----BEGIN " + "PRIVATE KEY-----\n", False, "key material"),
     "secret": ("settings.py", 'k = "' + "AK" + "IA" + "Z7Q3M9XK2PL8V4RT" + '"\n', False, "secret"),
-    "data file beside the seeds": ("models/payments.csv", "vendor,amount\nA,1\n", True, "excludes"),
+    "data file beside the seeds": (
+        "models/payments.csv",
+        "vendor,amount\nA,1\n",
+        True,
+        "data file",
+    ),
+    "unlisted seed": ("models/seeds/calendars/payees.csv", "name\nA\n", True, "data file"),
+    "upper-case extension": ("models/seeds/calendars/payees.CSV", "name\nA\n", False, "data file"),
     "nested exception": ("ingest/.gitignore", "!*.csv\n", False, "exception"),
 }
 
@@ -83,9 +98,24 @@ def test_placeholders_pass(tmp_path: Path, content: str) -> None:
     assert check_clone(repo_with(tmp_path, "doc.md", content)) == []
 
 
-def test_an_authored_seed_is_the_one_tracked_csv_allowed(tmp_path: Path) -> None:
-    seed = "models/seeds/calendars/periods.csv"
+def test_a_listed_seed_passes(tmp_path: Path) -> None:
+    seed = "models/seeds/calendars/period_status.csv"
     assert check_clone(repo_with(tmp_path, seed, "entity_id,status\nchicago,open\n")) == []
+
+
+@pytest.mark.parametrize(
+    "rules",
+    [
+        pytest.param(lambda text: text.replace("\n*.csv\n", "\ndata/*.csv\n"), id="narrowed"),
+        pytest.param(lambda text: text.replace("\n*.csv\n", "\n"), id="deleted"),
+    ],
+)
+def test_a_data_file_fails_whatever_the_ignore_rules_say(
+    tmp_path: Path, rules: Callable[[str], str]
+) -> None:
+    assert "\n*.csv\n" not in rules((REPO / ".gitignore").read_text())
+    found = check_clone(repo_with(tmp_path, "payees.csv", "name\nA\n", rules=rules))
+    assert any("payees.csv" in line and "data file" in line for line in found), found
 
 
 def test_widening_the_root_ignore_rules_fails_the_check(tmp_path: Path) -> None:

@@ -4,9 +4,10 @@ data/
 downloads/
 landing/
 *.csv
-# The one exception: dbt seeds, reference tables authored in the tree; platform/fresh_clone.py
-# refuses any other `!` line.
-!/models/seeds/**/*.csv
+# The one exception: the dbt seeds, reference tables authored in the tree, each named exactly here
+# and in platform/fresh_clone.py, which refuses any other data file or `!` line.
+!/models/seeds/calendars/fiscal_year_starts.csv
+!/models/seeds/calendars/period_status.csv
 *.tsv
 *.xlsx
 *.xls
