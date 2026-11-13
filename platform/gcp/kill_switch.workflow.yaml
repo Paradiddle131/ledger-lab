@@ -7,7 +7,7 @@ main:
         assign:
           - notification: ${json.decode(base64.decode(event.data.message.data))}
           - cost: ${double(notification.costAmount)}
-          - threshold: ${double(sys.get_env("KILL_THRESHOLD_USD"))}
+          - threshold: ${double(sys.get_env("KILL_THRESHOLD"))}
     - decide:
         switch:
           - condition: ${cost > threshold}

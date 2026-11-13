@@ -34,7 +34,7 @@ resource "google_workflows_workflow" "kill_switch" {
   service_account = google_service_account.kill_switch.id
   source_contents = file("${path.module}/kill_switch.workflow.yaml")
   user_env_vars = {
-    KILL_THRESHOLD_USD = tostring(var.kill_threshold_usd)
+    KILL_THRESHOLD = tostring(var.kill_threshold)
   }
 }
 

@@ -7,10 +7,13 @@ resource "google_pubsub_topic" "budget" {
   name = "lab-budget-notifications"
 }
 
-# A $1.00 budget on the lab project, credits included, alerting at 1, 3 and 5 cents and at the
-# dollar. Every notification, alert or not, also goes to the topic for the kill switch.
-# The budget's amount and the kill threshold are dollars, and the Budgets API refuses an amount in
-# another currency than the account's with a bare 400: name that cause before the call instead.
+# The Budgets API takes amounts only in the billing account's own currency (any other is a bare
+# 400), so the budget and the kill threshold are in it; the fences hold only for a currency whose
+# unit is worth about a dollar, which the precondition names before the call.
+locals {
+  dollar_like_currencies = ["USD", "EUR", "GBP", "CHF"]
+}
+
 data "google_billing_account" "lab" {
   provider        = google.billing
   billing_account = var.billing_account
@@ -22,10 +25,14 @@ resource "google_billing_budget" "lab" {
 
   lifecycle {
     precondition {
-      condition     = data.google_billing_account.lab.currency_code == "USD"
-      error_message = "The billing account bills in ${data.google_billing_account.lab.currency_code}, not USD: the budget and the kill threshold are dollar amounts."
+      condition     = contains(local.dollar_like_currencies, data.google_billing_account.lab.currency_code)
+      error_message = "The billing account bills in ${data.google_billing_account.lab.currency_code}: the budget and the kill threshold assume a unit worth about a dollar."
     }
   }
+
+  # One unit of the account's currency on the lab project, credits included, alerting at 1, 3 and
+  # 5 hundredths and at the unit. Every notification, alert or not, also goes to the topic for the
+  # kill switch.
   display_name = "ledger-lab spend fence"
 
   budget_filter {
@@ -35,7 +42,7 @@ resource "google_billing_budget" "lab" {
 
   amount {
     specified_amount {
-      currency_code = "USD"
+      currency_code = data.google_billing_account.lab.currency_code
       units         = "1"
     }
   }

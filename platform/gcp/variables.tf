@@ -18,12 +18,12 @@ variable "region" {
   }
 }
 
-variable "kill_threshold_usd" {
-  description = "Month-to-date cost at which the kill switch unlinks billing: far above the first cent, which only alerts."
+variable "kill_threshold" {
+  description = "Month-to-date cost, in the billing account's currency, at which the kill switch unlinks billing: far above the first hundredth, which only alerts."
   type        = number
   default     = 5
   validation {
-    condition     = var.kill_threshold_usd >= 1 && var.kill_threshold_usd <= 10
-    error_message = "Keep the kill switch between $1 and $10."
+    condition     = var.kill_threshold >= 1 && var.kill_threshold <= 10
+    error_message = "Keep the kill switch between 1 and 10 units of the account's currency."
   }
 }
