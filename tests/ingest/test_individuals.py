@@ -1,0 +1,232 @@
+"""A vendor or payee who is a person leaves ingest only as a keyed hash.
+
+Every name here is invented. The key is built in the test, never read from a file.
+"""
+
+import hashlib
+import hmac
+import re
+
+import pytest
+
+from ingest.individuals import (
+    KEY_VARIABLE,
+    NoHashKeyError,
+    is_organisation,
+    normalise,
+    pseudonymiser,
+)
+
+KEY = "k" * 32
+ENV = {KEY_VARIABLE: KEY}
+HASHED = re.compile(r"^person:[0-9a-f]{64}$")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # English (UK) legal forms.
+        "Acme Widgets Ltd",
+        "Acme Widgets Ltd.",
+        "ACME WIDGETS LTD",
+        "Acme Widgets Limited",
+        "Acme Widgets PLC",
+        "Acme Widgets p.l.c.",
+        "Acme Widgets Public Limited Company",
+        "Acme Advisers LLP",
+        "Acme Community Interest Company",
+        "Acme Community CIC",
+        # Dutch legal forms.
+        "Voorbeeld Holding B.V.",
+        "Voorbeeld Holding BV",
+        "Voorbeeld N.V.",
+        "Stichting Voorbeeldfonds",
+        "Vereniging Voorbeeld",
+        "Coöperatie Voorbeeld U.A.",
+        # US legal forms.
+        "Acme Inc",
+        "Acme, Inc.",
+        "Acme Incorporated",
+        "Acme Corp.",
+        "Acme Corporation",
+        "Acme LLC",
+        "Acme, L.L.C.",
+        "Jane Doe MD PLLC",
+        # A company named after a person is still a separate legal person.
+        "Jane Doe Ltd",
+    ],
+)
+def test_a_legal_form_marks_an_organisation(name: str) -> None:
+    assert is_organisation(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # Plain names, titles, all caps and trailing punctuation.
+        "Jane Doe",
+        "DR JANE DOE",
+        "Mr Richard Roe.",
+        "Doe, Jane",
+        # Initials, before or after the surname.
+        "J. Doe",
+        "J Doe",
+        "Doe, J.",
+        "DOE J",
+        "J.B. Voorbeeld",
+        "Voorbeeld, J.B.",
+        # Initials that spell a Dutch legal form after a comma are a surname and initials.
+        "Voorbeeld, N.V.",
+        "Voorbeeld, B.V.",
+    ],
+)
+def test_a_name_of_a_person_is_a_person(name: str) -> None:
+    assert not is_organisation(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # A trading-as part names the person behind the trade.
+        "Jane Doe t/a Doe Plumbing",
+        "Jane Doe T/A Doe Plumbing Ltd",
+        "Jane Doe trading as Doe Plumbing Ltd",
+        "Richard Roe d/b/a Roe Corp",
+        "Richard Roe DBA Roe LLC",
+        # Estates, executors and trusts are about people.
+        "Estate of Jane Doe",
+        "The Estate of Richard Roe Ltd",
+        "Executors of Jane Doe",
+        "Trustees of the Doe Family Trust",
+        "Doe Family Trust",
+    ],
+)
+def test_a_person_marker_wins_over_a_legal_form(name: str) -> None:
+    assert not is_organisation(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # No legal form, so unsure, so a person: these may be sole traders.
+        "Doe Plumbing Services",
+        "Doe & Co",
+        "Doe and Sons",
+        "Acme Holdings",
+        "Acme Company",
+        "Gemeente Voorbeeldstad",
+        # A legal-form word that is not the final word.
+        "Doe Limited Edition Prints",
+        "Acme Ltd (in liquidation)",
+        # A legal form with nothing before it.
+        "Ltd",
+        "",
+    ],
+)
+def test_an_unsure_name_counts_as_a_person(name: str) -> None:
+    assert not is_organisation(name)
+
+
+def test_a_register_match_marks_an_organisation() -> None:
+    register = {"Gemeente Voorbeeldstad"}
+    assert is_organisation("GEMEENTE  VOORBEELDSTAD", register)
+    assert not is_organisation("Gemeente Voorbeeldstad Noord", register)
+
+
+def test_a_person_marker_wins_over_a_register_match() -> None:
+    assert not is_organisation("Estate of Jane Doe", {"Estate of Jane Doe"})
+
+
+def test_a_person_is_replaced_by_a_hash_that_does_not_leak_the_name() -> None:
+    hide = pseudonymiser(ENV)
+    short, long = hide("Jane Doe"), hide("Bartholomew Alexander Voorbeeld-Example")
+    for hashed in (short, long):
+        assert HASHED.match(hashed)
+    assert len(short) == len(long)
+    assert "jane" not in short.casefold()
+
+
+def test_the_hash_is_hmac_sha256_of_the_normalised_name() -> None:
+    expected = hmac.new(KEY.encode(), b"jane doe", hashlib.sha256).hexdigest()
+    assert pseudonymiser(ENV)("Jane Doe") == f"person:{expected}"
+
+
+def test_only_organisations_leave_in_clear() -> None:
+    payees = {
+        "Acme Widgets Ltd": "organisation",
+        "Voorbeeld Holding B.V.": "organisation",
+        "Acme, Inc.": "organisation",
+        "Gemeente Voorbeeldstad": "organisation",
+        "DR JANE DOE": "person",
+        "Doe, J.": "person",
+        "Jane Doe t/a Doe Plumbing Ltd": "person",
+        "Estate of Richard Roe": "person",
+        "Doe Plumbing Services": "person",
+    }
+    hide = pseudonymiser(ENV, organisations=["Gemeente Voorbeeldstad"])
+    for name, kind in payees.items():
+        out = hide(name)
+        if kind == "organisation":
+            assert out == name
+        else:
+            assert HASHED.match(out), name
+            assert not set(normalise(name).split()) & set(out.split(":")), name
+    with pytest.raises(NoHashKeyError):
+        pseudonymiser({}, organisations=["Gemeente Voorbeeldstad"])
+
+
+def test_an_organisation_passes_unchanged() -> None:
+    assert pseudonymiser(ENV)("Acme Widgets Ltd") == "Acme Widgets Ltd"
+
+
+def test_a_register_match_passes_unchanged() -> None:
+    hide = pseudonymiser(ENV, organisations=["Gemeente Voorbeeldstad"])
+    assert hide("Gemeente Voorbeeldstad") == "Gemeente Voorbeeldstad"
+    assert HASHED.match(hide("Gemeente Elders"))
+
+
+def test_the_same_name_and_key_give_the_same_hash() -> None:
+    assert pseudonymiser(ENV)("Jane Doe") == pseudonymiser(dict(ENV))("Jane Doe")
+
+
+@pytest.mark.parametrize(
+    "spelling", ["JANE DOE", "jane doe", "  Jane   Doe ", "Jane\tDoe", "Jane Doe", "Jane Doe."]
+)
+def test_trivial_spellings_give_the_same_hash(spelling: str) -> None:
+    hide = pseudonymiser(ENV)
+    assert hide(spelling) == hide("Jane Doe")
+
+
+def test_another_key_or_person_gives_another_hash() -> None:
+    hide = pseudonymiser(ENV)
+    assert hide("Jane Doe") != pseudonymiser({KEY_VARIABLE: "q" * 32})("Jane Doe")
+    assert hide("Jane Doe") != hide("Richard Roe")
+
+
+def test_normalisation_folds_case_and_whitespace_and_trailing_punctuation() -> None:
+    assert normalise("  DR  Jane\t\tDoe.,  ") == "dr jane doe"
+
+
+@pytest.mark.parametrize("env", [{}, {KEY_VARIABLE: ""}, {KEY_VARIABLE: "   "}])
+def test_without_the_key_it_refuses_before_reading_a_name(env: dict[str, str]) -> None:
+    with pytest.raises(NoHashKeyError, match=KEY_VARIABLE):
+        pseudonymiser(env)
+
+
+def test_a_short_key_is_refused() -> None:
+    with pytest.raises(NoHashKeyError, match="at least 32"):
+        pseudonymiser({KEY_VARIABLE: "k" * 31})
+
+
+def test_the_key_never_appears_in_the_refusal() -> None:
+    with pytest.raises(NoHashKeyError) as refused:
+        pseudonymiser({KEY_VARIABLE: "short-key-value"})
+    assert "short-key-value" not in str(refused.value)
+
+
+def test_the_key_comes_from_the_process_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(KEY_VARIABLE, raising=False)
+    with pytest.raises(NoHashKeyError):
+        pseudonymiser()
+    monkeypatch.setenv(KEY_VARIABLE, KEY)
+    assert pseudonymiser()("Jane Doe") == pseudonymiser(ENV)("Jane Doe")
