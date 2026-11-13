@@ -77,7 +77,7 @@ DOUBT_WORDS = frozenset(
     | {"utma", "ugma", "payee", "plaintiff", "claimant", "personally", "herself", "himself"}
     | {"self", "sole", "trader", "agent", "rep", "representative", "ttee", "uta", "fbo", "re"}
     | {"ref", "inz", "eo", "cs", "mother", "father", "parent", "son", "daughter", "wife"}
-    | {"husband", "spouse", "widow", "widower"}
+    | {"husband", "spouse", "widow", "widower", "tr", "name"}
 )
 # Dutch name particles, which do not count as a word of a company name before `B.V.` or `N.V.`.
 PARTICLES = frozenset({"de", "der", "den", "van", "von", "het", "te", "ter", "ten", "'t", "op"})

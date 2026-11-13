@@ -197,6 +197,8 @@ def test_an_unsure_name_counts_as_a_person(name: str) -> None:
         "Jane Doe Sole Trader Ltd",
         "Jane Doe Mother Of Roe LLC",
         "Jane Doe Ttee Acme Ltd",
+        "Jane Doe Tr Acme Ltd",
+        "Jane Doe Ten Name Van Acme Holding BV",
         "Jane Doe Fbo Roe LLC",
         "Jane Doe Inz Acme Holding BV",
         # The same joins after a leading Dutch form.

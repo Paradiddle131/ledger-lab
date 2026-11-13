@@ -16,6 +16,7 @@ dev = [
   "dbt-core==1.12.7",
   "dbt-duckdb==1.11.1",
   "detect-secrets==1.5.0",
+  "httpx==0.28.1",
   "jsonschema==4.26.0",
   "pyright==1.1.414",
   "pytest==9.2.0",
@@ -47,7 +48,10 @@ venvPath = "."
 venv = ".venv"
 
 [tool.pytest.ini_options]
-addopts = ["-q", "--strict-markers", "--strict-config", "-ra"]
+# The live stack test needs `make stack-test` to have started this checkout's stack, so a plain
+# run (and `make check`) leaves it out; `-m stack` on the command line selects it.
+addopts = ["-q", "--strict-markers", "--strict-config", "-ra", "-m", "not stack"]
+markers = ["stack: needs this checkout's running container stack (`make stack-test`)"]
 testpaths = ["tests"]
 # platform/ holds scripts run by path; tests import them as top-level modules.
 pythonpath = [".", "platform"]
