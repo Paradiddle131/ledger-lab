@@ -29,6 +29,14 @@ ALLOWED = {
     "google_service_account_iam_member",
     "google_storage_bucket",
     "google_storage_bucket_iam_member",
+    "google_bigquery_dataset",
+    "google_bigquery_dataset_iam_member",
+    "google_project_iam_custom_role",
+    "google_data_catalog_taxonomy",
+    "google_data_catalog_policy_tag",
+    "google_data_catalog_policy_tag_iam_member",
+    "google_bigquery_datapolicy_data_policy",
+    "google_bigquery_datapolicy_data_policy_iam_member",
 }
 # A service account id: 6 to 30 characters, lowercase letters, digits and hyphens, from a letter.
 ACCOUNT_ID = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
@@ -94,16 +102,11 @@ def test_regional_pieces_run_in_a_free_tier_region() -> None:
 def test_the_kill_switch_fires_far_above_the_alerts_and_holds_one_billing_role() -> None:
     threshold = variable("kill_threshold")
     assert 1 <= threshold["default"] <= 10
-    roles = sorted(
-        unquote(body["role"])
-        for (rtype, _), body in blocks("resource").items()
-        if rtype == "google_project_iam_member"
-    )
-    assert roles == [
+    assert declared().kill_switch_roles == (
         "roles/billing.projectManager",
         "roles/eventarc.eventReceiver",
         "roles/workflows.invoker",
-    ]
+    )
     trigger = one("google_eventarc_trigger")
     assert "google_pubsub_topic.budget" in trigger["transport"][0]["pubsub"][0]["topic"]
     assert "google_workflows_workflow.kill_switch" in trigger["destination"][0]["workflow"]
@@ -236,11 +239,12 @@ def test_only_the_agent_mints_tokens_and_only_for_persona_accounts() -> None:
     assert unquote(grant["member"]) == AGENT_MEMBER
 
 
-def test_no_project_level_role_reaches_anyone_but_the_kill_switch() -> None:
+def test_no_project_level_role_reaches_anyone_but_the_kill_switch_and_the_query_role() -> None:
+    # The personas' one project role, to run a query, is checked in test_access_rules.py.
     members = [
         unquote(body["member"])
-        for (rtype, _), body in blocks("resource").items()
-        if rtype == "google_project_iam_member"
+        for (rtype, name), body in blocks("resource").items()
+        if rtype == "google_project_iam_member" and name != "persona_runs_queries"
     ]
     assert members, "the kill switch's roles are project-level"
     assert set(members) == {"serviceAccount:${google_service_account.kill_switch.email}"}

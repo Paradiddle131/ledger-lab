@@ -70,14 +70,16 @@ cost-check:
 fresh-clone: sync
 	@uv run python platform/fresh_clone.py
 
-# The lab project's spend fences (platform/gcp): the pinned OpenTofu validates them with no backend
-# and no credentials; only the owner plans and applies them.
+# The lab project's definitions (platform/gcp): the pinned OpenTofu validates them with no backend
+# and no credentials, then evaluates the access rules it generates from the catalogues for the
+# `tofu` tests; only the owner plans and applies them.
 TOFU := $(HOME)/.local/bin/tofu
 
 tofu:
 	@bash platform/gcp/install-tofu.sh
 
-fences-validate: tofu
+fences-validate: tofu sync
 	$(TOFU) -chdir=platform/gcp fmt -check
 	$(TOFU) -chdir=platform/gcp init -backend=false -input=false >/dev/null
 	$(TOFU) -chdir=platform/gcp validate
+	TOFU=$(TOFU) uv run pytest -m tofu

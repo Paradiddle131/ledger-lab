@@ -1,6 +1,7 @@
-# The lab project's spend fences, persona identities and landing bucket, as definitions the owner
-# applies from their own shell; a session only validates them (`make fences-validate`) and never
-# plans or applies. No backend: the owner chooses where state lives when applying.
+# The lab project's spend fences, persona identities, landing bucket and warehouse access rules,
+# as definitions the owner applies from their own shell; a session only validates them
+# (`make fences-validate`) and never plans or applies. No backend: the owner chooses where state
+# lives when applying.
 terraform {
   required_version = "~> 1.11"
   required_providers {
