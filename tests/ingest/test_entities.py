@@ -14,7 +14,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from ingest.chicago.table import Table, land
+from ingest.chicago.table import Table, land_all
 from ingest.entities import (
     LEGAL_PERSONS,
     REGISTER,
@@ -243,7 +243,7 @@ def landed(tmp_path: Path, register: Register, *rows: tuple[str, str, str, str])
     writer.writerow(SPEC.columns)
     writer.writerows(rows)
     path = tmp_path / "landed"
-    path.write_bytes(land(out.getvalue().encode(), SPEC, ENV, register))
+    path.write_bytes(land_all({"t": (out.getvalue().encode(), SPEC)}, ENV, register)["t"])
     rel = duckdb.read_parquet(str(path))
     return [dict(zip(rel.columns, r, strict=True)) for r in rel.fetchall()]
 

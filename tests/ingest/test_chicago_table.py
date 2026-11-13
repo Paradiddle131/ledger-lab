@@ -13,7 +13,7 @@ import duckdb
 import pytest
 
 from ingest import scrub
-from ingest.chicago.table import Table, land
+from ingest.chicago.table import Table, land_all
 from ingest.entities import Register
 from ingest.individuals import KEY_VARIABLE, person_hasher
 
@@ -41,7 +41,7 @@ def served(*rows: tuple[str, str, str, str, str]) -> bytes:
 
 def landed(tmp_path: Path, *rows: tuple[str, str, str, str, str]) -> list[dict[str, object]]:
     path = tmp_path / "landed"
-    path.write_bytes(land(served(*rows), SPEC, ENV, NONE))
+    path.write_bytes(land_all({"t": (served(*rows), SPEC)}, ENV, NONE)["t"])
     rel = duckdb.read_parquet(str(path))
     return [dict(zip(rel.columns, r, strict=True)) for r in rel.fetchall()]
 
@@ -119,11 +119,11 @@ def test_nothing_is_written_outside_memory(tmp_path: Path, monkeypatch: pytest.M
     scratch.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
     monkeypatch.setenv("TMPDIR", str(scratch))
-    land(served(("note", PERSON, "V1", "", "")), SPEC, ENV, NONE)
+    land_all({"t": (served(("note", PERSON, "V1", "", "")), SPEC)}, ENV, NONE)
     assert os.listdir(scratch) == []
     assert scrub.MEMORY.ls("/") == []
 
 
 def test_the_landing_refuses_without_the_key_before_reading_a_row() -> None:
     with pytest.raises(Exception, match=KEY_VARIABLE):
-        land(b"not,the,table\n", SPEC, {}, NONE)
+        land_all({"t": (b"not,the,table\n", SPEC)}, {}, NONE)

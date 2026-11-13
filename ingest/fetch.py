@@ -14,9 +14,9 @@ A set is several sources landed together by one step, under a name of its own th
 member's name before a dash (`<set>-<member>`): `SET_STEPS[<set>]` receives every member's verified
 bytes by URL, in the sources file's order, and returns either the one file landed as `<set>`, or
 files by member name, each landed as that member (`chicago` lands `chicago-contracts` and
-`chicago-payments`, scrubbed together); several files are written beside each other first and only
-then renamed into place, so a failure leaves none of them. Members may not share a URL. Nothing
-runs or lands until every member has verified.
+`chicago-payments`, scrubbed together); the files land together or not at all (`land_all`): on a
+failure the landing keeps every file it held before, never a new file beside an old one. Members
+may not share a URL. Nothing runs or lands until every member has verified.
 
 Holding the response in memory bounds a source: one over `MAX_BYTES` fails, as does one still
 arriving at `DEADLINE`. A download whose connection drops (cut short, closed, timed out) starts
@@ -30,6 +30,7 @@ import os
 import sys
 import tempfile
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,7 @@ from jsonschema import Draft202012Validator
 from ingest import StepError
 from ingest.chicago import together
 from ingest.ecb import rates
+from ingest.entities import REGISTER
 from ingest.gleif import legal_entities
 from ingest.nl_government import budget
 from ingest.uk_transport import spend
@@ -78,6 +80,9 @@ SET_STEPS: dict[str, Callable[[dict[str, bytes]], bytes | dict[str, bytes]]] = {
     spend.SET: spend.step,
     together.SET: together.step,
 }
+# The sets whose steps read the landed legal-entity register; the kit refuses them before any
+# download while it is not landed.
+READS_THE_REGISTER = frozenset({spend.SET, together.SET})
 
 
 class FetchError(Exception):
@@ -183,26 +188,50 @@ def land(name: str, path: Path, data: bytes) -> Path:
 
 
 def land_all(name: str, files: dict[Path, bytes]) -> list[Path]:
-    """Write every file whole or none: each to a temporary file beside it, then all renamed into
-    place; on any failure before the renames the temporary files are removed."""
+    """Land every file or none, leaving what was landed before as it was.
+
+    Each file is written whole to a hidden temporary file beside its place; then each file already
+    landed there is moved aside to a hidden name, and the new ones are renamed into place. If any
+    of that fails, the new files are removed and the old ones moved back, so the landing holds
+    either every new file or every old one. A process killed outright mid-way leaves the hidden
+    files behind, and a place it had emptied stays empty, never holding an old file beside a new
+    one; landing again replaces them all."""
     partials: dict[Path, Path] = {}
+    aside: dict[Path, Path] = {}
+    placed: list[Path] = []
     path = next(iter(files))
     try:
         for path, data in files.items():
             path.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(
-                dir=path.parent, prefix=f".{path.name}.", delete=False
-            ) as f:
-                partials[path] = Path(f.name)
+            partials[path] = _hidden(path)
             partials[path].write_bytes(data)
+        for path in files:
+            if path.is_file():
+                old = path.with_name(f".{path.name}.old.{uuid.uuid4().hex}")
+                path.replace(old)
+                aside[path] = old
         for path, partial in partials.items():
             partial.replace(path)
+            placed.append(path)
     except OSError as error:
+        for landed in placed:
+            landed.unlink(missing_ok=True)
+        for landed, old in aside.items():
+            old.replace(landed)
+        aside.clear()
         raise FetchError(f"{name}: cannot write {path}: {error.strerror}") from None
     finally:
-        for partial in partials.values():
-            partial.unlink(missing_ok=True)
+        for leftover in [*partials.values(), *aside.values()]:
+            leftover.unlink(missing_ok=True)
     return list(files)
+
+
+def _hidden(path: Path) -> Path:
+    """A fresh hidden file beside `path` (`.<name>.new.<random>`)."""
+    with tempfile.NamedTemporaryFile(
+        dir=path.parent, prefix=f".{path.name}.new.", delete=False
+    ) as f:
+        return Path(f.name)
 
 
 def fetch(name: str, landing: Path) -> Path:
@@ -232,6 +261,8 @@ def fetch_set(name: str, landing: Path) -> list[Path]:
         if url in urls:
             raise SourcesError(f"{urls[url]} and {member} share one URL in the set {name!r}")
         urls[url] = member
+    if name in READS_THE_REGISTER and not (landing / REGISTER).is_file():
+        raise SourcesError(f"{name} keeps in clear what {REGISTER} vouches for: land it first")
     files = {}
     for member in members:
         raw = download(sources[member])

@@ -14,7 +14,7 @@ import pytest
 from ingest import fetch
 from ingest.chicago import together
 from ingest.chicago.payments import COLUMNS, TABLE, profile
-from ingest.chicago.table import TableError, land
+from ingest.chicago.table import TableError, land_all
 from ingest.entities import Register
 from ingest.individuals import KEY_VARIABLE
 
@@ -25,7 +25,7 @@ NONE = Register(())
 
 def step(raw: bytes, env: dict[str, str], register: Register) -> bytes:
     """The table landed on its own, as the set's landing scrubs it."""
-    return land(raw, TABLE, env, register)
+    return land_all({"t": (raw, TABLE)}, env, register)["t"]
 
 
 ITEMISED = {

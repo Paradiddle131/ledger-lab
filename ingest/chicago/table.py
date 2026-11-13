@@ -113,16 +113,6 @@ def land_all(
     return landed
 
 
-def land(
-    raw: bytes,
-    table: Table,
-    env: Mapping[str, str] | None = None,
-    register: Register | None = None,
-) -> bytes:
-    """One verified CSV landed on its own (`land_all` of one table)."""
-    return land_all({"table": (raw, table)}, env, register)["table"]
-
-
 def counter(path: Path) -> tuple[duckdb.DuckDBPyConnection, Callable[[str], int]]:
     """A connection with the landed file as the view `t`, and a function returning the one number
     a query answers."""

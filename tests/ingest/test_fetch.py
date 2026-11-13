@@ -617,6 +617,52 @@ def test_a_set_step_may_land_one_file_per_member(
     assert everything_under(landing) == landed
 
 
+@pytest.mark.parametrize("failing", ["first", "second"])
+def test_files_that_fail_to_land_together_leave_the_old_ones_as_they_were(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    """A rename that fails, of either file, leaves both old files in place, and nothing else."""
+    first, second = tmp_path / "set-1", tmp_path / "set-2"
+    first.write_bytes(b"old one")
+    second.write_bytes(b"old two")
+    target = first if failing == "first" else second
+    rename = Path.replace
+
+    def replace(self: Path, to: Path) -> Path:
+        if Path(to) == target and self.name.startswith(f".{target.name}.new."):
+            raise OSError(28, "No space left on device")
+        return rename(self, to)
+
+    monkeypatch.setattr(Path, "replace", replace)
+    with pytest.raises(fetch.FetchError, match="cannot write"):
+        fetch.land_all("set", {first: b"new one", second: b"new two"})
+    assert (first.read_bytes(), second.read_bytes()) == (b"old one", b"old two")
+    assert everything_under(tmp_path) == [first, second]
+
+
+def test_files_that_land_together_replace_the_old_ones_and_leave_nothing_else(
+    tmp_path: Path,
+) -> None:
+    first, second = tmp_path / "set-1", tmp_path / "set-2"
+    first.write_bytes(b"old one")
+    fetch.land_all("set", {first: b"new one", second: b"new two"})
+    assert (first.read_bytes(), second.read_bytes()) == (b"new one", b"new two")
+    assert everything_under(tmp_path) == [first, second]
+
+
+@pytest.mark.parametrize("name", sorted(fetch.READS_THE_REGISTER))
+def test_a_set_that_reads_the_register_is_refused_before_any_download_without_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    def no_download(entry: dict) -> bytes:
+        raise AssertionError("nothing is downloaded")
+
+    monkeypatch.setattr(fetch, "download", no_download)
+    with pytest.raises(fetch.SourcesError, match="land it first"):
+        fetch.fetch_set(name, tmp_path)
+    assert everything_under(tmp_path) == []
+
+
 def test_a_set_step_naming_a_file_that_is_no_member_lands_nothing(
     site: Site,
     landing: Path,
