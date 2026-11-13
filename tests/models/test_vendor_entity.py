@@ -14,12 +14,12 @@ from typing import Any
 
 import pytest
 import yaml
-from dbt_build import HASHED, SAMPLE, Build, built, dbt, query
 
 from ingest.entities import REGISTER, Register, match_key
 from ingest.fetch import landing_path
 from ingest.individuals import is_organisation
 from ingest.uk_transport.spend import BODIES
+from tests.models.dbt_build import HASHED, SAMPLE, Build, built, dbt, query
 
 SOURCES = ("chicago-contracts", "chicago-payments", "uk-transport-spend-2025")
 # The precision the matching must reach on the sample: of the names it matches, the share matched

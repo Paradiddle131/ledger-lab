@@ -14,7 +14,8 @@ from typing import Any
 import jinja2
 import pytest
 import yaml
-from dbt_build import PROJECT, Build, dbt, query
+
+from tests.models.dbt_build import PROJECT, Build, dbt, query
 
 with (PROJECT / "seeds" / "calendars" / "fiscal_year_starts.csv").open() as starts:
     ENTITIES = {row["entity_id"] for row in csv.DictReader(starts)}
