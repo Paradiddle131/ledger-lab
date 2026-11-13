@@ -4,6 +4,9 @@ data/
 downloads/
 landing/
 *.csv
+# The one exception: dbt seeds, reference tables authored in the tree; platform/fresh_clone.py
+# refuses any other `!` line.
+!/models/seeds/**/*.csv
 *.tsv
 *.xlsx
 *.xls

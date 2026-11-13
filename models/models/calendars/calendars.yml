@@ -1,0 +1,78 @@
+models:
+  - name: fiscal_periods
+    description: >
+      One row per entity and fiscal period: twelve calendar months a year from the entity's first
+      month, each year labelled by the calendar year it starts in, each period open or closed.
+    columns:
+      - name: entity_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('fiscal_year_starts')
+                field: entity_id
+      - name: fiscal_year
+        data_tests:
+          - not_null
+      - name: fiscal_period
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+                quote: false
+      - name: period_start
+        data_tests:
+          - not_null
+      - name: period_end
+        data_tests:
+          - not_null
+      - name: status
+        description: Every period has one; the period-status seed sets it.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [open, closed]
+
+  - name: fiscal_calendar
+    description: One row per entity and day, with the fiscal year and period the day falls in.
+    columns:
+      - name: entity_id
+        data_tests:
+          - not_null
+      - name: calendar_date
+        data_tests:
+          - not_null
+      - name: fiscal_year
+        data_tests:
+          - not_null
+      - name: fiscal_period
+        data_tests:
+          - not_null
+
+seeds:
+  - name: fiscal_year_starts
+    description: The month each entity's fiscal year starts in; ids as in access/personas.yaml.
+    columns:
+      - name: entity_id
+        data_tests:
+          - unique
+          - not_null
+      - name: first_month
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+                quote: false
+
+  - name: period_status
+    description: Whether each entity's fiscal period is open or closed, one row per period.
+    columns:
+      - name: status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [open, closed]

@@ -58,6 +58,8 @@ PLANTS = {
     "key file": ("sa.txt", '{"type": "' + 'service_account"}\n', False, "key material"),
     "private key": ("k.pem.txt", "-----BEGIN " + "PRIVATE KEY-----\n", False, "key material"),
     "secret": ("settings.py", 'k = "' + "AK" + "IA" + "Z7Q3M9XK2PL8V4RT" + '"\n', False, "secret"),
+    "data file beside the seeds": ("models/payments.csv", "vendor,amount\nA,1\n", True, "excludes"),
+    "nested exception": ("ingest/.gitignore", "!*.csv\n", False, "exception"),
 }
 
 
@@ -79,6 +81,20 @@ def test_each_planted_kind_fails_the_check(tmp_path: Path, kind: str) -> None:
 )
 def test_placeholders_pass(tmp_path: Path, content: str) -> None:
     assert check_clone(repo_with(tmp_path, "doc.md", content)) == []
+
+
+def test_an_authored_seed_is_the_one_tracked_csv_allowed(tmp_path: Path) -> None:
+    seed = "models/seeds/calendars/periods.csv"
+    assert check_clone(repo_with(tmp_path, seed, "entity_id,status\nchicago,open\n")) == []
+
+
+def test_widening_the_root_ignore_rules_fails_the_check(tmp_path: Path) -> None:
+    repo = repo_with(tmp_path, "doc.md", "clean\n")
+    with (repo / ".gitignore").open("a") as rules:
+        rules.write("!/data/**/*.csv\n")
+    git(repo, "commit", "--quiet", "-am", "widen")
+    found = check_clone(repo)
+    assert any(".gitignore" in line and "exception" in line for line in found), found
 
 
 def test_only_committed_files_are_checked(tmp_path: Path) -> None:

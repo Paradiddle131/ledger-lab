@@ -3,6 +3,8 @@
 A clone sees only what is committed, so this checks what a stranger would get. It fails on:
 - a tracked file that `.gitignore` excludes (data, credentials and tool state can only get in by
   `git add -f`);
+- a `.gitignore` exception (a `!` line) other than the authored dbt seeds, so no other data file
+  can be let in by widening the ignore rules;
 - an email address, other than on the reserved example domains;
 - a GCP project id written as a value (a `project` setting, a `projects/<id>` path, a service
   account's domain), other than the documented placeholders;
@@ -36,6 +38,10 @@ KEY_MARKERS = [
     re.compile(r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----"),
 ]
 
+# The only files a `.gitignore` may take back from its exclusions: dbt seeds, reference tables
+# authored in the tree, not downloaded.
+ALLOWED_EXCEPTIONS = {"!/models/seeds/**/*.csv"}
+
 DETECT_SECRETS = Path(sys.executable).with_name("detect-secrets-hook")
 
 
@@ -55,6 +61,17 @@ def tracked(repo: Path) -> list[str]:
 def ignored_but_tracked(repo: Path) -> list[str]:
     out = git(repo, "ls-files", "-z", "--cached", "--ignored", "--exclude-standard")
     return [p for p in out.split("\0") if p]
+
+
+def widened_ignores(repo: Path, files: list[str]) -> Iterable[str]:
+    """Every `!` line of a tracked `.gitignore` but the seed exception in the root one."""
+    for name in files:
+        if Path(name).name != ".gitignore":
+            continue
+        allowed = ALLOWED_EXCEPTIONS if name == ".gitignore" else set()
+        for number, line in enumerate((repo / name).read_text().splitlines(), 1):
+            if line.startswith("!") and line.strip() not in allowed:
+                yield f"{name}:{number}: exception {line.strip()!r} beyond the authored dbt seeds"
 
 
 def text_of(path: Path) -> str | None:
@@ -95,6 +112,7 @@ def problems(repo: Path) -> list[str]:
     found = [
         f"{name}: tracked although .gitignore excludes it" for name in ignored_but_tracked(repo)
     ]
+    found.extend(widened_ignores(repo, files))
     for name in files:
         text = text_of(repo / name)
         if text is not None:
