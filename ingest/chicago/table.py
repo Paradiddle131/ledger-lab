@@ -10,29 +10,22 @@ hash, and nothing links the two without the key. On a hashed row the cells that 
 the payee are blanked. Columns no consumer needs and that hold contact people (street addresses)
 are dropped from every row. A description on any row is blanked when a run of its words, in any
 order and whatever punctuation sits between them, is a name this table hashes, or when it carries
-one of the classifier's person markers (an estate, a deceased, trading as). A description of an
-organisation's row is otherwise landed as served: it is the known remaining place a person's name
-could sit, including a name another table hashes, since each table's landing reads only its own
-data.
+a person marker in the form that introduces one (the estate or executors of someone, a deceased, a
+name that is no company trading as another). A description of an organisation's row is otherwise
+landed as served: it is the known remaining place a person's name could sit, including a name
+another table hashes, since each table's landing reads only its own data.
 """
 
 import csv
 import io
-import re
-import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import duckdb
-import fsspec
 
-from ingest.individuals import identifier_hasher, marks_a_person, normalise, pseudonymiser
-
-MEMORY = fsspec.filesystem("memory")
-# A word, for finding a name inside a cell: letters and digits, whatever stands between them.
-WORD = re.compile(r"[^\W_]+")
-LETTER = re.compile(r"[^\W\d_]")
+from ingest.individuals import identifier_hasher, introduces_a_person, pseudonymiser
+from ingest.scrub import HashedNames, parquet_from_csv
 
 
 class TableError(ValueError):
@@ -60,27 +53,13 @@ class Table:
         return tuple(c for c in self.columns if c not in self.dropped)
 
 
-def name_key(name: str) -> tuple[str, ...]:
-    """A name's words, sorted: how a name is found inside a cell, in any order."""
-    return tuple(sorted(WORD.findall(normalise(name))))
-
-
-def holds_a_name(cell: str, keys: set[tuple[str, ...]], lengths: set[int]) -> bool:
-    """Whether a run of the cell's words is, in some order, one of the names keyed."""
-    words = WORD.findall(normalise(cell))
-    return any(
-        tuple(sorted(words[i : i + n])) in keys for n in lengths for i in range(len(words) - n + 1)
-    )
-
-
 def scrub(rows: list[dict[str, str]], table: Table, env: Mapping[str, str] | None) -> None:
     """Every row changed in place: hashed payees, their identifiers and personal cells, dropped
     columns, and descriptions that name a hashed payee or a person."""
     hide, as_id = pseudonymiser(env), identifier_hasher(env)
     names = {row[table.name] for row in rows}
     hidden = {n: h for n in names if (h := hide(n or None)) not in (n, None)}
-    keys = {key for key in map(name_key, hidden) if any(LETTER.search(w) for w in key)}
-    lengths = {len(key) for key in keys}
+    found = HashedNames(hidden)
     for row in rows:
         for column in table.dropped:
             del row[column]
@@ -92,7 +71,7 @@ def scrub(rows: list[dict[str, str]], table: Table, env: Mapping[str, str] | Non
                 row[column] = ""
         for column in table.descriptions:
             cell = row[column]
-            if cell and (marks_a_person(cell) or holds_a_name(cell, keys, lengths)):
+            if cell and (introduces_a_person(cell) or found.in_any_order(cell)):
                 row[column] = ""
 
 
@@ -110,24 +89,7 @@ def land(raw: bytes, table: Table, env: Mapping[str, str] | None = None) -> byte
     writer = csv.DictWriter(out, table.landed)
     writer.writeheader()
     writer.writerows(rows)
-    work = f"/{uuid.uuid4().hex}"
-    try:
-        MEMORY.pipe(f"{work}/rows.csv", out.getvalue().encode())
-        con = in_memory()
-        con.read_csv(f"memory://{work}/rows.csv", header=True, all_varchar=True).write_parquet(
-            f"memory://{work}/rows.parquet"
-        )
-        return MEMORY.cat(f"{work}/rows.parquet")
-    finally:
-        if MEMORY.exists(work):
-            MEMORY.rm(work, recursive=True)
-
-
-def in_memory() -> duckdb.DuckDBPyConnection:
-    """A DuckDB connection that cannot spill to disk and reads and writes the in-memory files."""
-    con = duckdb.connect(config={"temp_directory": ""})
-    con.register_filesystem(MEMORY)
-    return con
+    return parquet_from_csv(out.getvalue(), all_varchar=True)
 
 
 def counter(path: Path) -> tuple[duckdb.DuckDBPyConnection, Callable[[str], int]]:

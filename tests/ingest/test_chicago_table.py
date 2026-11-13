@@ -12,8 +12,8 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from ingest.chicago import table
-from ingest.chicago.table import Table, in_memory, land
+from ingest import scrub
+from ingest.chicago.table import Table, land
 from ingest.individuals import KEY_VARIABLE, person_hasher
 
 ENV = {KEY_VARIABLE: "k" * 32}
@@ -119,12 +119,7 @@ def test_nothing_is_written_outside_memory(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setenv("TMPDIR", str(scratch))
     land(served(("note", PERSON, "V1", "", "")), SPEC, ENV)
     assert os.listdir(scratch) == []
-    assert table.MEMORY.ls("/") == []
-
-
-def test_the_steps_engine_cannot_spill_to_disk() -> None:
-    setting = in_memory().execute("SELECT current_setting('temp_directory')").fetchone()
-    assert setting == ("",)
+    assert scrub.MEMORY.ls("/") == []
 
 
 def test_the_landing_refuses_without_the_key_before_reading_a_row() -> None:

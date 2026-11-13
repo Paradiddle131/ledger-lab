@@ -7,12 +7,13 @@ purchase-order description (which repeats the name in truncated and reordered fo
 catches), ZIP code and the link to the signed contract are blanked. The street address columns
 are left out on every row, since they carry contact people (`ATTN`, `C/O`) and nothing needs them.
 On every row a description holding a hashed vendor's name, in any order and punctuation, or a
-person marker (an estate, a deceased) is blanked; an organisation row's description is otherwise
-landed as served, and is the known remaining place a person's name could sit. The contract and
-specification numbers stay in clear, as the keys that tie payments to contracts; the City's public
-search can look a hashed vendor up by them. A company named after a person passes in clear, as the
-pseudonymiser allows, even where that person is hashed on other rows. Every column lands as the
-text the publisher served, with blanks as nulls; typing is the models' job.
+marker introducing a person (the estate of, a deceased) is blanked; an organisation row's
+description is otherwise landed as served, and is the known remaining place a person's name could
+sit. The contract and specification numbers stay in clear, as the keys that tie payments to
+contracts; the City's public search can look a hashed vendor up by them. A company named after a
+person passes in clear, as the pseudonymiser allows, even where that person is hashed on other
+rows. Every column lands as the text the publisher served, with blanks as nulls; typing is the
+models' job.
 
 `profile` counts the mess the models must survive: contracts carrying several revisions,
 negative awards (revisions that lower an award), revision numbers that are not numbers, the

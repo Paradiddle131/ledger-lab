@@ -18,7 +18,7 @@ import yaml
 from conftest import REPO, load_checked
 from jsonschema import Draft202012Validator
 
-from ingest import fetch
+from ingest import StepError, fetch
 
 FILE = b"id,amount\n1,10.00\n2,-3.50\n"
 GZIPPED = gzip.compress(FILE, mtime=0)
@@ -563,3 +563,142 @@ def test_the_module_runs_from_the_repo_root() -> None:
     )
     assert result.returncode == 1
     assert "no source named 'no-such-source'" in result.stderr
+
+
+def test_a_set_lands_every_member_through_its_step_as_one_file(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    site.files["/second.csv"] = FILE.upper()
+    seen: list[dict[str, bytes]] = []
+
+    def join(files: dict[str, bytes]) -> bytes:
+        seen.append(files)
+        return b"".join(files.values())
+
+    monkeypatch.setitem(fetch.SET_STEPS, "spend", join)
+    write_sources(
+        **{
+            "spend-2": entry(f"{site.base}/second.csv", sha256(FILE.upper()), names_people=True),
+            "spend-1": entry(f"{site.base}/file.csv", sha256(FILE), names_people=True),
+            "spending": entry(f"{site.base}/file.csv", sha256(FILE)),
+        }
+    )
+    landed = fetch.fetch_set("spend", landing)
+    assert landed == landing / "spend"
+    assert landed.read_bytes() == FILE + FILE.upper()
+    assert [list(files) for files in seen] == [
+        [f"{site.base}/file.csv", f"{site.base}/second.csv"]
+    ], "the step gets each member by its URL, in the sources file's order, and no other source"
+    assert everything_under(landing) == [landed]
+
+
+def test_a_set_member_whose_download_is_cut_short_lands_on_the_retry(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    site.cuts = 1
+    monkeypatch.setitem(fetch.SET_STEPS, "spend", lambda files: b"".join(files.values()))
+    write_sources(
+        **{
+            "spend-1": entry(f"{site.base}/file.csv", sha256(FILE)),
+            "spend-2": entry(f"{site.base}/cut.csv", sha256(FILE)),
+        }
+    )
+    assert fetch.fetch_set("spend", landing).read_bytes() == FILE + FILE
+    assert [r["path"] for r in site.requests] == ["/file.csv", "/cut.csv", "/cut.csv"]
+
+
+def test_a_set_whose_members_share_a_url_is_refused_before_any_request(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(fetch.SET_STEPS, "spend", lambda files: b"".join(files.values()))
+    write_sources(
+        **{
+            "spend-1": entry(f"{site.base}/file.csv", sha256(FILE)),
+            "spend-2": entry(f"{site.base}/file.csv", sha256(FILE)),
+        }
+    )
+    with pytest.raises(fetch.SourcesError, match="spend-1 and spend-2 share one URL"):
+        fetch.fetch_set("spend", landing)
+    assert site.requests == []
+
+
+def test_a_steps_own_refusal_reaches_the_operator_by_its_message(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def refuse(files: dict[str, bytes]) -> bytes:
+        raise StepError("file.csv row 2: the amount is not a sum")
+
+    monkeypatch.setenv("LEDGER_LAB_LANDING", str(landing))
+    monkeypatch.setitem(fetch.SET_STEPS, "spend", refuse)
+    write_sources(**{"spend-1": entry(f"{site.base}/file.csv", sha256(FILE))})
+    assert fetch.main(["spend"]) == 1
+    assert "spend: file.csv row 2: the amount is not a sum" in capsys.readouterr().err
+    assert everything_under(landing) == []
+
+
+def test_a_set_with_one_drifted_member_lands_nothing_and_never_runs_its_step(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[dict[str, bytes]] = []
+    monkeypatch.setitem(fetch.SET_STEPS, "spend", lambda files: seen.append(files) or b"")
+    write_sources(
+        **{
+            "spend-1": entry(f"{site.base}/file.csv", sha256(FILE)),
+            "spend-2": entry(f"{site.base}/file.csv?copy=2", sha256(b"drifted")),
+        }
+    )
+    with pytest.raises(fetch.ChecksumMismatchError, match="spend-2"):
+        fetch.fetch_set("spend", landing)
+    assert seen == []
+    assert everything_under(landing) == []
+
+
+def test_a_set_without_members_is_refused_before_any_request(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(fetch.SET_STEPS, "spend", lambda files: b"")
+    write_sources(spending=entry(f"{site.base}/file.csv", sha256(FILE)))
+    with pytest.raises(fetch.SourcesError, match="no source named 'spend-…'"):
+        fetch.fetch_set("spend", landing)
+    assert site.requests == []
+
+
+def test_the_command_lands_a_set_by_its_name(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LEDGER_LAB_LANDING", str(landing))
+    monkeypatch.setitem(fetch.SET_STEPS, "spend", lambda files: b"".join(files.values()))
+    write_sources(**{"spend-1": entry(f"{site.base}/file.csv", sha256(FILE), names_people=True)})
+    assert fetch.main(["spend"]) == 0
+    assert (landing / "spend").read_bytes() == FILE
+    with pytest.raises(fetch.SourcesError, match="spend-1 names people but has no step"):
+        fetch.fetch("spend-1", landing)
+
+
+def test_every_set_step_names_recorded_members_and_no_source() -> None:
+    recorded = fetch.load_sources(fetch.SOURCES)
+    for name in fetch.SET_STEPS:
+        assert name not in recorded
+        assert any(source.startswith(f"{name}-") for source in recorded), name

@@ -10,6 +10,11 @@ written. A source with no step lands the verified bytes as they are. Unverified 
 the landing path, and for a source with a step the raw bytes never reach disk at all. A source
 whose entry says it names people is refused, before any request, until it has a step.
 
+A set is several sources landed together by one step, under a name of its own that prefixes each
+member's name before a dash (`<set>-<member>`): `SET_STEPS[<set>]` receives every member's verified
+bytes by URL, in the sources file's order, and returns the one file landed as `<set>`. Members may
+not share a URL. Nothing runs or lands until every member has verified.
+
 Holding the response in memory bounds a source: one over `MAX_BYTES` fails, as does one still
 arriving at `DEADLINE`. A download whose connection drops (cut short, closed, timed out) starts
 again from the first byte, up to `ATTEMPTS` in all, within the same deadline; an error status, a
@@ -30,10 +35,12 @@ import httpx
 import yaml
 from jsonschema import Draft202012Validator
 
+from ingest import StepError
 from ingest.chicago import contracts, payments
 from ingest.ecb import rates
 from ingest.gleif import legal_entities
 from ingest.nl_government import budget
+from ingest.uk_transport import spend
 
 HERE = Path(__file__).resolve().parent
 SOURCES = HERE / "sources.yaml"
@@ -63,6 +70,10 @@ STEPS: dict[str, Callable[[bytes], bytes]] = {
     "ecb-rates": rates.step,
     "gleif-legal-entities": legal_entities.step,
     "nl-government-budget": budget.step,
+}
+# A set's step, by set name: it lands every member, one URL each, as one file.
+SET_STEPS: dict[str, Callable[[dict[str, bytes]], bytes]] = {
+    spend.SET: spend.step,
 }
 
 
@@ -151,11 +162,14 @@ def verify(name: str, entry: dict[str, Any], raw: bytes) -> None:
         )
 
 
-def run_step(name: str, step: Callable[[bytes], bytes], raw: bytes) -> bytes:
+def run_step[Raw](name: str, step: Callable[[Raw], bytes], raw: Raw) -> bytes:
     """The source's step; a failure is reported by source and kind only, since its message
-    could quote the rows, names included."""
+    could quote the rows, names included, except a step's own refusal (`StepError`), whose
+    message names a file, row or column and never a value."""
     try:
         return step(raw)
+    except StepError as error:
+        raise FetchError(f"{name}: {error}") from None
     except Exception as error:
         raise FetchError(f"{name}: its step failed ({type(error).__name__})") from None
 
@@ -194,12 +208,32 @@ def fetch(name: str, landing: Path) -> Path:
     return land(name, landing / name, run_step(name, step, raw) if step else raw)
 
 
+def fetch_set(name: str, landing: Path) -> Path:
+    """Download and verify every member of a set, then land its step's output as `<name>`."""
+    sources = load_sources(SOURCES)
+    members = [member for member in sources if member.startswith(f"{name}-")]
+    if not members:
+        raise SourcesError(f"no source named '{name}-…' in {SOURCES} for the set {name!r}")
+    urls: dict[str, str] = {}
+    for member in members:
+        url = str(request_url(sources[member]))
+        if url in urls:
+            raise SourcesError(f"{urls[url]} and {member} share one URL in the set {name!r}")
+        urls[url] = member
+    files = {}
+    for member in members:
+        raw = download(sources[member])
+        verify(member, sources[member], raw)
+        files[str(request_url(sources[member]))] = raw
+    return land(name, landing / name, run_step(name, SET_STEPS[name], files))
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 1:
-        print("usage: python -m ingest.fetch <source>", file=sys.stderr)
+        print("usage: python -m ingest.fetch <source or set>", file=sys.stderr)
         return 2
     try:
-        landed = fetch(argv[0], landing_path())
+        landed = (fetch_set if argv[0] in SET_STEPS else fetch)(argv[0], landing_path())
     except FetchError as error:
         print(f"fetch: {error}", file=sys.stderr)
         return 1
