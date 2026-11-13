@@ -51,6 +51,8 @@ make stack-up PROFILE=<name>  # plus one service
 make stack-down               # stop everything and drop its volumes
 ```
 
+The lab's GCP project comes only from `LEDGER_LAB_GCP_PROJECT`; `make cost-check` prints its month-to-date cost (with `LEDGER_LAB_BILLING_EXPORT` naming the billing export's `dataset.table`), and $0.00 without any GCP call while no project is set.
+
 ## Licence
 
 [MIT](LICENSE).

@@ -38,7 +38,8 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "S"]
 "tests/**" = ["S101", "S603"]
 
 [tool.pyright]
-include = ["tests"]
+include = ["tests", "platform"]
+extraPaths = ["platform"]
 pythonVersion = "3.13"
 typeCheckingMode = "standard"
 venvPath = "."
@@ -47,4 +48,6 @@ venv = ".venv"
 [tool.pytest.ini_options]
 addopts = ["-q", "--strict-markers", "--strict-config", "-ra"]
 testpaths = ["tests"]
+# platform/ holds scripts run by path; tests import them as top-level modules.
+pythonpath = ["platform"]
 xfail_strict = true
