@@ -1,9 +1,13 @@
 # Each source the fetch kit downloads: `uv run python -m ingest.fetch <name>`.
 # Validated by sources.schema.json. An entry, by name (also the landed file's name):
 #   <name>:
-#     url: https://...                  # a fixed file; or, for a live table:
-#     query: {url: https://..., order: {<param>: <value>}, cut_off: {<param>: <value>}}
-#     sha256: <SHA-256 of the publisher's raw response>
+#     url: https://...?format=csv       # a fixed file, its query string sent as written; or:
+#     query:                            # a live table; fixed parameters (a row limit) in its url
+#       url: https://...?$limit=50000
+#       order: {<param>: <value>}
+#       cut_off: {<param>: <value>}
+#     sha256: <SHA-256 of the bytes the publisher serves, undecoded>
 #     licence: https://...              # the licence, confirmed on the source's issue
 #     publisher: <who publishes it>
+#     names_people: false               # true: lands only through the source's step
 sources: {}

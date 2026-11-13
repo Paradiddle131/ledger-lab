@@ -1,10 +1,12 @@
 """The fetch kit lands only bytes that match the recorded SHA-256, from a local HTTP server."""
 
+import gzip
 import hashlib
 import json
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,14 +21,16 @@ from jsonschema import Draft202012Validator
 from ingest import fetch
 
 FILE = b"id,amount\n1,10.00\n2,-3.50\n"
+GZIPPED = gzip.compress(FILE, mtime=0)
 LICENCE = "https://licence.example.org/open"
 
 
 class Site:
-    """A local HTTP server: fixed files, redirects, and one live table behind a query."""
+    """A local HTTP server: fixed files, redirects, one live table behind a query, a gzip-encoded
+    file, and a server that drips one byte at a time."""
 
     def __init__(self) -> None:
-        self.files: dict[str, bytes] = {"/file.csv": FILE}
+        self.files: dict[str, bytes] = {"/file.csv": FILE, "/encoded.csv": GZIPPED}
         self.redirects: dict[str, str] = {"/moved.csv": "/file.csv"}
         self.table: list[tuple[int, str]] = [(2, "-3.50"), (1, "10.00"), (3, "7.25")]
         self.requests: list[dict[str, Any]] = []
@@ -46,13 +50,30 @@ class Site:
                 body = site.files.get(url.path)
                 if url.path == "/table":
                     body = site.query(parse_qs(url.query))
+                if url.path == "/drip":
+                    self.drip()
+                    return
                 if body is None:
                     self.send_error(404)
                     return
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
+                if url.path == "/encoded.csv":
+                    self.send_header("Content-Encoding", "gzip")
                 self.end_headers()
                 self.wfile.write(body)
+
+            def drip(self) -> None:
+                self.send_response(200)
+                self.send_header("Content-Length", "1000")
+                self.end_headers()
+                try:
+                    for _ in range(1000):
+                        self.wfile.write(b"x")
+                        self.wfile.flush()
+                        time.sleep(0.02)
+                except OSError:
+                    pass
 
             def log_message(self, format: str, *args: Any) -> None:
                 pass
@@ -61,13 +82,15 @@ class Site:
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
 
     def query(self, params: dict[str, list[str]]) -> bytes:
-        """The table as a portal serves it: in the asked order, up to the asked cut-off."""
+        """The table as a portal serves it: in the asked order, up to the asked cut-off, and only
+        a default first page of two rows unless a limit is asked."""
         rows = list(self.table)
         if params.get("$order") == ["id"]:
             rows.sort()
         if "$where" in params:
             cut_off = int(params["$where"][0].removeprefix("id <= "))
             rows = [row for row in rows if row[0] <= cut_off]
+        rows = rows[: int(params.get("$limit", ["2"])[0])]
         return ("id,amount\n" + "".join(f"{i},{a}\n" for i, a in rows)).encode()
 
 
@@ -106,7 +129,14 @@ def sha256(data: bytes) -> str:
 
 
 def entry(url: str, digest: str, **extra: Any) -> dict[str, Any]:
-    return {"url": url, "sha256": digest, "licence": LICENCE, "publisher": "Example", **extra}
+    return {
+        "url": url,
+        "sha256": digest,
+        "licence": LICENCE,
+        "publisher": "Example",
+        "names_people": False,
+        **extra,
+    }
 
 
 def everything_under(path: Path) -> list[Path]:
@@ -231,13 +261,14 @@ TABLE_AT_CUT_OFF = b"id,amount\n1,10.00\n2,-3.50\n3,7.25\n"
 def pinned_query(site: Site, digest: str) -> dict[str, Any]:
     return {
         "query": {
-            "url": f"{site.base}/table",
+            "url": f"{site.base}/table?$limit=50000",
             "order": {"$order": "id"},
             "cut_off": {"$where": "id <= 3"},
         },
         "sha256": digest,
         "licence": LICENCE,
         "publisher": "Example",
+        "names_people": False,
     }
 
 
@@ -246,7 +277,11 @@ def test_a_pinned_query_asks_for_its_order_and_cut_off(
 ) -> None:
     write_sources(table=pinned_query(site, sha256(TABLE_AT_CUT_OFF)))
     assert fetch.fetch("table", landing).read_bytes() == TABLE_AT_CUT_OFF
-    assert site.requests[0]["query"] == {"$order": ["id"], "$where": ["id <= 3"]}
+    assert site.requests[0]["query"] == {
+        "$limit": ["50000"],
+        "$order": ["id"],
+        "$where": ["id <= 3"],
+    }
 
 
 def test_a_pinned_query_repeats_while_the_live_table_grows(
@@ -311,6 +346,123 @@ def test_a_source_step_never_runs_on_unverified_bytes(
     with pytest.raises(fetch.ChecksumMismatchError):
         fetch.fetch("payments", landing)
     assert seen == []
+    assert everything_under(landing) == []
+
+
+def test_a_url_keeps_its_own_query_string(
+    site: Site, landing: Path, write_sources: Callable[..., Path]
+) -> None:
+    site.files["/plain"] = FILE
+    write_sources(payments=entry(f"{site.base}/plain?format=csv&limit=5", sha256(FILE)))
+    fetch.fetch("payments", landing)
+    assert site.requests[0]["query"] == {"format": ["csv"], "limit": ["5"]}
+
+
+def test_the_checksum_is_over_the_bytes_the_publisher_serves(
+    site: Site, landing: Path, write_sources: Callable[..., Path]
+) -> None:
+    write_sources(payments=entry(f"{site.base}/encoded.csv", sha256(GZIPPED)))
+    assert fetch.fetch("payments", landing).read_bytes() == GZIPPED
+    assert site.requests[0]["headers"]["Accept-Encoding"] == "identity"
+
+
+def test_a_source_that_names_people_without_a_step_is_refused_before_any_request(
+    site: Site, landing: Path, write_sources: Callable[..., Path]
+) -> None:
+    write_sources(payees=entry(f"{site.base}/file.csv", sha256(FILE), names_people=True))
+    with pytest.raises(fetch.SourcesError, match="payees names people but has no step"):
+        fetch.fetch("payees", landing)
+    assert site.requests == []
+    assert everything_under(landing) == []
+
+
+def test_a_source_that_names_people_lands_only_its_step_output(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(fetch.STEPS, "payees", lambda raw: raw.upper())
+    write_sources(payees=entry(f"{site.base}/file.csv", sha256(FILE), names_people=True))
+    assert fetch.fetch("payees", landing).read_bytes() == FILE.upper()
+
+
+def test_an_entry_must_say_whether_it_names_people(
+    site: Site, landing: Path, write_sources: Callable[..., Path]
+) -> None:
+    unsaid = entry(f"{site.base}/file.csv", sha256(FILE))
+    del unsaid["names_people"]
+    write_sources(payments=unsaid)
+    with pytest.raises(fetch.SourcesError, match="names_people"):
+        fetch.fetch("payments", landing)
+    assert site.requests == []
+
+
+def test_a_failing_step_is_reported_by_source_without_its_data(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def broken(raw: bytes) -> bytes:
+        raise ValueError(f"cannot parse row {raw!r}")
+
+    monkeypatch.setenv("LEDGER_LAB_LANDING", str(landing))
+    monkeypatch.setitem(fetch.STEPS, "payments", broken)
+    write_sources(payments=entry(f"{site.base}/file.csv", sha256(FILE)))
+    assert fetch.main(["payments"]) == 1
+    err = capsys.readouterr().err
+    assert "payments: its step failed (ValueError)" in err
+    assert "10.00" not in err
+    with pytest.raises(fetch.FetchError) as raised:
+        fetch.fetch("payments", landing)
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__
+    assert everything_under(landing) == []
+
+
+def test_a_failed_write_leaves_no_partial_file_and_reports_it(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    in_the_way = landing / "payments"
+    (in_the_way / "occupied").mkdir(parents=True)
+    monkeypatch.setenv("LEDGER_LAB_LANDING", str(landing))
+    write_sources(payments=entry(f"{site.base}/file.csv", sha256(FILE)))
+    assert fetch.main(["payments"]) == 1
+    assert "payments: cannot write" in capsys.readouterr().err
+    assert everything_under(landing) == [in_the_way, in_the_way / "occupied"]
+
+
+def test_a_response_over_the_byte_cap_fails_and_keeps_nothing(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fetch, "MAX_BYTES", len(FILE) - 1)
+    write_sources(payments=entry(f"{site.base}/file.csv", sha256(FILE)))
+    with pytest.raises(fetch.FetchError, match="more than"):
+        fetch.fetch("payments", landing)
+    assert everything_under(landing) == []
+
+
+def test_a_slow_drip_server_fails_at_the_deadline(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fetch, "DEADLINE", 0.3)
+    write_sources(payments=entry(f"{site.base}/drip", sha256(FILE)))
+    started = time.monotonic()
+    with pytest.raises(fetch.FetchError, match="deadline"):
+        fetch.fetch("payments", landing)
+    assert time.monotonic() - started < 2
     assert everything_under(landing) == []
 
 

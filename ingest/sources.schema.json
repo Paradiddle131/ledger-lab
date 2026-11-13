@@ -23,28 +23,38 @@
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sha256", "licence", "publisher"],
+        "required": ["sha256", "licence", "publisher", "names_people"],
         "oneOf": [{"required": ["url"]}, {"required": ["query"]}],
         "properties": {
-          "url": {"$ref": "#/$defs/link", "description": "A fixed file, fetched as published."},
+          "url": {
+            "$ref": "#/$defs/link",
+            "description": "A fixed file, fetched as published; its query string is sent as written."
+          },
           "query": {
             "description": "A live table, pinned to an ordered query with a cut-off so a re-fetch returns the same bytes.",
             "type": "object",
             "additionalProperties": false,
             "required": ["url", "order", "cut_off"],
             "properties": {
-              "url": {"$ref": "#/$defs/link"},
+              "url": {
+                "$ref": "#/$defs/link",
+                "description": "The table's endpoint; fixed parameters such as a row limit go in its query string, which the order and cut-off join."
+              },
               "order": {"$ref": "#/$defs/one_parameter"},
               "cut_off": {"$ref": "#/$defs/one_parameter"}
             }
           },
           "sha256": {
-            "description": "SHA-256 of the publisher's raw response, before any step of the source runs.",
+            "description": "SHA-256 of the bytes the publisher serves (no content decoding), before any step of the source runs.",
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"
           },
           "licence": {"$ref": "#/$defs/link", "description": "Link to the publisher's licence."},
-          "publisher": {"$ref": "#/$defs/text"}
+          "publisher": {"$ref": "#/$defs/text"},
+          "names_people": {
+            "description": "Whether the source names individuals; one that does lands only through its step, never as published.",
+            "type": "boolean"
+          }
         }
       }
     }

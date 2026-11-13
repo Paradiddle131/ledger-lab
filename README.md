@@ -43,7 +43,7 @@ The dbt models build on DuckDB in the session by default; setting `LEDGER_LAB_GC
 uv run dbt build --project-dir models --profiles-dir models
 ```
 
-Each source is fetched by name from [`ingest/sources.yaml`](ingest/sources.yaml), which records its URL or pinned query, SHA-256, licence link and publisher; the file lands under `LEDGER_LAB_LANDING` (default `landing/`, outside git) only when its checksum matches, and the command exits non-zero otherwise:
+Each source is fetched by name from [`ingest/sources.yaml`](ingest/sources.yaml), which records its URL or pinned query, SHA-256, licence link, publisher and whether it names people; the file lands under `LEDGER_LAB_LANDING` (default `landing/`, outside git) only when its checksum matches, and the command exits non-zero otherwise:
 
 ```bash
 uv run python -m ingest.fetch <source>
