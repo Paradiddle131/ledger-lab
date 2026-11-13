@@ -8,6 +8,11 @@ variable "billing_account" {
   type        = string
 }
 
+variable "agent_account_id" {
+  description = "The account id (the part before the @) of the agent service account, the session's injected credential, created by hand in the lab project."
+  type        = string
+}
+
 variable "region" {
   description = "Where the regional pieces run: one of the regions Google's free tier names."
   type        = string

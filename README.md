@@ -62,7 +62,10 @@ The database password comes from `LEDGER_LAB_DB_PASSWORD` when it is set, else f
 After changing the password or the database list, run `make stack-down` first, because the server keeps what its volume was created with.
 
 The lab's GCP project comes only from `LEDGER_LAB_GCP_PROJECT`; `make cost-check` prints its month-to-date cost (with `LEDGER_LAB_BILLING_EXPORT` naming the billing export's `dataset.table`) and each spend fence's state, read live, and fails above $0.00 or on a loose fence; it prints $0.00 without any GCP call while no project is set.
-The project's spend fences live in `platform/gcp/` as OpenTofu definitions; `make fences-validate` installs the pinned OpenTofu and validates them offline, and only the owner applies them.
+The project's spend fences, one service account per persona, the agent account's right to mint their tokens and the landing bucket live in `platform/gcp/` as OpenTofu definitions; `make fences-validate` installs the pinned OpenTofu and validates them offline, and only the owner applies them.
+Applying takes the project, the billing account and the agent account's id as variables (`-var project=... -var billing_account=... -var agent_account_id=...`); the agent account itself is made by hand and only referenced.
+Before applying, the owner enables the Service Account Credentials API (`gcloud services enable iamcredentials.googleapis.com`), which minting a persona's token needs and which the agent cannot enable itself.
+Each persona account's id is its id in `access/personas.yaml`, so renaming or removing a persona there deletes that account at the next apply, and a rename creates a new one in its place.
 
 ## Licence
 

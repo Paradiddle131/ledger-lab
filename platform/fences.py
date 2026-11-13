@@ -46,11 +46,22 @@ def blocks(kind: str) -> dict[tuple[str, str], dict[str, Any]]:
 
 
 def one(rtype: str) -> dict[str, Any]:
-    """The only resource of a type; raises when there is none or several."""
+    """The only resource of a type, declared once; raises when there is none or several, or when
+    `count` or `for_each` multiplies it."""
     matches = [body for (t, _), body in blocks("resource").items() if t == rtype]
     if len(matches) != 1:
         raise LookupError(f"{rtype}: {len(matches)} declared, expected one")
+    if {"count", "for_each"} & set(matches[0]):
+        raise LookupError(f"{rtype}: multiplied by count or for_each, expected one")
     return matches[0]
+
+
+def local(name: str) -> Any:
+    """A local value's expression; raises when no `locals` block or several define it."""
+    values = [entry[name] for entry in CONFIG.get("locals", []) if name in entry]
+    if len(values) != 1:
+        raise LookupError(f"local.{name}: {len(values)} defined, expected one")
+    return values[0]
 
 
 def variable(name: str) -> dict[str, Any]:
@@ -134,7 +145,9 @@ def declared() -> Declared:
         query_cap_mib=int(unquote(quota["override_value"])),
         workflow=unquote(workflow["name"]),
         workflow_source=WORKFLOW_SOURCE.read_text(),
-        kill_switch_account=unquote(one("google_service_account")["account_id"]),
+        kill_switch_account=unquote(
+            blocks("resource")[("google_service_account", "kill_switch")]["account_id"]
+        ),
         kill_threshold_bounds=_bounds(threshold_check["condition"], "kill_threshold"),
         trigger=unquote(trigger["name"]),
         trigger_event_type=unquote(criterion["value"]),

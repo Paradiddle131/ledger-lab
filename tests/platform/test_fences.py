@@ -1,4 +1,5 @@
-"""The lab project's spend fences, read offline from their definitions, sit inside the free tier.
+"""The lab project's definitions, read offline: the spend fences sit inside the free tier, and the
+persona identities, their token grants and the landing bucket give the agent nothing that moves one.
 
 Nothing here plans, applies or calls GCP; `make fences-validate` checks the same files with
 OpenTofu.
@@ -10,12 +11,13 @@ from typing import Any
 
 import pytest
 import yaml
-from fences import CONFIG, GCP, blocks, declared, one, unquote, variable
+from fences import CONFIG, GCP, blocks, declared, local, one, unquote, variable
 
+REPO = GCP.parents[1]
 QUOTA = "google_service_usage_consumer_quota_override"
 FREE_REGIONS = {"us-west1", "us-central1", "us-east1"}
 FREE_MONTHLY_QUERY_MIB = 1024 * 1024  # 1 TiB
-# Every resource type the fences may declare; none of them bills inside the free tier.
+# Every resource type the definitions may declare; none of them bills inside the free tier.
 ALLOWED = {
     "google_billing_budget",
     "google_pubsub_topic",
@@ -24,13 +26,29 @@ ALLOWED = {
     "google_project_iam_member",
     "google_workflows_workflow",
     "google_eventarc_trigger",
+    "google_service_account_iam_member",
+    "google_storage_bucket",
+    "google_storage_bucket_iam_member",
 }
+# A service account id: 6 to 30 characters, lowercase letters, digits and hyphens, from a letter.
+ACCOUNT_ID = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
+AGENT_MEMBER = "serviceAccount:${data.google_service_account.agent.email}"
 
 
 def test_only_allowlisted_resources_are_declared() -> None:
     declared = {rtype for rtype, _ in blocks("resource")}
     assert declared - ALLOWED == set()
     assert declared == ALLOWED, "a fence is missing"
+
+
+def test_no_module_is_used() -> None:
+    # A module's resources are invisible to these checks, so none may hide a grant or a resource.
+    assert "module" not in CONFIG
+
+
+def test_a_resource_read_as_single_refuses_count_and_for_each() -> None:
+    with pytest.raises(LookupError, match="multiplied"):
+        one("google_service_account_iam_member")
 
 
 def test_providers_are_pinned_exactly() -> None:
@@ -131,11 +149,11 @@ def test_the_budget_refuses_an_account_whose_unit_is_far_from_a_dollar() -> None
     (lifecycle,) = one("google_billing_budget")["lifecycle"]
     (check,) = lifecycle["precondition"]
     assert "local.dollar_like_currencies" in check["condition"]
-    (local,) = CONFIG["locals"]
-    assert {unquote(c) for c in local["dollar_like_currencies"]} == {"USD", "EUR", "GBP", "CHF"}
+    currencies = {unquote(c) for c in local("dollar_like_currencies")}
+    assert currencies == {"USD", "EUR", "GBP", "CHF"}
 
 
-@pytest.mark.parametrize("name", ["project", "billing_account"])
+@pytest.mark.parametrize("name", ["project", "billing_account", "agent_account_id"])
 def test_identifiers_come_from_variables_with_no_default(name: str) -> None:
     assert "default" not in variable(name)
 
@@ -159,3 +177,103 @@ def test_the_live_check_reads_its_expected_values_from_these_definitions() -> No
     assert expected.workflow_source == (GCP / "kill_switch.workflow.yaml").read_text()
     unresolved = [k for k, v in vars(expected).items() if k != "workflow_source" and "${" in str(v)]
     assert unresolved == []
+
+
+def persona_ids() -> list[str]:
+    personas = yaml.safe_load((REPO / "access/personas.yaml").read_text())["personas"]
+    return [p["id"] for p in personas]
+
+
+def test_every_persona_id_is_a_valid_service_account_id() -> None:
+    assert [i for i in persona_ids() if not ACCOUNT_ID.fullmatch(i)] == []
+
+
+# The persona accounts' ids come from the persona file itself, keyed by id, so the list is never
+# written twice.
+PERSONAS_FROM_FILE = re.compile(
+    r"\$\{\{for (\w+) in "
+    r'yamldecode\(file\("\$\{path\.module\}/\.\./\.\./access/personas\.yaml"\)\)\.personas'
+    r" : \1\.id => \1\.name\}\}"
+)
+
+
+def test_one_service_account_per_persona_and_no_more() -> None:
+    accounts = {
+        name: body
+        for (rtype, name), body in blocks("resource").items()
+        if rtype == "google_service_account"
+    }
+    assert set(accounts) == {"kill_switch", "persona"}
+    persona = accounts["persona"]
+    assert persona["for_each"] == "${local.personas}"
+    assert persona["account_id"] == "${each.key}"
+    assert PERSONAS_FROM_FILE.fullmatch(local("personas"))
+    # The live check names the kill switch's account, never a persona's.
+    kill_switch = unquote(accounts["kill_switch"]["account_id"])
+    assert declared().kill_switch_account == kill_switch
+    assert kill_switch not in persona_ids()
+
+
+def test_the_agent_account_is_referenced_by_a_variable_never_managed_here() -> None:
+    agent = blocks("data")[("google_service_account", "agent")]
+    assert agent["account_id"] == "${var.agent_account_id}"
+
+
+def attributes(body: dict[str, Any]) -> set[str]:
+    return set(body) - {"__is_block__"}
+
+
+def test_only_the_agent_mints_tokens_and_only_for_persona_accounts() -> None:
+    grants = [
+        b for (t, _), b in blocks("resource").items() if t == "google_service_account_iam_member"
+    ]
+    assert len(grants) == 1
+    (grant,) = grants
+    assert attributes(grant) == {"for_each", "service_account_id", "role", "member"}
+    assert grant["for_each"] == "${google_service_account.persona}"
+    assert grant["service_account_id"] == "${each.value.name}"
+    assert unquote(grant["role"]) == "roles/iam.serviceAccountTokenCreator"
+    assert unquote(grant["member"]) == AGENT_MEMBER
+
+
+def test_no_project_level_role_reaches_anyone_but_the_kill_switch() -> None:
+    members = [
+        unquote(body["member"])
+        for (rtype, _), body in blocks("resource").items()
+        if rtype == "google_project_iam_member"
+    ]
+    assert members, "the kill switch's roles are project-level"
+    assert set(members) == {"serviceAccount:${google_service_account.kill_switch.email}"}
+
+
+def test_the_landing_bucket_is_free_tier_standard_private_and_named_from_the_project() -> None:
+    bucket = one("google_storage_bucket")
+    # Exactly these settings: autoclass, a lifecycle rule, a customer key, logging, a retention
+    # lock or versioning could each move the bucket off the free allowance or out of reach.
+    assert attributes(bucket) == {
+        "name",
+        "location",
+        "storage_class",
+        "uniform_bucket_level_access",
+        "public_access_prevention",
+        "soft_delete_policy",
+    }
+    (soft_delete,) = bucket["soft_delete_policy"]
+    assert attributes(soft_delete) == {"retention_duration_seconds"}
+    assert bucket["location"] == "${var.region}"
+    assert unquote(bucket["storage_class"]) == "STANDARD"
+    assert bucket["uniform_bucket_level_access"] is True
+    assert unquote(bucket["public_access_prevention"]) == "enforced"
+    assert unquote(bucket["name"]).startswith("${var.project}")
+    # Soft-deleted bytes bill as storage: keeping none leaves only live objects on the allowance.
+    assert soft_delete["retention_duration_seconds"] == 0
+
+
+def test_the_only_grant_declared_on_the_landing_bucket_is_the_agents_object_rights() -> None:
+    # Cloud Storage's default bindings still give the project's viewers, editors and owners their
+    # legacy bucket roles; this configuration adds only the agent's.
+    access = one("google_storage_bucket_iam_member")
+    assert attributes(access) == {"bucket", "role", "member"}
+    assert access["bucket"] == "${google_storage_bucket.landing.name}"
+    assert unquote(access["role"]) == "roles/storage.objectUser"
+    assert unquote(access["member"]) == AGENT_MEMBER
