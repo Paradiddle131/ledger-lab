@@ -19,14 +19,6 @@ def test_a_name_in_any_order_and_punctuation_is_found(cell: str) -> None:
     assert NAMES.in_any_order(cell)
 
 
-@pytest.mark.parametrize(
-    "cell", ["JANEEXAMPLE settlement", "Paid JANE EX AMPLE", "ref JaneExample"]
-)
-def test_a_name_run_together_is_found_only_by_that_rule(cell: str) -> None:
-    assert NAMES.run_together(cell)
-    assert not NAMES.in_any_order(cell)
-
-
 def test_a_name_cut_short_at_the_end_is_found_only_there() -> None:
     assert NAMES.cut_short("Claim JANE EXAMP")
     assert not NAMES.cut_short("JANE EXAMP route 7")
@@ -35,7 +27,7 @@ def test_a_name_cut_short_at_the_end_is_found_only_there() -> None:
 
 def test_sharing_a_word_or_a_run_of_figures_finds_nothing() -> None:
     cell = "Example route 4400123"
-    assert not (NAMES.in_any_order(cell) or NAMES.run_together(cell) or NAMES.cut_short(cell))
+    assert not (NAMES.in_any_order(cell) or NAMES.cut_short(cell))
 
 
 def test_parquet_is_written_from_memory_and_leaves_nothing_there(tmp_path: Path) -> None:

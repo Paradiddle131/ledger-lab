@@ -18,7 +18,7 @@ import yaml
 from conftest import REPO, load_checked
 from jsonschema import Draft202012Validator
 
-from ingest import fetch
+from ingest import StepError, fetch
 
 FILE = b"id,amount\n1,10.00\n2,-3.50\n"
 GZIPPED = gzip.compress(FILE, mtime=0)
@@ -613,6 +613,42 @@ def test_a_set_member_whose_download_is_cut_short_lands_on_the_retry(
     assert [r["path"] for r in site.requests] == ["/file.csv", "/cut.csv", "/cut.csv"]
 
 
+def test_a_set_whose_members_share_a_url_is_refused_before_any_request(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(fetch.SET_STEPS, "spend", lambda files: b"".join(files.values()))
+    write_sources(
+        **{
+            "spend-1": entry(f"{site.base}/file.csv", sha256(FILE)),
+            "spend-2": entry(f"{site.base}/file.csv", sha256(FILE)),
+        }
+    )
+    with pytest.raises(fetch.SourcesError, match="spend-1 and spend-2 share one URL"):
+        fetch.fetch_set("spend", landing)
+    assert site.requests == []
+
+
+def test_a_steps_own_refusal_reaches_the_operator_by_its_message(
+    site: Site,
+    landing: Path,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def refuse(files: dict[str, bytes]) -> bytes:
+        raise StepError("file.csv row 2: the amount is not a sum")
+
+    monkeypatch.setenv("LEDGER_LAB_LANDING", str(landing))
+    monkeypatch.setitem(fetch.SET_STEPS, "spend", refuse)
+    write_sources(**{"spend-1": entry(f"{site.base}/file.csv", sha256(FILE))})
+    assert fetch.main(["spend"]) == 1
+    assert "spend: file.csv row 2: the amount is not a sum" in capsys.readouterr().err
+    assert everything_under(landing) == []
+
+
 def test_a_set_with_one_drifted_member_lands_nothing_and_never_runs_its_step(
     site: Site,
     landing: Path,
@@ -624,7 +660,7 @@ def test_a_set_with_one_drifted_member_lands_nothing_and_never_runs_its_step(
     write_sources(
         **{
             "spend-1": entry(f"{site.base}/file.csv", sha256(FILE)),
-            "spend-2": entry(f"{site.base}/file.csv", sha256(b"drifted")),
+            "spend-2": entry(f"{site.base}/file.csv?copy=2", sha256(b"drifted")),
         }
     )
     with pytest.raises(fetch.ChecksumMismatchError, match="spend-2"):

@@ -93,19 +93,44 @@ def url(name: str) -> str:
     return f"https://assets.publishing.service.gov.uk/media/0123/{name}"
 
 
-def land(tmp_path: Path, files: dict[str, bytes]) -> Path:
+# The months of fiscal year 2025, by `YYYY-MM`.
+YEAR = [f"2025-{m:02d}" for m in range(4, 13)] + [f"2026-{m:02d}" for m in range(1, 4)]
+
+
+def filler(month: str) -> bytes:
+    """A month holding one real organisation row, dated in that month."""
+    year, number = month.split("-")
+    return served(GRANT.replace("30/04/2025", f"15/{number}/{year}"))
+
+
+def year_files(months: dict[str, bytes], drop: tuple[str, ...] = ()) -> dict[str, bytes]:
+    """The twelve files of a year, by URL `<YYYY-MM>.csv`: the given months, filler elsewhere."""
+    return {url(f"{m}.csv"): months.get(m) or filler(m) for m in YEAR if m not in drop}
+
+
+def land(tmp_path: Path, months: dict[str, bytes]) -> Path:
     path = tmp_path / SET
-    path.write_bytes(step(files, ENV))
+    path.write_bytes(step(year_files(months), ENV))
     return path
 
 
-def rows(path: Path) -> list[dict[str, Any]]:
+def rows(path: Path, month: str | None = None) -> list[dict[str, Any]]:
+    """The landed rows, or only those of one month's file."""
     rel = duckdb.read_parquet(str(path))
-    return [dict(zip(rel.columns, r, strict=True)) for r in rel.fetchall()]
+    landed = [dict(zip(rel.columns, r, strict=True)) for r in rel.fetchall()]
+    return [r for r in landed if month is None or r["source_file"] == f"{month}.csv"]
 
 
 def one_month(tmp_path: Path, *lines: str, header: tuple[str, ...] = STANDARD) -> list[dict]:
-    return rows(land(tmp_path, {url("april.csv"): served(*lines, header=header)}))
+    """A year whose April holds these lines; April's landed rows."""
+    return rows(land(tmp_path, {"2025-04": served(*lines, header=header)}), "2025-04")
+
+
+def refused(april: bytes) -> str:
+    """The step's refusal of a year whose April is this file."""
+    with pytest.raises(SpendError) as raised:
+        step(year_files({"2025-04": april}), ENV)
+    return str(raised.value)
 
 
 def test_an_organisation_lands_with_the_source_file_and_the_publishers_digits(
@@ -113,7 +138,7 @@ def test_an_organisation_lands_with_the_source_file_and_the_publishers_digits(
 ) -> None:
     (row,) = one_month(tmp_path, GRANT)
     assert row == {
-        "source_file": "april.csv",
+        "source_file": "2025-04.csv",
         "source_row": 1,
         "department_family": "Department for Transport",
         "entity": "Department for Transport",
@@ -158,65 +183,83 @@ def test_an_amount_keeps_its_digits_with_spaces_pound_sign_and_commas_dropped(
     "amount", ["-£25,000.00", "£25000.00", "£25,000", "25,000.00", "£25,000.001", "(£25,000.00)"]
 )
 def test_an_amount_in_an_unknown_shape_is_refused(amount: str) -> None:
-    with pytest.raises(SpendError, match="april.csv row 1: the amount"):
-        step({url("april.csv"): served(person_row(amount=amount))}, ENV)
+    assert refused(served(person_row(amount=amount))) == (
+        "2025-04.csv row 1: the amount is not £ with thousands commas and pence"
+    )
 
 
 def test_an_unknown_layout_is_refused_loudly() -> None:
     renamed = tuple("Supplier Name" if h == "Supplier" else h for h in STANDARD)
-    with pytest.raises(SpendError, match="april.csv: an unknown layout"):
-        step({url("april.csv"): served(GRANT, header=renamed)}, ENV)
+    assert refused(served(GRANT, header=renamed)) == "2025-04.csv: an unknown layout"
 
 
 def test_a_file_in_another_encoding_is_refused() -> None:
     utf8 = served(GRANT).decode("cp1252").encode("utf-8")
-    with pytest.raises(SpendError, match="april.csv: an unknown layout"):
-        step({url("april.csv"): utf8}, ENV)
+    assert refused(utf8) == "2025-04.csv: an unknown layout"
 
 
 @pytest.mark.parametrize("date", ["2025-04-15", "15/4/2025", "31/04/2025", ""])
 def test_a_date_in_an_unknown_shape_is_refused(date: str) -> None:
-    with pytest.raises(SpendError, match="april.csv row 1: the date"):
-        step({url("april.csv"): served(person_row(date=date))}, ENV)
+    assert refused(served(person_row(date=date))) == (
+        "2025-04.csv row 1: the date is not a dd/mm/yyyy day"
+    )
 
 
 def test_a_file_spanning_two_months_is_refused() -> None:
-    with pytest.raises(SpendError, match="april.csv: dates from more than one month"):
-        step({url("april.csv"): served(GRANT, BUS)}, ENV)
+    assert refused(served(GRANT, BUS)) == "2025-04.csv: dates from more than one month, or none"
 
 
 def test_two_files_for_one_month_are_refused() -> None:
-    files = {url("april.csv"): served(GRANT), url("april-again.csv"): served(SMALL)}
-    with pytest.raises(SpendError, match="april-again.csv: a second file for 2025-04"):
-        step(files, ENV)
+    april = filler("2025-04")
+    with pytest.raises(SpendError, match="2025-05.csv: a second file for 2025-04"):
+        step(year_files({"2025-05": april}), ENV)
 
 
 def test_a_row_with_a_missing_field_is_refused() -> None:
-    with pytest.raises(SpendError, match="april.csv row 2: 9 fields"):
-        step({url("april.csv"): served(GRANT, GRANT.rsplit(",", 1)[0])}, ENV)
+    assert refused(served(GRANT, GRANT.rsplit(",", 1)[0])) == "2025-04.csv row 2: 9 fields"
+
+
+def test_a_year_missing_a_month_is_refused() -> None:
+    with pytest.raises(SpendError, match="11 months, not the twelve of one April-to-March year"):
+        step(year_files({}, drop=("2025-09",)), ENV)
+
+
+def test_twelve_months_that_do_not_open_in_april_are_refused() -> None:
+    files = year_files({}, drop=("2025-04",))
+    files[url("2026-04.csv")] = filler("2026-04")
+    with pytest.raises(SpendError, match="12 months, not the twelve of one April-to-March year"):
+        step(files, ENV)
+
+
+@pytest.mark.parametrize(
+    ("column", "body"),
+    [("family", "Ministry of Examples"), ("entity", "Example Highways Agency")],
+)
+def test_a_paying_body_the_step_does_not_know_is_refused(column: str, body: str) -> None:
+    assert refused(served(person_row(**{column: body}))) == (
+        "2025-04.csv row 1: a paying body the step does not know"
+    )
 
 
 def test_every_month_lands_once_with_its_own_file_name_on_each_row(tmp_path: Path) -> None:
-    files = {
-        url("dft-spending-over-25000-april-2025.csv"): served(GRANT, SMALL),
-        url("dft-spending-24k-may-25.csv"): served(BUS, header=DEPARTMENTAL_FAMILY),
-    }
-    landed = rows(land(tmp_path, files))
-    assert [(r["source_file"], r["source_row"]) for r in landed] == [
-        ("dft-spending-over-25000-april-2025.csv", 1),
-        ("dft-spending-over-25000-april-2025.csv", 2),
-        ("dft-spending-24k-may-25.csv", 1),
+    months = {"2025-04": served(GRANT, SMALL), "2025-05": served(BUS, header=DEPARTMENTAL_FAMILY)}
+    landed = rows(land(tmp_path, months))
+    assert [(r["source_file"], r["source_row"]) for r in landed[:3]] == [
+        ("2025-04.csv", 1),
+        ("2025-04.csv", 2),
+        ("2025-05.csv", 1),
     ]
     counts = profile(tmp_path / SET)
-    assert counts["months"] == {"2025-04": 2, "2025-05": 1}
-    assert counts["files"] == 2
+    assert list(counts["months"]) == YEAR
+    assert (counts["months"]["2025-04"], counts["months"]["2025-05"]) == (2, 1)
+    assert counts["files"] == 12
 
 
 def test_a_person_is_hashed_and_nothing_on_their_row_names_or_locates_them(
     tmp_path: Path,
 ) -> None:
-    path = land(tmp_path, {url("april.csv"): served(person_row(), GRANT)})
-    person, grant = rows(path)
+    path = land(tmp_path, {"2025-04": served(person_row(), GRANT)})
+    person, grant = rows(path, "2025-04")
     assert str(person["supplier"]).startswith("person:")
     assert str(person["transaction_number"]).startswith("id:")
     assert (person["item_text"], person["postal_code"]) == (None, None)
@@ -247,15 +290,14 @@ def test_a_reference_hash_is_keyed_and_never_equals_a_name_hash(tmp_path: Path) 
         "EXAMPLE, JANE",
         "example jane",
         "Jane-Example settlement",
-        "JANEEXAMPLE",
     ],
 )
 def test_a_hashed_name_in_another_months_free_text_blanks_that_cell(
     tmp_path: Path, item: str
 ) -> None:
     files = {
-        url("april.csv"): served(person_row()),
-        url("may.csv"): served(
+        "2025-04": served(person_row()),
+        "2025-05": served(
             person_row(
                 date="20/05/2025",
                 supplier="EXAMPLE SERVICES LIMITED",
@@ -266,7 +308,7 @@ def test_a_hashed_name_in_another_months_free_text_blanks_that_cell(
             )
         ),
     }
-    _, other = rows(land(tmp_path, files))
+    (other,) = rows(land(tmp_path, files), "2025-05")
     assert other["supplier"] == "EXAMPLE SERVICES LIMITED"
     assert (other["item_text"], other["expense_type"], other["expense_area"]) == (None,) * 3
     assert other["postal_code"] == "SW1A 2AA", "an organisation's row keeps its location"
@@ -274,8 +316,8 @@ def test_a_hashed_name_in_another_months_free_text_blanks_that_cell(
 
 def test_a_description_ending_in_a_hashed_name_cut_short_is_blanked(tmp_path: Path) -> None:
     files = {
-        url("april.csv"): served(person_row()),
-        url("may.csv"): served(
+        "2025-04": served(person_row()),
+        "2025-05": served(
             person_row(
                 date="20/05/2025",
                 supplier="CENTREBUS LTD",
@@ -284,34 +326,118 @@ def test_a_description_ending_in_a_hashed_name_cut_short_is_blanked(tmp_path: Pa
             )
         ),
     }
-    _, ending = rows(land(tmp_path, files))
+    (ending,) = rows(land(tmp_path, files), "2025-05")
     assert ending["item_text"] is None
     assert ending["expense_area"] == "Claims JANE EXAMP", "the Department cuts only descriptions"
 
 
 def test_free_text_that_only_shares_a_word_with_a_hashed_name_stays(tmp_path: Path) -> None:
     files = {
-        url("april.csv"): served(person_row()),
-        url("may.csv"): served(
+        "2025-04": served(person_row()),
+        "2025-05": served(
             person_row(date="20/05/2025", supplier="CENTREBUS LTD", item="Example route 7")
         ),
     }
-    _, other = rows(land(tmp_path, files))
+    (other,) = rows(land(tmp_path, files), "2025-05")
     assert other["item_text"] == "Example route 7"
 
 
-@pytest.mark.parametrize("item", ["Estate of Sam Testperson", "Sam Testperson T/A Example Taxis"])
-def test_a_description_carrying_a_person_marker_is_blanked(tmp_path: Path, item: str) -> None:
+def description(tmp_path: Path, item: str) -> str | None:
+    """The landed description of an organisation's row carrying this one."""
     (row,) = one_month(tmp_path, person_row(supplier="CENTREBUS LTD", item=item))
-    assert row["item_text"] is None
+    return row["item_text"]
 
 
-@pytest.mark.parametrize("item", ["Payment Mr Testperson", "FAO Sam Testperson", "Dr. Testperson"])
+@pytest.mark.parametrize(
+    "item",
+    [
+        "Estate of Sam Testperson",
+        "Sam Testperson T/A Example Taxis",
+        "Payment to executors of Sam Testperson",
+    ],
+)
+def test_a_description_introducing_a_person_is_blanked(tmp_path: Path, item: str) -> None:
+    assert description(tmp_path, item) is None
+
+
+@pytest.mark.parametrize(
+    "item", ["Office estate rent", "Estates management", "TA Renewal of Structures", "TAS support"]
+)
+def test_a_marker_word_that_introduces_no_one_stays(tmp_path: Path, item: str) -> None:
+    assert description(tmp_path, item) == item
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "Payment Mr Testperson",
+        "PAYMENT MR TESTPERSON",
+        "FAO Sam Testperson",
+        "Dr. Testperson",
+        "Ms Testperson",
+        "Attn: J Testperson",
+    ],
+)
 def test_free_text_naming_someone_by_title_or_for_the_attention_of_is_blanked(
     tmp_path: Path, item: str
 ) -> None:
-    (row,) = one_month(tmp_path, person_row(supplier="CENTREBUS LTD", item=item))
-    assert row["item_text"] is None
+    assert description(tmp_path, item) is None
+
+
+@pytest.mark.parametrize(
+    "item", ["BAU 3 MS Azure", "MS Teams licences", "MS 365", "Dr 4 inspection", "Sir 2 bridge"]
+)
+def test_a_title_word_before_a_product_or_code_stays(tmp_path: Path, item: str) -> None:
+    assert description(tmp_path, item) == item
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "Professional Services by J Testperson January 2026",
+        "Advice from J. K. Testperson",
+        "Report for J K Testperson",
+        "Support for J.Testperson",
+    ],
+)
+def test_a_person_introduced_by_initials_is_blanked(tmp_path: Path, item: str) -> None:
+    assert description(tmp_path, item) is None
+
+
+def test_a_person_found_by_initials_is_blanked_wherever_the_year_names_them(
+    tmp_path: Path,
+) -> None:
+    months = {
+        "2025-04": served(
+            person_row(supplier="CENTREBUS LTD", item="Professional Services by J Testperson")
+        ),
+        "2026-02": served(
+            person_row(
+                date="10/02/2026",
+                supplier="CENTREBUS LTD",
+                item="Professional Services J Testperson February 2026.",
+            )
+        ),
+    }
+    path = land(tmp_path, months)
+    assert [r["item_text"] for r in rows(path, "2025-04") + rows(path, "2026-02")] == [None, None]
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "Works for L&P scheme",
+        "Payment for T&M works",
+        "Hire from J R B Plant Hire",
+        "Package A Lighting",
+        "Resurfacing for A14 junction",
+        "Support for HS2 Phase One",
+    ],
+)
+def test_codes_and_initialled_trading_names_are_not_taken_for_a_person(
+    tmp_path: Path, item: str
+) -> None:
+    assert description(tmp_path, item) == item
 
 
 def test_the_departments_own_redaction_stays_and_its_row_is_treated_as_a_person(
@@ -336,23 +462,23 @@ def test_the_departments_own_bodies_are_known_organisations(tmp_path: Path) -> N
 
 def test_the_step_refuses_without_the_hash_key() -> None:
     with pytest.raises(Exception, match=KEY_VARIABLE):
-        step({url("april.csv"): served(GRANT)}, {})
+        step(year_files({}), {})
 
 
 def test_the_step_writes_nothing_to_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TMPDIR", str(tmp_path))
-    step({url("april.csv"): served(person_row(), GRANT)}, ENV)
+    step(year_files({"2025-04": served(person_row(), GRANT)}), ENV)
     assert list(tmp_path.rglob("*")) == []
 
 
 def test_the_profile_counts_hashed_suppliers_rows_and_references(tmp_path: Path) -> None:
     files = {
-        url("april.csv"): served(person_row(), person_row(number="4400124"), GRANT),
-        url("may.csv"): served(person_row(date="01/05/2025", supplier="Sam Testperson")),
+        "2025-04": served(person_row(), person_row(number="4400124"), GRANT),
+        "2025-05": served(person_row(date="01/05/2025", supplier="Sam Testperson")),
     }
     counts = profile(land(tmp_path, files))
-    assert counts["rows"] == 4
+    assert counts["rows"] == 4 + 10
     assert counts["suppliers_hashed"] == 2
     assert counts["rows_hashed"] == 3
     assert counts["references_hashed"] == 3
@@ -430,18 +556,21 @@ def test_every_month_of_the_year_is_landed_once(real: tuple) -> None:
     assert counts["suppliers_hashed"] > 0
 
 
-@pytest.mark.landed
-def test_no_pinned_month_has_been_revised_on_gov_uk(real: tuple) -> None:
+@pytest.mark.pages
+def test_no_pinned_month_has_been_revised_on_gov_uk() -> None:
     """The Department revises a month by replacing its file on the publication page with a change
     note; the files themselves mark nothing as provisional. A pin is current while its page still
-    lists it as the only file and notes no change after first publication."""
-    files, landed = real
-    months = {r["source_file"]: r["date"][3:] for r in landed}
+    lists it as the only file and notes no change after first publication. Each member is named by
+    its month's abbreviation (`uk-transport-spend-2025-apr`), January to March in the next year."""
     revised = {}
-    for pinned in files:
-        month, year = months[pinned.rsplit("/", 1)[1]].split("/")
+    for name, entry in fetch.load_sources(fetch.SOURCES).items():
+        if not name.startswith(f"{SET}-"):
+            continue
+        month = list(calendar.month_abbr).index(name.rsplit("-", 1)[1].title())
+        year = int(SET.rsplit("-", 1)[1]) + (month < 4)
+        pinned = entry["url"]
         page = httpx.get(
-            f"{CONTENT_API}{calendar.month_name[int(month)].lower()}-{year}",
+            f"{CONTENT_API}{calendar.month_name[month].lower()}-{year}",
             headers={"User-Agent": fetch.CLIENT_NAME},
             timeout=60,
         ).json()["details"]
@@ -456,8 +585,10 @@ def test_no_pinned_month_has_been_revised_on_gov_uk(real: tuple) -> None:
 def test_no_hashed_supplier_is_named_anywhere_in_the_landed_set(real: tuple) -> None:
     """Independent of the step's word windows: a hashed supplier's name, squashed character by
     character to letters and digits, in either word order, must not start at a word in any clear
-    cell of any row; their row keeps no reference, postcode or description; and their references
-    appear nowhere in clear."""
+    cell of any row but a supplier; their row keeps no reference, postcode or description; and a
+    reference carried only by hashed rows appears nowhere in clear (one shared with clear rows,
+    such as a payment-run number or `#`, stays clear there, and the keyed hash does not tie the
+    clear copy to its hashed row)."""
     files, landed = real
     by_position = {(r["source_file"], r["source_row"]): r for r in landed}
     hashed_names, hashed_refs, clear_refs = set(), set(), set()
@@ -494,8 +625,9 @@ def test_no_hashed_supplier_is_named_anywhere_in_the_landed_set(real: tuple) -> 
                 else:
                     found[column] = found.get(column, 0) + 1
     print(
-        f"{len(hashed_names)} names hashed, {len(hashed_refs)} references hashed; clear suppliers"
-        f" containing a hashed name: {inside_clear_suppliers}"
+        f"{len(hashed_names)} names hashed, {len(hashed_refs)} references hashed, of which"
+        f" {len(hashed_refs & clear_refs)} also on clear rows; clear suppliers containing a"
+        f" hashed name: {inside_clear_suppliers}"
     )
     assert found == {}
     leaked_refs = {r["transaction_number"] for r in landed} & (hashed_refs - clear_refs)

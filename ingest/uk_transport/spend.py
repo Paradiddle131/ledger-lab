@@ -57,18 +57,39 @@ from urllib.parse import urlsplit
 
 import duckdb
 
+from ingest import StepError
 from ingest.individuals import (
     hash_key,
     identifier_hasher,
+    introduces_a_person,
     is_organisation,
-    marks_a_person,
     normalise,
     person_hasher,
 )
-from ingest.scrub import HashedNames, parquet_from_csv, words
+from ingest.scrub import HashedNames, parquet_from_csv
 
-# The set's name in the fetch kit: fiscal year 2025, April 2025 to March 2026.
-SET = "uk-transport-spend-2025"
+# The fiscal year the set lands, labelled by the year it opens in: April 2025 to March 2026.
+FISCAL_YEAR = 2025
+SET = f"uk-transport-spend-{FISCAL_YEAR}"
+MONTHS = [f"{FISCAL_YEAR}-{m:02d}" for m in range(4, 13)] + [
+    f"{FISCAL_YEAR + 1}-{m:02d}" for m in range(1, 4)
+]
+# The Department's family and the paying bodies in its files, as it spells them: the only values
+# the two columns may hold, and the names the classifier knows as organisations.
+FAMILY = "Department for Transport"
+BODIES = (
+    "Department for Transport",
+    "National Highways",
+    "High Speed Two (HS2) Limited",
+    "Driver & Vehicle Licensing Agency",
+    "Maritime and Coastguard Agency",
+    "DVSA",
+    "EWR",
+    "British Transport Police",
+    "Active Travel England",
+    "VCA",
+    "Transport Focus",
+)
 
 SERVED: tuple[str, ...] = (
     "department_family",
@@ -107,9 +128,20 @@ FREE_TEXT = ("expense_type", "expense_area", "item_text")
 # Blanked on a hashed or redacted row: what describes or locates the supplier.
 PERSONAL = ("item_text", "postal_code")
 REDACTED = "redacted"
-# Words that name someone in a description when another word follows them.
-TITLES = frozenset(
-    {"mr", "mrs", "ms", "miss", "mx", "dr", "prof", "sir", "dame", "lady", "lord", "attn", "fao"}
+# What looks like a person's name in a description: up to two capital initials, each with a dot or
+# a space after it, then a word of letters with a capital first, ending at a word's end; a figure,
+# `&` or another capital straight after an initial makes it a code (`L&P`, `A14`, `HS2`).
+NAME = r"(?:[A-Z](?:\.\s*|\s+)){0,2}[A-Z][A-Za-z'-]*[A-Za-z](?![^\W_])"
+# A title, or a word for the attention of, before such a name. `Ms` counts only so spelt: the
+# Department writes `MS` for Microsoft (`MS Azure`).
+TITLED = re.compile(
+    r"(?<![^\W_])(?:(?i:mr|mrs|miss|mx|dr|prof|sir|dame|lady|lord|attn|fao)|Ms)\.?:?\s+" + NAME
+)
+# A word that introduces a person, before one or two initials and a name: the person found, whose
+# initials and name are then looked for across the set like a hashed supplier's.
+INITIALLED = re.compile(
+    r"(?<![^\W_])(?i:by|for|from|c/o|attn|fao|per)\s+"
+    r"(?P<name>(?:[A-Z](?:\.\s*|\s+)){1,2}[A-Z][A-Za-z'-]*[A-Za-z](?![^\W_]))"
 )
 
 DATE = re.compile(r"([0-9]{2})/([0-9]{2})/([0-9]{4})")
@@ -126,13 +158,13 @@ class Profile(TypedDict):
     references_hashed: int
 
 
-class SpendError(ValueError):
+class SpendError(StepError):
     """A served file is not a month of spend this step knows."""
 
 
-def names_by_title(text: str) -> bool:
-    cell = words(text)
-    return any(word in TITLES for word in cell[:-1])
+def names_someone(text: str) -> bool:
+    """A description naming someone by title, for the attention of, or by initials."""
+    return bool(TITLED.search(text) or INITIALLED.search(text))
 
 
 def read_month(source: str, raw: bytes) -> tuple[str, list[dict[str, str]]]:
@@ -150,6 +182,8 @@ def read_month(source: str, raw: bytes) -> tuple[str, list[dict[str, str]]]:
         if len(cells) != len(SERVED):
             raise SpendError(f"{where}: {len(cells)} fields")
         row = dict(zip(SERVED, cells, strict=True))
+        if row["department_family"] != FAMILY or row["entity"] not in BODIES:
+            raise SpendError(f"{where}: a paying body the step does not know")
         day = DATE.fullmatch(row["date"])
         try:
             if day is None:
@@ -171,27 +205,26 @@ def read_month(source: str, raw: bytes) -> tuple[str, list[dict[str, str]]]:
 
 def scrub(rows: list[dict[str, str]], env: Mapping[str, str] | None) -> None:
     """Every row of the set changed in place: see the module's account."""
-    register = {row[c] for row in rows for c in ("department_family", "entity")}
     as_person, as_id = person_hasher(env), identifier_hasher(env)
+    introduced = {m["name"] for row in rows for m in INITIALLED.finditer(row["item_text"])}
     hashed: set[str] = set()
     for row in rows:
         supplier = normalise(row["supplier"])
         redacted = supplier == REDACTED
-        if redacted or (supplier and not is_organisation(row["supplier"], register)):
+        if redacted or (supplier and not is_organisation(row["supplier"], BODIES)):
             if not redacted:
                 hashed.add(row["supplier"])
                 row["supplier"] = as_person(row["supplier"])
             row["transaction_number"] = as_id(row["transaction_number"])
             for column in PERSONAL:
                 row[column] = ""
-    found = HashedNames(hashed)
+    found = HashedNames(hashed | introduced)
     for row in rows:
         for column in FREE_TEXT:
-            cell = row[column]
-            if cell and (found.in_any_order(cell) or found.run_together(cell)):
+            if row[column] and found.in_any_order(row[column]):
                 row[column] = ""
         item = row["item_text"]
-        if item and (found.cut_short(item) or names_by_title(item) or marks_a_person(item)):
+        if item and (found.cut_short(item) or names_someone(item) or introduces_a_person(item)):
             row["item_text"] = ""
 
 
@@ -206,6 +239,8 @@ def step(files: Mapping[str, bytes], env: Mapping[str, str] | None = None) -> by
             raise SpendError(f"{source}: a second file for {month}")
         seen.add(month)
         rows += month_rows
+    if sorted(seen) != MONTHS:
+        raise SpendError(f"{len(seen)} months, not the twelve of one April-to-March year")
     scrub(rows, env)
     out = io.StringIO()
     writer = csv.DictWriter(out, COLUMNS, quoting=csv.QUOTE_ALL)

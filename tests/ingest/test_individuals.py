@@ -12,6 +12,7 @@ import pytest
 from ingest.individuals import (
     KEY_VARIABLE,
     NoHashKeyError,
+    introduces_a_person,
     is_organisation,
     normalise,
     pseudonymiser,
@@ -361,3 +362,37 @@ def test_the_key_comes_from_the_process_environment(monkeypatch: pytest.MonkeyPa
         pseudonymiser()
     monkeypatch.setenv(KEY_VARIABLE, KEY)
     assert pseudonymiser()("Jane Doe") == pseudonymiser(ENV)("Jane Doe")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Estate of Jane Doe",
+        "ESTATE OF A PAYEE, SETTLEMENT",
+        "Payment to the executors of Jane Doe",
+        "Executrix of Jane Doe",
+        "Exors of Jane Doe",
+        "Refund, deceased owner",
+        "Jane Doe T/A Doe Taxis",
+        "Jane Doe t / a Doe Taxis",
+        "Jane Doe trading as Doe Taxis",
+        "Jane Doe aka Janie Doe",
+    ],
+)
+def test_free_text_that_introduces_a_person_is_found(text: str) -> None:
+    assert introduces_a_person(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Office estate rent",
+        "Estates management",
+        "Real estate services",
+        "TA Renewal of Structures",
+        "TAS support contract",
+        "Annual T/A",
+    ],
+)
+def test_a_marker_word_that_introduces_no_one_is_not_found(text: str) -> None:
+    assert not introduces_a_person(text)

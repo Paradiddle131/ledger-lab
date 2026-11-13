@@ -10,7 +10,7 @@ hash, and nothing links the two without the key. On a hashed row the cells that 
 the payee are blanked. Columns no consumer needs and that hold contact people (street addresses)
 are dropped from every row. A description on any row is blanked when a run of its words, in any
 order and whatever punctuation sits between them, is a name this table hashes, or when it carries
-one of the classifier's person markers (an estate, a deceased, trading as). A description of an
+a person marker in the form that introduces one (the estate of, a deceased, T/A). A description of an
 organisation's row is otherwise landed as served: it is the known remaining place a person's name
 could sit, including a name another table hashes, since each table's landing reads only its own
 data.
@@ -24,7 +24,7 @@ from pathlib import Path
 
 import duckdb
 
-from ingest.individuals import identifier_hasher, marks_a_person, pseudonymiser
+from ingest.individuals import identifier_hasher, introduces_a_person, pseudonymiser
 from ingest.scrub import HashedNames, parquet_from_csv
 
 
@@ -71,7 +71,7 @@ def scrub(rows: list[dict[str, str]], table: Table, env: Mapping[str, str] | Non
                 row[column] = ""
         for column in table.descriptions:
             cell = row[column]
-            if cell and (marks_a_person(cell) or found.in_any_order(cell)):
+            if cell and (introduces_a_person(cell) or found.in_any_order(cell)):
                 row[column] = ""
 
 

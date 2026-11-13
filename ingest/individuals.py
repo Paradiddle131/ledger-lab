@@ -81,6 +81,13 @@ DOUBT_WORDS = frozenset(
 # Dutch name particles, which do not count as a word of a company name before `B.V.` or `N.V.`.
 PARTICLES = frozenset({"de", "der", "den", "van", "von", "het", "te", "ter", "ten", "'t", "op"})
 
+# The forms of a person marker that introduce a person in free text, on the normalised text.
+INTRODUCERS = re.compile(
+    r"(?<![^\W_])(?:estate|executors?|executrix|exors?)\s+of\s+[^\W\d_]"
+    r"|(?<![^\W_])deceased(?![^\W_])"
+    r"|(?<![^\W_])(?:t\s*/\s*a|trading\s+as|a\.?k\.?a\.?|f\.?k\.?a\.?|d\s*/?\s*b\s*/?\s*a)"
+    r"\s+[^\W\d_]"
+)
 PLAIN_WORD = re.compile(r"^[^\W_]+(?:'[^\W_]+)*$")
 FORM_WORD = re.compile(r"^[^\W\d_]+(?:\.[^\W\d_]+)*$")
 NOT_A_LETTER = re.compile(r"[\W_]")
@@ -190,11 +197,12 @@ def _marks_a_person(normalised: str) -> bool:
     return bool(_marker_spellings(normalised.split()) & PERSON_MARKERS)
 
 
-def marks_a_person(text: str) -> bool:
-    """True when the text carries one of the markers that make a name a person's wherever they
-    stand (an estate, executors, a deceased, trading as, also known as): a free-text cell that
-    does names a party who is or was a person."""
-    return _marks_a_person(normalise(text))
+def introduces_a_person(text: str) -> bool:
+    """True when free text carries a marker in the form that introduces a person: an estate or the
+    executors of someone, a deceased, or a name trading as or also known as another
+    (`T/A`, `trading as`, `aka`, `fka`, `dba` before a word). A marker word alone does not count in
+    free text (an office estate, a `TA` code); the single words stay markers in a payee's name."""
+    return bool(INTRODUCERS.search(normalise(text)))
 
 
 def is_organisation(name: str, organisations: Iterable[str] = ()) -> bool:
