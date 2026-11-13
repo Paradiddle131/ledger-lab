@@ -2,8 +2,9 @@
 
 The build runs with the lab project variable removed and the local target named, so it never
 reaches BigQuery whatever the session's environment holds. The landing it reads holds the labelled
-vendor sample (`vendor_sample.yaml`) as landed vendor names, with a hashed name beside them, and the
-sample's register records as the landed register.
+vendor sample (`vendor_sample.yaml`) as landed Chicago vendor names, with a hashed name beside them,
+the UK spend sample landed through its landing step (`uk_transport_sample.py`), and the sample's
+register records as the landed register.
 """
 
 import json
@@ -25,6 +26,7 @@ from ingest.gleif.legal_entities import (
     LEGAL_FORM,
     LEGAL_NAME,
 )
+from tests.models import uk_transport_sample
 
 PROJECT = Path(__file__).resolve().parents[2] / "models"
 DBT = Path(sys.executable).with_name("dbt")
@@ -81,8 +83,7 @@ def fixture_landing(path: Path) -> Path:
     chicago = [(n,) for n in [*by_entity.get("chicago", []), HASHED]]
     write_parquet(path / "chicago-contracts", ("vendor_name",), chicago)
     write_parquet(path / "chicago-payments", ("vendor_name",), chicago[:1])
-    uk = [(n,) for n in [*by_entity.get("uk-transport", []), HASHED]]
-    write_parquet(path / "uk-transport-spend-2025", ("supplier",), uk)
+    uk_transport_sample.land(path / "uk-transport-spend-2025", doc["register"])
     at = {c: i for i, c in enumerate(COLUMNS)}
     records = []
     for r in doc["register"]:
@@ -114,7 +115,11 @@ def built(tmp_path: Path, landing: Path) -> Build:
     result = dbt(env, tmp_path, "build", "--vars", json.dumps({"ecb_rates": "sample"}))
     assert result.returncode == 0, result.stdout + result.stderr
     run = json.loads((tmp_path / "target" / "run_results.json").read_text())
-    results = {r["unique_id"].split(".")[2]: r["status"] for r in run["results"]}
+    # A node's name is its id's third part; a unit test's is its fourth, after its model's.
+    results = {
+        r["unique_id"].split(".")[3 if r["unique_id"].startswith("unit_test.") else 2]: r["status"]
+        for r in run["results"]
+    }
     return Build(result.stdout, database, results, env, tmp_path)
 
 

@@ -10,6 +10,8 @@ landing/
 !/models/seeds/calendars/period_status.csv
 # Real ECB rates, a licence-allowed sample (free use with the source cited) the translation tests need.
 !/models/seeds/reference/fx/ecb_rates_sample.csv
+# When GOV.UK published each pinned UK spend file: what orders a revised month's files.
+!/models/seeds/staging/uk_transport/uk_transport_spend_files.csv
 *.tsv
 *.xlsx
 *.xls

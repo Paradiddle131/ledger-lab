@@ -60,6 +60,7 @@ SEEDS = {
     "models/seeds/calendars/fiscal_year_starts.csv",
     "models/seeds/calendars/period_status.csv",
     "models/seeds/reference/fx/ecb_rates_sample.csv",
+    "models/seeds/staging/uk_transport/uk_transport_spend_files.csv",
 }
 ALLOWED_EXCEPTIONS = {f"!/{seed}" for seed in SEEDS}
 
