@@ -43,14 +43,23 @@ The dbt models build on DuckDB in the session by default; setting `LEDGER_LAB_GC
 uv run dbt build --project-dir models --profiles-dir models
 ```
 
+Each source is fetched by name from [`ingest/sources.yaml`](ingest/sources.yaml), which records its URL or pinned query, SHA-256, licence link, publisher and whether it names people; the file lands under `LEDGER_LAB_LANDING` (default `landing/`, outside git) only when its checksum matches, and the command exits non-zero otherwise:
+
+```bash
+uv run python -m ingest.fetch <source>
+```
+
 The container stack needs Docker with Compose; the shared database always starts, every other service only under its profile:
 
 ```bash
-export LEDGER_LAB_DB_PASSWORD=<any local password>
-make stack-up                 # the shared database
+make stack-up                 # the shared database, one database per planned service
 make stack-up PROFILE=<name>  # plus one service
+make stack-test               # start the stack and check the running database
 make stack-down               # stop everything and drop its volumes
 ```
+
+The database password comes from `LEDGER_LAB_DB_PASSWORD` when it is set, else from a file `make stack-up` generates (ignored by git, deleted by `make stack-down`); `make stack-up` prints the loopback port it took (`LEDGER_LAB_DB_PORT` fixes one).
+After changing the password or the database list, run `make stack-down` first, because the server keeps what its volume was created with.
 
 The lab's GCP project comes only from `LEDGER_LAB_GCP_PROJECT`; `make cost-check` prints its month-to-date cost (with `LEDGER_LAB_BILLING_EXPORT` naming the billing export's `dataset.table`) and each spend fence's state, read live, and fails above $0.00 or on a loose fence; it prints $0.00 without any GCP call while no project is set.
 The project's spend fences live in `platform/gcp/` as OpenTofu definitions; `make fences-validate` installs the pinned OpenTofu and validates them offline, and only the owner applies them.
