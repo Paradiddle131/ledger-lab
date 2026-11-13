@@ -35,6 +35,7 @@ ALLOWED = {
     "google_data_catalog_taxonomy",
     "google_data_catalog_policy_tag",
     "google_data_catalog_policy_tag_iam_member",
+    "google_data_catalog_taxonomy_iam_member",
     "google_bigquery_datapolicy_data_policy",
     "google_bigquery_datapolicy_data_policy_iam_member",
 }

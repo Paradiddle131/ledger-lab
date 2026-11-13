@@ -36,6 +36,11 @@ MASKING = {"nullify": "ALWAYS_NULL", "hash": "SHA256", "last-four": "LAST_FOUR_C
 CLEAR = "roles/datacatalog.categoryFineGrainedReader"
 MASKED = "roles/bigquerydatapolicy.maskedReader"
 OWNER = "roles/bigquery.dataOwner"
+VIEWER = "roles/datacatalog.viewer"
+BUILDER = "${google_project_iam_custom_role.warehouse_builder.name}"
+# Who reads every tag in clear: the payables clerk, who pays vendors, and the auditor, who reads
+# everything; pinned here apart from the catalogue, so widening it is a reviewed change to both.
+CLEAR_READERS = {"payables-clerk", "auditor"}
 
 
 def catalogue(name: str) -> dict[str, Any]:
@@ -167,11 +172,12 @@ def test_every_grant_goes_to_a_persona_the_agent_or_the_kill_switch() -> None:
 
 # Each grant of the access rules: (resource, for_each, role, member).
 ACCESS_GRANTS = {
-    ("google_bigquery_dataset_iam_member", "agent_owns_warehouse_data"): (
+    ("google_bigquery_dataset_iam_member", "agent_builds_warehouse"): (
         "${google_bigquery_dataset.warehouse}",
-        OWNER,
+        BUILDER,
         AGENT,
     ),
+    ("google_data_catalog_taxonomy_iam_member", "agent_reads_taxonomy"): (None, VIEWER, AGENT),
     ("google_bigquery_dataset_iam_member", "persona_reads_product"): (
         "${local.dataset_grants}",
         "${each.value.role}",
@@ -212,7 +218,7 @@ def test_the_access_rules_grant_exactly_these_and_the_fences_their_own() -> None
     assert set(found) == set(ACCESS_GRANTS) | fences
     for key, (for_each, role, member) in ACCESS_GRANTS.items():
         body = found[key]
-        assert body["for_each"] == for_each, key
+        assert body.get("for_each") == for_each, key
         assert unquote(body["role"]) == role, key
         assert unquote(body["member"]) == member, key
 
@@ -226,6 +232,10 @@ def test_grants_land_on_the_resource_their_map_names() -> None:
     clear = resources[("google_data_catalog_policy_tag_iam_member", "persona_reads_in_clear")]
     assert clear["policy_tag"] == "${google_data_catalog_policy_tag.sensitive[each.value.tag].name}"
     masked = resources["google_bigquery_datapolicy_data_policy_iam_member", "persona_reads_masked"]
+    taxonomy = resources["google_data_catalog_taxonomy_iam_member", "agent_reads_taxonomy"]
+    assert taxonomy["taxonomy"] == "${google_data_catalog_taxonomy.sensitive.name}"
+    builder = resources["google_bigquery_dataset_iam_member", "agent_builds_warehouse"]
+    assert builder["dataset_id"] == "${each.value.dataset_id}"
     assert masked["data_policy_id"] == (
         "${google_bigquery_datapolicy_data_policy.masking[each.value.tag].data_policy_id}"
     )
@@ -249,9 +259,18 @@ def test_project_roles_reach_only_the_kill_switch_and_the_personas_query_role() 
     }
 
 
+def custom_role(name: str) -> set[str]:
+    role = blocks("resource")[("google_project_iam_custom_role", name)]
+    return {unquote(p) for p in role["permissions"]}
+
+
+def test_only_the_query_and_builder_roles_are_custom() -> None:
+    custom = {n for (t, n) in blocks("resource") if t == "google_project_iam_custom_role"}
+    assert custom == {"query_runner", "warehouse_builder"}
+
+
 def test_the_query_role_only_runs_jobs() -> None:
-    role = one("google_project_iam_custom_role")
-    permissions = {unquote(p) for p in role["permissions"]}
+    permissions = custom_role("query_runner")
     assert permissions == {"bigquery.config.get", "bigquery.jobs.create"}
     assert permissions.isdisjoint(FENCE_PERMISSIONS)
 
@@ -272,13 +291,71 @@ def test_no_granted_role_holds_a_fence_moving_permission(role: str) -> None:
     assert set(RECORDED[role]) & FENCE_PERMISSIONS == set()
 
 
-def test_the_agent_can_put_row_policies_policy_tags_and_masking_on_its_tables() -> None:
-    owner = set(RECORDED[OWNER])
-    assert {
-        "bigquery.rowAccessPolicies.create",
-        "bigquery.rowAccessPolicies.setIamPolicy",
-        "bigquery.tables.setCategory",
-    } <= owner
+# What the builder role must never hold: who may use a dataset or table, or deleting a dataset.
+BUILDER_REFUSES = {
+    "bigquery.datasets.setIamPolicy",
+    "bigquery.tables.setIamPolicy",
+    "bigquery.datasets.delete",
+    "bigquery.datasets.update",
+}
+
+
+def test_the_builder_role_grants_no_access_deletes_no_dataset_and_moves_no_fence() -> None:
+    builder = custom_role("warehouse_builder")
+    assert builder & BUILDER_REFUSES == set()
+    # Setting a row access policy's grantees is the one IAM write it needs.
+    iam_writes = {p for p in builder if p.endswith(".setIamPolicy")}
+    assert iam_writes == {"bigquery.rowAccessPolicies.setIamPolicy"}
+    assert builder.isdisjoint(FENCE_PERMISSIONS)
+
+
+def test_the_builder_role_holds_only_real_data_owner_permissions_on_bigquery() -> None:
+    # Each is drawn from data owner's recorded list, so a misspelt one fails here, not at apply.
+    builder = custom_role("warehouse_builder")
+    assert builder <= set(RECORDED[OWNER])
+    assert all(p.startswith("bigquery.") for p in builder)
+
+
+# Data editor's table permissions the models do not need: search indexes, replicas, resource tags.
+UNNEEDED_TABLE_PERMISSIONS = {
+    "bigquery.tables.createIndex",
+    "bigquery.tables.deleteIndex",
+    "bigquery.tables.updateIndex",
+    "bigquery.tables.replicateData",
+    "bigquery.tables.updateTag",
+}
+
+
+def test_the_builder_role_builds_tables_with_row_policies_and_policy_tags() -> None:
+    builder = custom_role("warehouse_builder")
+    rows = {p for p in RECORDED[OWNER] if p.startswith("bigquery.rowAccessPolicies.")}
+    assert rows <= builder, "creating, listing, deleting and granting row access policies"
+    editor = RECORDED["roles/bigquery.dataEditor"]
+    tables = {p for p in editor if p.startswith("bigquery.tables.")}
+    assert tables - UNNEEDED_TABLE_PERMISSIONS <= builder
+    assert "bigquery.tables.setCategory" in builder
+    # Masking follows the policy tag, so attaching a data policy to a column directly is not needed.
+    assert "bigquery.tables.setColumnDataPolicy" not in builder
+
+
+def test_each_tag_is_read_in_clear_by_the_pinned_readers_only() -> None:
+    for tag in catalogue("columns.yaml")["tags"]:
+        assert set(tag["clear"]) == CLEAR_READERS, tag["id"]
+
+
+def test_masking_rule_ids_are_the_tag_ids_with_underscores() -> None:
+    policy = blocks("resource")[("google_bigquery_datapolicy_data_policy", "masking")]
+    assert policy["data_policy_id"] == '${replace(each.key, "-", "_")}'
+
+
+def test_the_taxonomy_and_its_tags_refuse_to_be_destroyed_by_an_apply() -> None:
+    resources = blocks("resource")
+    for key in (
+        ("google_data_catalog_taxonomy", "sensitive"),
+        ("google_data_catalog_policy_tag", "sensitive"),
+    ):
+        (lifecycle,) = resources[key]["lifecycle"]
+        assert lifecycle["prevent_destroy"] is True, key
 
 
 def tofu_eval(expression: str) -> Any:

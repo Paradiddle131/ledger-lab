@@ -29,6 +29,12 @@ resource "google_data_catalog_taxonomy" "sensitive" {
   display_name           = "ledger-lab sensitive columns"
   description            = "Policy tags for the columns that hold bank details or stand for a person."
   activated_policy_types = ["FINE_GRAINED_ACCESS_CONTROL"]
+
+  # Deleting the taxonomy deletes its policy tags, and a column whose tag is gone is no longer
+  # protected by it: the owner removes it by hand, never as a side effect of an apply.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "google_data_catalog_policy_tag" "sensitive" {
@@ -36,6 +42,12 @@ resource "google_data_catalog_policy_tag" "sensitive" {
   taxonomy     = google_data_catalog_taxonomy.sensitive.id
   display_name = each.key
   description  = each.value.marks
+
+  # A deleted tag can leave its columns unprotected; renaming a tag in access/columns.yaml is a
+  # delete and a create, so it stops here for the owner to decide.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "google_bigquery_datapolicy_data_policy" "masking" {
@@ -72,4 +84,11 @@ resource "google_data_catalog_policy_tag_iam_member" "agent_reads_in_clear" {
   policy_tag = each.value.name
   role       = "roles/datacatalog.categoryFineGrainedReader"
   member     = "serviceAccount:${data.google_service_account.agent.email}"
+}
+
+# Setting a policy tag on a column needs reading the taxonomy, granted on the taxonomy itself.
+resource "google_data_catalog_taxonomy_iam_member" "agent_reads_taxonomy" {
+  taxonomy = google_data_catalog_taxonomy.sensitive.name
+  role     = "roles/datacatalog.viewer"
+  member   = "serviceAccount:${data.google_service_account.agent.email}"
 }

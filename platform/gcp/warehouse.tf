@@ -41,12 +41,49 @@ resource "google_bigquery_dataset" "warehouse" {
   description = each.value
 }
 
-# Data owner on each warehouse dataset, never on the project: the agent builds the models into
-# them and puts row access policies and policy tags on the tables it creates there.
-resource "google_bigquery_dataset_iam_member" "agent_owns_warehouse_data" {
+# What the agent needs to build the models in a dataset: create, load, read, replace and drop
+# tables and views (data editor's table and data permissions), its routines for the models' own
+# functions, row access policies with their grantees, and setting a policy tag on a column. Not
+# the dataset's or a table's IAM (the predefined data owner role could grant anyone, allUsers
+# included, any role there) and not deleting the dataset.
+resource "google_project_iam_custom_role" "warehouse_builder" {
+  role_id     = "labWarehouseBuilder"
+  title       = "Builds the warehouse models"
+  description = "Granted per dataset: builds tables, their row access policies and policy tags."
+  permissions = [
+    "bigquery.datasets.get",
+    "bigquery.routines.create",
+    "bigquery.routines.delete",
+    "bigquery.routines.get",
+    "bigquery.routines.list",
+    "bigquery.routines.update",
+    "bigquery.rowAccessPolicies.create",
+    "bigquery.rowAccessPolicies.delete",
+    "bigquery.rowAccessPolicies.get",
+    "bigquery.rowAccessPolicies.getIamPolicy",
+    "bigquery.rowAccessPolicies.list",
+    "bigquery.rowAccessPolicies.setIamPolicy",
+    "bigquery.rowAccessPolicies.update",
+    "bigquery.tables.create",
+    "bigquery.tables.createSnapshot",
+    "bigquery.tables.delete",
+    "bigquery.tables.export",
+    "bigquery.tables.get",
+    "bigquery.tables.getData",
+    "bigquery.tables.getIamPolicy",
+    "bigquery.tables.list",
+    "bigquery.tables.restoreSnapshot",
+    "bigquery.tables.setCategory",
+    "bigquery.tables.update",
+    "bigquery.tables.updateData",
+  ]
+}
+
+# The builder role on each warehouse dataset, never on the project.
+resource "google_bigquery_dataset_iam_member" "agent_builds_warehouse" {
   for_each   = google_bigquery_dataset.warehouse
   dataset_id = each.value.dataset_id
-  role       = "roles/bigquery.dataOwner"
+  role       = google_project_iam_custom_role.warehouse_builder.name
   member     = "serviceAccount:${data.google_service_account.agent.email}"
 }
 
