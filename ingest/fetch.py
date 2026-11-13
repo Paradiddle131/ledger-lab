@@ -43,6 +43,7 @@ from ingest import StepError
 from ingest.chicago import together
 from ingest.ecb import rates
 from ingest.entities import REGISTER
+from ingest.filings import facts
 from ingest.gleif import legal_entities
 from ingest.nl_government import budget
 from ingest.uk_transport import spend
@@ -79,6 +80,7 @@ STEPS: dict[str, Callable[[bytes], bytes]] = {
 SET_STEPS: dict[str, Callable[[dict[str, bytes]], bytes | dict[str, bytes]]] = {
     spend.SET: spend.step,
     together.SET: together.step,
+    facts.SET: facts.step,
 }
 # The sets whose steps read the landed legal-entity register; the kit refuses them before any
 # download while it is not landed.

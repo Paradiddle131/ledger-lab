@@ -1,0 +1,43 @@
+# The listed companies whose annual reports the regulator's filings set lands: public company names
+# only. Validated by companies.schema.json; `python -m ingest.fetch sec-annual-filings` keeps the
+# facts of these companies' annual reports and nothing else.
+#
+# Each company is a vendor the `vendor_entity` model matched to its own legal entity by the exact or
+# same-legal-form rule (never by a dropped legal form), and each legal entity is tied to the
+# regulator's company id (CIK) by three published lists, none of them a name:
+#   lei -> isin    the legal-entity register's ISIN mapping lists the company's listed share
+#                  under its own LEI (GLEIF and ANNA's mapping, read through the register's API);
+#   isin -> ticker the SEC's fails-to-deliver files pair the share's CUSIP (the ISIN's middle nine
+#                  characters) with its ticker (the second half of September and the first half of
+#                  October 2026; OraSure's from the first half of October 2025);
+#   ticker -> cik  the SEC's company ticker list.
+# The share being the legal entity's own is what keeps out a subsidiary: a vendor that is a listed
+# parent's subsidiary has no listed share under its LEI, so it has no chain and is left out, even
+# when its parent files (TransUnion's operating LLC matched only by a dropped legal form; Jacobs
+# Engineering Group Inc., under whose LEI the mapping lists the share of its parent since a
+# holding-company reorganisation, is left out as contradictory evidence).
+# `name` is the legal name as the register records it; the regulator may file under another
+# (ShotSpotter, Inc. files as SoundThinking, Inc. since its rename, under the same CIK).
+companies:
+  - {name: "UNISYS CORPORATION", cik: "746838", lei: 549300T21W22FIJJOW08, isin: US9092143067, ticker: UIS}
+  - {name: "MOTOROLA SOLUTIONS, INC.", cik: "68505", lei: 6S552MUG6KGJVEBSEC55, isin: US6200763075, ticker: MSI}
+  - {name: "AMERESCO, INC.", cik: "1488139", lei: 529900NZXZGBCBXYY327, isin: US02361E1082, ticker: AMRC}
+  - {name: "AXON ENTERPRISE, INC.", cik: "1069183", lei: 549300QP2IEEGFE16681, isin: US05464C1018, ticker: AXON}
+  - {name: "Badger Meter, Inc.", cik: "9092", lei: 5493002JENE20OGTUG20, isin: US0565251081, ticker: BMI}
+  - {name: "ShotSpotter, Inc.", cik: "1351636", lei: 549300MQV8SOWVNVZ667, isin: US82536T1079, ticker: SSTI}
+  - {name: "L3HARRIS TECHNOLOGIES, INC.", cik: "202058", lei: 549300UTE50ZMDBG8A20, isin: US5024311095, ticker: LHX}
+  - {name: "CNA FINANCIAL CORPORATION", cik: "21175", lei: 549300YX2GSZD7YG1R84, isin: US1261171003, ticker: CNA}
+  - {name: "Target Corporation", cik: "27419", lei: 8WDDFXB5T1Z6J0XC1L66, isin: US87612E1064, ticker: TGT}
+  - {name: "IRON MOUNTAIN INCORPORATED", cik: "1020569", lei: SQL3F6CKNNBM3SQGHX24, isin: US46284V1017, ticker: IRM}
+  - {name: "QUEST DIAGNOSTICS INCORPORATED", cik: "1022079", lei: 8MCWUBXQ0WE04KMXBX50, isin: US74834L1008, ticker: DGX}
+  - {name: "FEDERAL SIGNAL CORPORATION", cik: "277509", lei: 549300RTXZRPTNP6G884, isin: US3138551086, ticker: FSS}
+  - {name: "UNITED RENTALS, INC.", cik: "1067701", lei: 5323X5O7RN0NKFCDRY08, isin: US9113631090, ticker: URI}
+  - {name: "OraSure Technologies, Inc.", cik: "1116463", lei: 529900GNNJPNM4XHXQ77, isin: US68554V1089, ticker: OSUR}
+  - {name: "FTI CONSULTING, INC.", cik: "887936", lei: 549300K17GM8EQD0FQ48, isin: US3029411093, ticker: FCN}
+  - {name: "CUMMINS INC.", cik: "26172", lei: ZUNI8PYC725B6H8JU438, isin: US2310211063, ticker: CMI}
+  - {name: "PALANTIR TECHNOLOGIES INC.", cik: "1321655", lei: 549300UVN46B3BBDHO85, isin: US69608A1088, ticker: PLTR}
+  - {name: "JETBLUE AIRWAYS CORPORATION", cik: "1158463", lei: 54930070J9H97ZO93T57, isin: US4771431016, ticker: JBLU}
+  - {name: "LYFT, INC.", cik: "1759509", lei: 549300H7I5VN334XVZ52, isin: US55087P1049, ticker: LYFT}
+  # Paid far less than a million dollars, but its annual report for 2025 was amended within the
+  # pinned quarters, and it restates its 2023 revenue for a discontinued business.
+  - {name: "PITNEY BOWES INC.", cik: "78814", lei: 549300N2O26NW4ST6W55, isin: US7244791007, ticker: PBI}
