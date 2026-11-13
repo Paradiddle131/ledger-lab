@@ -6,8 +6,19 @@
 #       url: https://...?$limit=50000
 #       order: {<param>: <value>}
 #       cut_off: {<param>: <value>}
-#     sha256: <SHA-256 of the bytes the publisher serves, undecoded>
+#     sha256: <SHA-256 of the bytes the publisher serves, undecoded>  # pragma: allowlist secret (a checksum, not a secret)
 #     licence: https://...              # the licence, confirmed on the source's issue
 #     publisher: <who publishes it>
 #     names_people: false               # true: lands only through the source's step
-sources: {}
+sources:
+  # City of Chicago contracts (rsxa-ify5), every row approved by the cut-off, in the portal's row
+  # order. The table is live: a row the City edits changes the bytes, and a re-pin moves the hash.
+  chicago-contracts:
+    query:
+      url: https://data.cityofchicago.org/resource/rsxa-ify5.csv?$limit=500000
+      order: {$order: ":id"}
+      cut_off: {$where: "approval_date <= '2026-10-31T23:59:59'"}
+    sha256: c71eaff5b0bbbb62c76ab3f03f0b07a775e4a2f4f7b3f1968309c863cae5c48f  # pragma: allowlist secret
+    licence: https://www.chicago.gov/city/en/narr/foia/data_disclaimer.html
+    publisher: City of Chicago
+    names_people: true

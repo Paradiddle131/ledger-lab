@@ -48,10 +48,14 @@ venvPath = "."
 venv = ".venv"
 
 [tool.pytest.ini_options]
-# The live stack test needs `make stack-test` to have started this checkout's stack, so a plain
-# run (and `make check`) leaves it out; `-m stack` on the command line selects it.
-addopts = ["-q", "--strict-markers", "--strict-config", "-ra", "-m", "not stack"]
-markers = ["stack: needs this checkout's running container stack (`make stack-test`)"]
+# The live stack test needs `make stack-test` to have started this checkout's stack, and a landed
+# test needs its source landed, so a plain run (and `make check`) leaves both out; `-m stack` or
+# `-m landed` on the command line selects them.
+addopts = ["-q", "--strict-markers", "--strict-config", "-ra", "-m", "not stack and not landed"]
+markers = [
+  "stack: needs this checkout's running container stack (`make stack-test`)",
+  "landed: needs its source landed under the landing path (`python -m ingest.fetch <source>`)",
+]
 testpaths = ["tests"]
 # platform/ holds scripts run by path; tests import them as top-level modules.
 pythonpath = [".", "platform"]

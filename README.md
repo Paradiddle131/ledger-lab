@@ -27,6 +27,17 @@ Every figure is a public record, fetched by a script that checks it against a re
 The ledger is derived: an open-source ERP posts the real documents into journal lines, and every derived row says so.
 Individuals among vendors are hashed before anything is written.
 
+City of Chicago data comes from the City's data portal under its [Data Terms of Use](https://www.chicago.gov/city/en/narr/foia/data_disclaimer.html):
+
+> This site provides applications using data that has been modified for use from its original source, www.cityofchicago.org, the official website of the City of Chicago. The City of Chicago makes no claims as to the content, accuracy, timeliness, or completeness of any of the data provided at this site. The data provided at this site is subject to change at any time. It is understood that the data provided at this site is being used at one's own risk.
+
+To land a source, set `LEDGER_LAB_HASH_KEY` (see `ingest/individuals.py`) and run:
+
+```bash
+uv run python -m ingest.fetch chicago-contracts   # lands landing/chicago-contracts as Parquet
+uv run pytest -m landed                          # profiles what is landed
+```
+
 ## Checks
 
 Prerequisites: [uv](https://docs.astral.sh/uv/), GNU make, git, and a clone of the agent rules collection, which holds the process-id and owner checks (`make check LOADOUT=<clone>` when the Makefile does not find it).
