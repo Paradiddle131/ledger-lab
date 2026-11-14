@@ -12,6 +12,12 @@ dependencies = []
 bigquery = [
   "dbt-bigquery==1.12.3",
 ]
+# The Data Contract CLI, in an environment of its own: its DuckDB engine needs DuckDB 1.5, which
+# cannot open the 2.0 databases dbt builds, so the contract tests run it over a copy written in
+# 1.5's storage format (`uv run --isolated --only-group contract datacontract ...`).
+contract = [
+  "datacontract-cli[duckdb]==1.2.9",
+]
 dev = [
   "dbt-core==1.12.7",
   "dbt-duckdb==1.11.1",
@@ -31,6 +37,7 @@ dev = [
 
 [tool.uv]
 package = false
+conflicts = [[{ group = "dev" }, { group = "contract" }]]
 
 [tool.ruff]
 line-length = 100
@@ -43,7 +50,7 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "S"]
 "tests/**" = ["S101", "S603"]
 
 [tool.pyright]
-include = ["tests", "platform", "access", "ingest"]
+include = ["tests", "platform", "access", "ingest", "models/contracts"]
 extraPaths = ["platform"]
 pythonVersion = "3.13"
 typeCheckingMode = "standard"
