@@ -36,7 +36,15 @@ RULES = [
     "published_rates_keep_the_published_figure",
     "a_rate_is_carried_at_most_four_days",
 ]
-SELECTION = ["--select", "ecb_rates_sample", "fx_published_rates+"]
+# The rates models and the tests whose every parent is one of them: a model of another folder
+# that reads the rates (the group totals) also reads models this build leaves out.
+SELECTION = [
+    "--select",
+    "ecb_rates_sample",
+    "fx_published_rates+,path:models/reference",
+    "--indirect-selection",
+    "cautious",
+]
 
 
 def environment(tmp_path: Path) -> dict[str, str]:
