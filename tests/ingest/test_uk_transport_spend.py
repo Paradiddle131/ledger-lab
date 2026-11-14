@@ -498,7 +498,7 @@ def test_the_step_writes_nothing_to_disk(tmp_path: Path, monkeypatch: pytest.Mon
     assert list(tmp_path.rglob("*")) == []
 
 
-def test_the_profile_counts_hashed_suppliers_rows_and_references(tmp_path: Path) -> None:
+def test_the_profile_counts_hashed_suppliers_and_rows(tmp_path: Path) -> None:
     files = {
         "2025-04": served(person_row(), person_row(number="4400124"), GRANT),
         "2025-05": served(person_row(date="01/05/2025", supplier="Sam Testperson")),
@@ -507,7 +507,6 @@ def test_the_profile_counts_hashed_suppliers_rows_and_references(tmp_path: Path)
     assert counts["rows"] == 4 + 10
     assert counts["suppliers_hashed"] == 2
     assert counts["rows_hashed"] == 3
-    assert counts["references_hashed"] == 3
 
 
 def test_the_fetch_kit_lands_the_year_only_as_a_set_through_this_step() -> None:
@@ -521,7 +520,6 @@ def test_the_fetch_kit_lands_the_year_only_as_a_set_through_this_step() -> None:
 
 # The real files, landed with `uv run python -m ingest.fetch uk-transport-spend-2025`.
 
-FISCAL_MONTHS = [f"2025-{m:02d}" for m in range(4, 13)] + [f"2026-{m:02d}" for m in range(1, 4)]
 CONTENT_API = "https://www.gov.uk/api/content/government/publications/dft-spending-over-25000-"
 
 
@@ -569,18 +567,15 @@ def real() -> Iterator[tuple[dict[str, bytes], list[dict[str, Any]]]]:
 
 
 @pytest.mark.landed
-def test_every_month_of_the_year_is_landed_once(real: tuple) -> None:
-    files, _ = real
-    counts = profile(landed_file(SET))
-    print(counts)
-    assert list(counts["months"]) == FISCAL_MONTHS
-    assert counts["files"] == len(files) == 12
+def test_every_served_row_of_the_year_is_landed_once(real: tuple) -> None:
+    """Against the files served again; the months, files and counts of the landed set are its
+    quality suite's (`ingest/quality`)."""
+    files, landed = real
     served_rows = sum(
         len(list(csv.reader(io.StringIO(raw.decode("cp1252"))))) for raw in files.values()
     )
-    assert counts["rows"] == served_rows - len(files), "every served row lands, headers aside"
-    assert counts["rows_redacted"] > 0
-    assert counts["suppliers_hashed"] > 0
+    assert len(files) == 12
+    assert len(landed) == served_rows - len(files), "every served row lands, headers aside"
 
 
 @pytest.mark.pages

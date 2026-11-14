@@ -154,19 +154,13 @@ def test_the_profile_counts_roll_ups_the_2002_bucket_and_direct_vouchers(tmp_pat
         "itemised_rows": 3,
         "rolled_up_rows": 2,
         "rolled_up_by_year": {"2002": 1, "2009": 1},
-        "unreadable_dates": 0,
-        "earliest_year": 2002,
         "without_contract": 2,
-        "without_voucher": 2,
         "negative_amounts": 1,
         "rows_hashed": 3,
         "payees_hashed": 3,
-        "hashed_rows_with_voucher": 1,
-        "hashed_rows_with_contract": 2,
     }
 
 
-def test_the_profile_counts_a_date_in_neither_form(tmp_path: Path) -> None:
+def test_the_profile_counts_a_date_in_neither_form_in_neither_count(tmp_path: Path) -> None:
     counts = profile(landed(tmp_path, ITEMISED, {**DIRECT, "check_date": "2022-03-17"}))
-    assert counts["unreadable_dates"] == 1
-    assert (counts["itemised_rows"], counts["rolled_up_rows"]) == (1, 0)
+    assert (counts["rows"], counts["itemised_rows"], counts["rolled_up_rows"]) == (2, 1, 0)

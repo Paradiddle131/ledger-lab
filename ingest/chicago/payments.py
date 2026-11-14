@@ -47,15 +47,10 @@ class Profile(TypedDict):
     itemised_rows: int
     rolled_up_rows: int
     rolled_up_by_year: dict[str, int]
-    unreadable_dates: int
-    earliest_year: int
     without_contract: int
-    without_voucher: int
     negative_amounts: int
     rows_hashed: int
     payees_hashed: int
-    hashed_rows_with_voucher: int
-    hashed_rows_with_contract: int
 
 
 def _codes_only(row: dict[str, str]) -> None:
@@ -74,27 +69,15 @@ def profile(path: Path) -> Profile:
     years = con.execute(
         f"SELECT check_date, count(*) FROM t WHERE {ROLLED_UP} GROUP BY 1 ORDER BY 1"  # noqa: S608
     ).fetchall()
-    readable = f"{ITEMISED} OR {ROLLED_UP}"
     return Profile(
         rows=one("SELECT count(*) FROM t"),
         itemised_rows=one(f"SELECT count(*) FROM t WHERE {ITEMISED}"),  # noqa: S608
         rolled_up_rows=one(f"SELECT count(*) FROM t WHERE {ROLLED_UP}"),  # noqa: S608
         rolled_up_by_year={str(y): int(n) for y, n in years},
-        unreadable_dates=one(f"SELECT count(*) FROM t WHERE NOT ({readable})"),  # noqa: S608
-        earliest_year=one(
-            f"SELECT min(CAST(right(check_date, 4) AS INTEGER)) FROM t WHERE {readable}"  # noqa: S608
-        ),
         without_contract=one(
             "SELECT count(*) FROM t WHERE contract_number IS NULL OR contract_number = 'DV'"
         ),
-        without_voucher=one("SELECT count(*) FROM t WHERE voucher_number IS NULL"),
         negative_amounts=one("SELECT count(*) FROM t WHERE TRY_CAST(amount AS DECIMAL(18, 2)) < 0"),
         rows_hashed=one(f"SELECT count(*) FROM t WHERE {HASHED}"),  # noqa: S608
         payees_hashed=one(f"SELECT count(DISTINCT vendor_name) FROM t WHERE {HASHED}"),  # noqa: S608
-        hashed_rows_with_voucher=one(
-            f"SELECT count(voucher_number) FROM t WHERE {HASHED}"  # noqa: S608
-        ),
-        hashed_rows_with_contract=one(
-            f"SELECT count(*) FROM t WHERE {HASHED} AND contract_number <> 'DV'"  # noqa: S608
-        ),
     )
