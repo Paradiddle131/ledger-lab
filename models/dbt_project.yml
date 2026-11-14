@@ -21,6 +21,11 @@ vars:
   # the files the fetch kit lands under LEDGER_LAB_LANDING, or `sample`, the committed seeds of
   # real rows the tests pass explicitly.
   source_rows: landed
+  # The group totals' reporting currency and the one day whose ECB rates translate every figure
+  # at constant rates; the group-totals models and their tests read both from here.
+  group_totals:
+    reporting_currency: EUR
+    constant_rates_on: "2023-12-29"
 
 models:
   ledger_lab:

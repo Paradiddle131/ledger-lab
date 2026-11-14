@@ -53,10 +53,12 @@ models:
 seeds:
   - name: ecb_rates_sample
     description: >
-      Real ECB reference rates for 25 March to 8 April 2024, as the fetch kit lands them (a
-      weekend, and Good Friday to Easter Monday closed): the rates the translation tests need
-      inside `make check`, where no landed file exists, read when the `source_rows` var is
-      `sample`. Source: European Central Bank; published
+      Real ECB reference rates for 25 March to 8 April 2024 (a weekend, and Good Friday to
+      Easter Monday closed), which the translation tests need, and for 29 December 2023, the
+      group totals' constant-rates day, and the whole of March 2026, a month the Chicago and UK
+      payment samples both have payments in, which the group-totals tests need, as the fetch kit
+      lands them: the rates the tests read inside `make check`,
+      where no landed file exists, when the `source_rows` var is `sample`. Source: European Central Bank; published
       for information purposes only, copied unchanged.
     config:
       column_types:
