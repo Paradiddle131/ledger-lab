@@ -33,6 +33,7 @@ The amount paid, a decimal in the entity's currency (never a float), with its si
 
 {% docs payment_vendor_name %}
 The payee as landed: the name in clear, `person:` and its keyed hash for a payee who is or may be a person, or the UK department's own `REDACTED`, which names no one.
+It holds the same fact as `vendor_organisation_name` and `vendor_person_key` together, and stays because the published contract promises it; it goes when a breaking change is next made deliberately.
 {% enddocs %}
 
 {% docs payment_vendor_is_hashed %}
@@ -41,6 +42,7 @@ True when the payee's name is a keyed hash.
 
 {% docs payment_document_number %}
 The document the payment was made on: Chicago's voucher number, as served (`Multiple` for a payment covering several vouchers), null on a rolled-up row, which has none; the UK department's transaction number as landed, `#` where it gives none and a keyed hash (`id:`) on a hashed or redacted row, so it repeats.
+It holds the same values as `document_reference` and `document_key` together, and a hashed payee's Chicago voucher number besides, and stays because the published contract promises it, until a breaking change is next made deliberately and says where that voucher number goes.
 {% enddocs %}
 
 {% docs payment_contract_number %}
@@ -64,4 +66,23 @@ For the UK department no row is flagged: its rows identical as landed are consec
 
 {% docs payment_source_table %}
 The landed table the row comes from (`chicago-payments`, `uk-transport-spend-2025`).
+{% enddocs %}
+
+{% docs payment_vendor_organisation_name %}
+The payee's name in clear, exactly `vendor_name` where `vendor_is_hashed` is false: an organisation's name, or the UK department's own `REDACTED`, which names no one; null where the payee is or may be a person.
+Every row has exactly one of this and `vendor_person_key`.
+{% enddocs %}
+
+{% docs payment_vendor_person_key %}
+The keyed hash that stands for a payee who is or may be a person, exactly `vendor_name` where `vendor_is_hashed` is true (`person:` and the hash, as landed); null for an organisation.
+Every row has exactly one of this and `vendor_organisation_name`.
+{% enddocs %}
+
+{% docs payment_document_reference %}
+The document number in clear, exactly `document_number` on a row whose payee is in clear and whose number is no keyed hash; null on a hashed payee's rows and on any row whose number a hashed payee's row of the same entity carries too, since the publisher's own search finds the payee by it.
+{% enddocs %}
+
+{% docs payment_document_key %}
+The keyed hash that stands for a hashed or redacted UK row's transaction number, exactly `document_number` where it is `id:` and the hash; null everywhere else.
+It ties together the rows of one hashed transaction and cannot be looked up in the department's files.
 {% enddocs %}

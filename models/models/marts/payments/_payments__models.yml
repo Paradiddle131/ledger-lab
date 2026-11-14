@@ -7,7 +7,8 @@ models:
       stays and is flagged `is_repeat`, so a sum that leaves repeats out counts each payment once,
       and a row the source gives only a year (Chicago's rolled-up payments) stays, with no day. Each entity's intermediate model brings its rows in this column shape; the
       City of Chicago's detail (rolled-up rows, department) stays in `int_chicago__payments`, and
-      every landed version of a UK month in `int_uk_transport__payment_versions`.
+      every landed version of a UK month in `int_uk_transport__payment_versions`. The last four columns hold the
+      published `vendor_name` and `document_number` split by the hash each value carries.
     columns:
       - name: payment_key
         description: "{{ doc('payment_key') }}"
@@ -60,3 +61,11 @@ models:
         description: "{{ doc('payment_is_repeat') }}"
         data_tests:
           - not_null
+      - name: vendor_organisation_name
+        description: "{{ doc('payment_vendor_organisation_name') }}"
+      - name: vendor_person_key
+        description: "{{ doc('payment_vendor_person_key') }}"
+      - name: document_reference
+        description: "{{ doc('payment_document_reference') }}"
+      - name: document_key
+        description: "{{ doc('payment_document_key') }}"

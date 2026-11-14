@@ -36,7 +36,7 @@ tags:
       - metric-owner
       - agent-operator
   - id: individual-id
-    marks: The keyed hash that stands for a vendor or payee who may be a person, and their vendor id.
+    marks: A keyed hash that stands for a vendor or payee who may be a person, their vendor id or a document they were paid on, alone in its column or among clear values.
     masking: hash
     clear: [payables-clerk, auditor]
     masked:
@@ -55,19 +55,22 @@ tags:
 # tags it awaits, and a tag that marks no column must be awaited. The models attach each tag to its
 # column when they create the table; `platform/gcp` reads only the tags above.
 #
-# Both payments columns mix clear and hashed values: `vendor_name` is an organisation's name in
-# clear or `person:` and a keyed hash; `document_number` is Chicago's voucher number in clear (on a
-# hashed payee's rows too, where the City's public search finds the payee by it) or the UK
-# department's transaction number, a keyed hash on hashed rows. A tag masks the whole column, so
-# `individual-id` hashes every row for its masked readers: they never read a person's keyed hash or
-# the voucher number beside it, and still join, group and count by the masked value, but read an
-# organisation's name or voucher number only as its hash too. Masking only the hashed rows needs a
-# rule that is none of the three built-in ones.
+# A tag masks a whole column, and none of the three built-in rules masks only some rows, so the
+# payments contract splits its two published mixed columns by the hash each value carries:
+# `vendor_person_key` and `document_key` hold the keyed hashes and take `individual-id`, while
+# `vendor_organisation_name` and `document_reference` hold the clear values, never one of a hashed
+# payee's row, and take no tag. Masked readers read organisation names and their document numbers
+# in clear, and a person's keys hashed again, still joining, grouping and counting by them. The
+# published `vendor_name` and `document_number` stay, as the contract promises, and keep the tag:
+# masked readers read them hashed on every row (a hashed payee's Chicago voucher number, which the
+# City's public search finds the payee by, is in no other column).
 products:
   payments:
     columns:
       payments.vendor_name: individual-id
       payments.document_number: individual-id
+      payments.vendor_person_key: individual-id
+      payments.document_key: individual-id
   # No public file carries bank details: the bank tags await the vendor bank accounts the ERP
   # holds, which the ledger is posted from, and the ledger has no contract yet.
   ledger:

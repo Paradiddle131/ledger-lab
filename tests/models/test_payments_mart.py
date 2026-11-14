@@ -50,6 +50,8 @@ COMMON = [
     "source_table",
     "is_repeat",
 ]
+# The mart's own columns after the shared ones: the published payee and document split by hash.
+SPLIT = ["vendor_organisation_name", "vendor_person_key", "document_reference", "document_key"]
 # The vendors of contract 8878, private companies, whose second revision is served twice.
 REPEATED_REVISION_COMPANIES = {"V3 COMPANIES OF ILLINOIS, LIMITED", "V3 COMPANIES, LIMITED"}
 # Companies of the cut with no legal form the classifier accepts as one party (a `&`, a joined
@@ -172,7 +174,7 @@ def test_the_mart_has_the_shared_columns_in_order_with_decimal_amounts(build: Bu
         "select column_name, data_type from information_schema.columns"
         " where table_name = 'payments' order by ordinal_position",
     )
-    assert [c for c, _ in columns] == COMMON
+    assert [c for c, _ in columns] == COMMON + SPLIT
     types = dict(columns)
     assert types["amount"].startswith("DECIMAL")
     assert types["award_after_revisions"].startswith("DECIMAL")
@@ -342,6 +344,18 @@ def test_a_hashed_payee_is_the_landing_hash_and_never_in_clear(build: Build) -> 
     assert any(c is not None for _, _, c in rows), "a hashed payee's contract still joins"
     clear = {v for (v,) in query(build, "select distinct vendor_name from payments")}
     assert not clear & HASHED_COMPANIES
+    # The split columns: the person key is the landing hash on exactly the hashed rows, and the
+    # organisation name is the served name on exactly the others.
+    split = query(
+        build,
+        "select vendor_organisation_name, vendor_person_key from payments"
+        " where entity_id = 'chicago'",
+    )
+    assert Counter(k for _, k in split if k is not None) == served
+    assert Counter(n for n, _ in split if n is not None) == Counter(
+        p["vendor_name"] for p in CUT["payments"] if p["vendor_name"] not in HASHED_COMPANIES
+    )
+    assert all((n is None) != (k is None) for n, k in split)
 
 
 def test_the_mart_currency_is_the_entitys_own(build: Build, access: dict[str, Any]) -> None:

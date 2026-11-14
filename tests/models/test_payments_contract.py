@@ -30,9 +30,9 @@ MART_YAML = PROJECT / "models" / "marts" / "payments" / "_payments__models.yml"
 Contract = dict[str, Any]
 # The dbt side of the mart: the manifest, the model's YAML and the built columns with their types.
 DbtSide = tuple[dict[str, Any], dict[str, Any], list[tuple[str, str]]]
-# Presence and type of all 14 columns, 8 required, 1 unique, 2 accepted-values and 2 bound checks,
-# and the 4 quality rules.
-CHECKS = 2 * 14 + 8 + 1 + 2 + 2 + 4
+# Presence and type of all 18 columns, 8 required, 1 unique, 2 accepted-values and 2 bound checks,
+# and the 7 quality rules.
+CHECKS = 2 * 18 + 8 + 1 + 2 + 2 + 7
 
 
 def committed() -> Contract:
@@ -131,12 +131,22 @@ BREAKS = {
     "a hashed name flagged clear": (
         "update payments set vendor_is_hashed = false where payment_key ="
         " (select min(payment_key) from payments where vendor_is_hashed)",
-        {"hashed-exactly-when-the-name-is-a-hash"},
+        # The split columns follow the flag, so a wrong flag breaks them too.
+        {
+            "hashed-exactly-when-the-name-is-a-hash",
+            "payee-columns-split-the-published-name",
+            "document-columns-split-the-published-number",
+        },
     ),
     "a clear name flagged hashed": (
         "update payments set vendor_is_hashed = true where payment_key ="
         " (select min(payment_key) from payments where not vendor_is_hashed)",
-        {"hashed-exactly-when-the-name-is-a-hash"},
+        # The split columns follow the flag, so a wrong flag breaks them too.
+        {
+            "hashed-exactly-when-the-name-is-a-hash",
+            "payee-columns-split-the-published-name",
+            "document-columns-split-the-published-number",
+        },
     ),
     "a UK payment lost": (
         "delete from payments where payment_key ="
@@ -157,6 +167,27 @@ BREAKS = {
             "currency-is-the-entitys-own",
             "chicago-row-count-equals-its-model",
         },
+    ),
+    "a clear name copied into the person key": (
+        "update payments set vendor_person_key = vendor_name where payment_key ="
+        " (select min(payment_key) from payments where not vendor_is_hashed)",
+        {"one-of-organisation-name-and-person-key", "payee-columns-split-the-published-name"},
+    ),
+    "a person key that is not the published hash": (
+        "update payments set vendor_person_key = 'person:' || repeat('0', 64) where payment_key ="
+        " (select min(payment_key) from payments where vendor_is_hashed)",
+        {"payee-columns-split-the-published-name"},
+    ),
+    "a hashed payee's voucher number in the clear reference": (
+        "update payments set document_reference = document_number where payment_key ="
+        " (select min(payment_key) from payments"
+        " where vendor_is_hashed and entity_id = 'chicago' and document_number is not null)",
+        {"document-columns-split-the-published-number"},
+    ),
+    "a keyed transaction number left out of the document key": (
+        "update payments set document_key = null where payment_key ="
+        " (select min(payment_key) from payments where document_number like 'id:%')",
+        {"document-columns-split-the-published-number"},
     ),
     "a missing amount": (
         "update payments set amount = null"

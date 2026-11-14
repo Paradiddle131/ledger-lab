@@ -32,7 +32,9 @@ schema:
       and a row the source gives only a year (Chicago's rolled-up payments) stays, with no day.
       Each entity's intermediate model brings its rows in this column shape; the City of
       Chicago's detail (rolled-up rows, department) stays in `int_chicago__payments`, and every
-      landed version of a UK month in `int_uk_transport__payment_versions`.
+      landed version of a UK month in `int_uk_transport__payment_versions`. The last four
+      columns hold the published `vendor_name` and `document_number` split by the hash each
+      value carries.
     properties:
       # Not classified personal: it names one payment, not a payee. On a hashed row it is a hash of
       # the row as landed, hashed name included, so it cannot be recomputed from the publisher's
@@ -103,6 +105,7 @@ schema:
         classification: personal
         description: |-
           The payee as landed: the name in clear, `person:` and its keyed hash for a payee who is or may be a person, or the UK department's own `REDACTED`, which names no one.
+          It holds the same fact as `vendor_organisation_name` and `vendor_person_key` together, and stays because the published contract promises it; it goes when a breaking change is next made deliberately.
       - name: vendor_is_hashed
         logicalType: boolean
         physicalType: BOOLEAN
@@ -115,6 +118,7 @@ schema:
         classification: personal
         description: |-
           The document the payment was made on: Chicago's voucher number, as served (`Multiple` for a payment covering several vouchers), null on a rolled-up row, which has none; the UK department's transaction number as landed, `#` where it gives none and a keyed hash (`id:`) on a hashed or redacted row, so it repeats.
+          It holds the same values as `document_reference` and `document_key` together, and a hashed payee's Chicago voucher number besides, and stays because the published contract promises it, until a breaking change is next made deliberately and says where that voucher number goes.
       - name: contract_number
         logicalType: string
         physicalType: VARCHAR
@@ -144,6 +148,34 @@ schema:
           That they are the same payment served again rests on paid totals, not on the City saying so: with repeats left out, more contracts are paid exactly their award after revisions than with them.
           Two rows the same but for the vendor name, neither with a department, are not flagged: nothing beside the name pairs them, and a wrong flag would drop a real payment from every total.
           For the UK department no row is flagged: its rows identical as landed are consecutive rows under one transaction number, and nothing in the files tells those identical in every served cell from two equal lines of one document, while hashed ones that differ in the description the landing drops are certainly separate lines (`int_uk_transport__payments` gives the evidence).
+      # Added after the contract was published, so optional, as the gate requires: the published
+      # mixed columns split by the hash each value carries. The person and document keys are
+      # personal; the clear columns are not, since neither ever holds a value of a hashed row.
+      - name: vendor_organisation_name
+        logicalType: string
+        physicalType: VARCHAR
+        description: |-
+          The payee's name in clear, exactly `vendor_name` where `vendor_is_hashed` is false: an organisation's name, or the UK department's own `REDACTED`, which names no one; null where the payee is or may be a person.
+          Every row has exactly one of this and `vendor_person_key`.
+      - name: vendor_person_key
+        logicalType: string
+        physicalType: VARCHAR
+        classification: personal
+        description: |-
+          The keyed hash that stands for a payee who is or may be a person, exactly `vendor_name` where `vendor_is_hashed` is true (`person:` and the hash, as landed); null for an organisation.
+          Every row has exactly one of this and `vendor_organisation_name`.
+      - name: document_reference
+        logicalType: string
+        physicalType: VARCHAR
+        description: |-
+          The document number in clear, exactly `document_number` on a row whose payee is in clear and whose number is no keyed hash; null on a hashed payee's rows and on any row whose number a hashed payee's row of the same entity carries too, since the publisher's own search finds the payee by it.
+      - name: document_key
+        logicalType: string
+        physicalType: VARCHAR
+        classification: personal
+        description: |-
+          The keyed hash that stands for a hashed or redacted UK row's transaction number, exactly `document_number` where it is `id:` and the hash; null everywhere else.
+          It ties together the rows of one hashed transaction and cannot be looked up in the department's files.
     quality:
       - id: currency-is-the-entitys-own
         type: sql
@@ -181,4 +213,40 @@ schema:
         query: |-
           select (select count(*) from payments where entity_id = 'uk-transport')
             - (select count(*) from int_uk_transport__payments)
+        mustBe: 0
+      - id: one-of-organisation-name-and-person-key
+        type: sql
+        dimension: consistency
+        description: Every row has exactly one of `vendor_organisation_name` and `vendor_person_key`.
+        query: |-
+          select count(*) from payments
+          where (vendor_organisation_name is null) = (vendor_person_key is null)
+        mustBe: 0
+      - id: payee-columns-split-the-published-name
+        type: sql
+        dimension: consistency
+        description: "`vendor_organisation_name` and `vendor_person_key` are `vendor_name` split by `vendor_is_hashed`, on every row."
+        query: |-
+          select count(*) from payments
+          where vendor_organisation_name is distinct from
+              (case when not vendor_is_hashed then vendor_name end)
+            or vendor_person_key is distinct from (case when vendor_is_hashed then vendor_name end)
+        mustBe: 0
+      - id: document-columns-split-the-published-number
+        type: sql
+        dimension: consistency
+        description: "`document_key` is `document_number` where it is a keyed hash, and `document_reference` is it where the payee is in clear and no hashed payee's row of the entity carries it."
+        query: |-
+          select count(*) from payments as p
+          where p.document_key is distinct from
+              (case when p.document_number like 'id:%' then p.document_number end)
+            or p.document_reference is distinct from (
+              case
+                when not p.vendor_is_hashed and p.document_number not like 'id:%'
+                  and not exists (
+                    select 1 from payments as h
+                    where h.vendor_is_hashed and h.entity_id = p.entity_id
+                      and h.document_number = p.document_number)
+                  then p.document_number
+              end)
         mustBe: 0
