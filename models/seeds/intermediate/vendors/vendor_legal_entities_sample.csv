@@ -1,4 +1,4 @@
-LEI,Entity_LegalName,Entity_LegalAddress_Country,Entity_EntityCategory,Entity_LegalForm_EntityLegalFormCode,Entity_EntityStatus
+LEI,Entity.LegalName,Entity.LegalAddress.Country,Entity.EntityCategory,Entity.LegalForm.EntityLegalFormCode,Entity.EntityStatus
 0EEB8GF0W0NPCIHZX097,AECOM,US,GENERAL,XTIQ,ACTIVE
 20S05OYHG0MQM4VUIC57,FORD MOTOR COMPANY,US,GENERAL,XTIQ,ACTIVE
 2138002EOZ35VO4XSU29,COLAS LIMITED,GB,GENERAL,H0PO,ACTIVE
