@@ -643,6 +643,12 @@ def bound(db: duckdb.DuckDBPyConnection, doc: dict[str, Any], c: dict[str, Any])
     return values
 
 
+def withheld_columns(db: duckdb.DuckDBPyConnection, sql: str, bound: dict[str, Any]) -> set[str]:
+    """The names of the columns a withheld query returns, as the engine reports them."""
+    result = db.execute(sql, {n: bound[n] for n in set(PARAMETER.findall(sql))})
+    return {d[0] for d in result.description}
+
+
 def play_queries(doc: dict[str, Any], database: Path) -> None:
     """Every case's queries over a build's products: a bind of one row filling every placeholder,
     and every withheld query returning a value."""
@@ -656,6 +662,13 @@ def play_queries(doc: dict[str, Any], database: Path) -> None:
                     for name in ("withholds", "withholds_beyond_persona"):
                         if name in check:
                             rows = run(db, check[name]["sql"], values)
+                            if name == "withholds" and "masked_columns" in c:
+                                outside = withheld_columns(db, check[name]["sql"], values) - {
+                                    n.split(".")[1] for n in c["masked_columns"]["columns"]
+                                }
+                                assert outside == set(), (
+                                    f"{c['id']}: withholds {sorted(outside)}, not named masked"
+                                )
                             assert any(v is not None for r in rows for v in r), (
                                 f"{c['id']}: withholds nothing"
                             )
@@ -764,6 +777,12 @@ QUERY_BREAKS: dict[str, tuple[Callable[[dict[str, Any]], None], str]] = {
     "a placeholder the bind does not fill": (
         lambda d: setitem(turns_of(d, "one-payment-day")[0], "ask", "What was paid on {month}?"),
         "unbound ['month']",
+    ),
+    "a masked case withholding a column it does not name masked": (
+        lambda d: case(d, "one-row-then-its-payee")["masked_columns"]["columns"].remove(
+            "payments.document_number"
+        ),
+        "withholds ['document_number'], not named masked",
     ),
     "a withheld query returning nothing": (
         lambda d: setitem(

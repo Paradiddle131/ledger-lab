@@ -56,21 +56,20 @@ tags:
 # column when they create the table; `platform/gcp` reads only the tags above.
 #
 # A tag masks a whole column, and none of the three built-in rules masks only some rows, so the
-# payments contract splits its two published mixed columns by the hash each value carries:
-# `vendor_person_key` and `document_key` hold the keyed hashes and take `individual-id`, while
-# `vendor_organisation_name` and `document_reference` hold the clear values, never one of a hashed
-# payee's row, and take no tag. Masked readers read organisation names and their document numbers
-# in clear, and a person's keys hashed again, still joining, grouping and counting by them. The
-# published `vendor_name` and `document_number` stay, as the contract promises, and keep the tag:
-# masked readers read them hashed on every row (a hashed payee's Chicago voucher number, which the
-# City's public search finds the payee by, is in no other column).
+# payments mart splits its published payee: `vendor_person_key` holds the keyed hash and takes
+# `individual-id`, `vendor_organisation_name` holds the clear names and takes no tag, and
+# `document_reference`, untagged, shows the Chicago voucher numbers no hashed payee shares. The
+# published `vendor_name` and `document_number` stay, as the contract promises, and keep the tag.
+# What the masking does, and no more: it keeps a person's keyed hash from the masked readers. It
+# does not stop a reader who holds the publisher's file from finding a hashed payee, by a voucher
+# number (the masked value is an unsalted hash of a public number, reversed by hashing the file)
+# or by amount and date (ARCHITECTURE.md gives the counts).
 products:
   payments:
     columns:
       payments.vendor_name: individual-id
       payments.document_number: individual-id
       payments.vendor_person_key: individual-id
-      payments.document_key: individual-id
   # No public file carries bank details: the bank tags await the vendor bank accounts the ERP
   # holds, which the ledger is posted from, and the ledger has no contract yet.
   ledger:

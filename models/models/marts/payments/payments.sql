@@ -1,8 +1,7 @@
 -- The payments data product: one row per payment of every entity, each entity's intermediate
 -- model in one column shape. An entity joins by adding its model to `entities`.
--- The payee and document columns after `is_repeat` split the published mixed ones by the hash
--- each value carries, here once for every entity: an organisation's name or a document number in
--- clear, and a person's keyed hash, in columns of their own.
+-- The columns after `is_repeat` split the published payee by the hash each value carries, and
+-- keep the document numbers a clear column may show, here once for every entity.
 {%- set entities = [
     'int_chicago__payments',
     'int_uk_transport__payments',
@@ -31,12 +30,12 @@ with shared as (
     {% endfor %}
 ),
 
--- Every document number a hashed payee's row carries in clear (Chicago's vouchers): such a number
--- names its payee in the publisher's own search, so no clear column holds it on any row.
+-- Every voucher number a hashed Chicago payee's row carries in clear: the City's own search names
+-- the payee by it, so no clear column holds it on any row.
 beside_a_hashed_payee as (
-    select distinct entity_id, document_number
+    select distinct document_number
     from shared
-    where vendor_is_hashed and document_number is not null
+    where entity_id = 'chicago' and vendor_is_hashed and document_number is not null
 )
 
 select
@@ -44,16 +43,17 @@ select
     {% endfor -%}
     case when not shared.vendor_is_hashed then shared.vendor_name end as vendor_organisation_name,
     case when shared.vendor_is_hashed then shared.vendor_name end as vendor_person_key,
+    -- Only Chicago's numbers: the UK landing replaces a hashed row's number by a keyed hash, so a
+    -- clear UK number cannot be told apart from one a hashed payee's line of the same transaction
+    -- carries. A placeholder (`Multiple`) names no document, so it is no reference.
     case
         when
-            not shared.vendor_is_hashed
-            and shared.document_number not like 'id:%'
+            shared.entity_id = 'chicago'
+            and not shared.vendor_is_hashed
+            and shared.document_number <> 'Multiple'
             and beside_a_hashed_payee.document_number is null
             then shared.document_number
-    end as document_reference,
-    case when shared.document_number like 'id:%' then shared.document_number end as document_key
+    end as document_reference
 from shared
 left join beside_a_hashed_payee
-    on
-        shared.entity_id = beside_a_hashed_payee.entity_id
-        and shared.document_number = beside_a_hashed_payee.document_number
+    on shared.document_number = beside_a_hashed_payee.document_number

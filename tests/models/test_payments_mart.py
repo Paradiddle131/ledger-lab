@@ -50,8 +50,9 @@ COMMON = [
     "source_table",
     "is_repeat",
 ]
-# The mart's own columns after the shared ones: the published payee and document split by hash.
-SPLIT = ["vendor_organisation_name", "vendor_person_key", "document_reference", "document_key"]
+# The mart's own columns after the shared ones: the published payee split by hash, and the
+# document numbers a clear column may show.
+SPLIT = ["vendor_organisation_name", "vendor_person_key", "document_reference"]
 # The vendors of contract 8878, private companies, whose second revision is served twice.
 REPEATED_REVISION_COMPANIES = {"V3 COMPANIES OF ILLINOIS, LIMITED", "V3 COMPANIES, LIMITED"}
 # Companies of the cut with no legal form the classifier accepts as one party (a `&`, a joined
@@ -165,6 +166,11 @@ def test_each_payments_rule_ran_and_passed(build: Build, rule: str) -> None:
 
 def test_the_2002_unit_test_ran_and_passed(build: Build) -> None:
     name = "int_chicago__payments::the_2002_row_takes_no_fiscal_year_whatever_the_calendars_cover"
+    assert any("PASS" in line and name in line for line in build.stdout.splitlines())
+
+
+def test_the_withholding_unit_test_ran_and_passed(build: Build) -> None:
+    name = "payments::a_reference_is_withheld_beside_a_hashed_payee_and_on_placeholders_and_uk_rows"
     assert any("PASS" in line and name in line for line in build.stdout.splitlines())
 
 

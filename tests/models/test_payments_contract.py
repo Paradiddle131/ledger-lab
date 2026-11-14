@@ -33,9 +33,9 @@ MART_YAML = PROJECT / "models" / "marts" / "payments" / "_payments__models.yml"
 Contract = dict[str, Any]
 # The dbt side of the mart: the manifest, the model's YAML and the built columns with their types.
 DbtSide = tuple[dict[str, Any], dict[str, Any], list[tuple[str, str]]]
-# Presence and type of all 18 columns, 8 required, 1 unique, 2 accepted-values and 2 bound checks,
+# Presence and type of all 17 columns, 8 required, 1 unique, 2 accepted-values and 2 bound checks,
 # and the 7 quality rules.
-CHECKS = 2 * 18 + 8 + 1 + 2 + 2 + 7
+CHECKS = 2 * 17 + 8 + 1 + 2 + 2 + 7
 
 
 def committed() -> Contract:
@@ -138,7 +138,7 @@ BREAKS = {
         {
             "hashed-exactly-when-the-name-is-a-hash",
             "payee-columns-split-the-published-name",
-            "document-columns-split-the-published-number",
+            "document-reference-is-a-chicago-voucher-no-hashed-payee-shares",
         },
     ),
     "a clear name flagged hashed": (
@@ -148,7 +148,7 @@ BREAKS = {
         {
             "hashed-exactly-when-the-name-is-a-hash",
             "payee-columns-split-the-published-name",
-            "document-columns-split-the-published-number",
+            "document-reference-is-a-chicago-voucher-no-hashed-payee-shares",
         },
     ),
     "a UK payment lost": (
@@ -169,6 +169,8 @@ BREAKS = {
             "payments__currency__field_enum",
             "currency-is-the-entitys-own",
             "chicago-row-count-equals-its-model",
+            # A reference is shown only on Chicago rows: a row leaving Chicago keeps one wrongly.
+            "document-reference-is-a-chicago-voucher-no-hashed-payee-shares",
         },
     ),
     "a clear name copied into the person key": (
@@ -185,12 +187,19 @@ BREAKS = {
         "update payments set document_reference = document_number where payment_key ="
         " (select min(payment_key) from payments"
         " where vendor_is_hashed and entity_id = 'chicago' and document_number is not null)",
-        {"document-columns-split-the-published-number"},
+        {"document-reference-is-a-chicago-voucher-no-hashed-payee-shares"},
     ),
-    "a keyed transaction number left out of the document key": (
-        "update payments set document_key = null where payment_key ="
-        " (select min(payment_key) from payments where document_number like 'id:%')",
-        {"document-columns-split-the-published-number"},
+    "a UK transaction number in the clear reference": (
+        "update payments set document_reference = document_number where payment_key ="
+        " (select min(payment_key) from payments where entity_id = 'uk-transport'"
+        " and not vendor_is_hashed and document_number not like 'id:%')",
+        {"document-reference-is-a-chicago-voucher-no-hashed-payee-shares"},
+    ),
+    "a placeholder in the clear reference": (
+        "update payments set document_reference = document_number where payment_key ="
+        " (select min(payment_key) from payments where document_number = 'Multiple'"
+        " and not vendor_is_hashed)",
+        {"document-reference-is-a-chicago-voucher-no-hashed-payee-shares"},
     ),
     "a missing amount": (
         "update payments set amount = null"
