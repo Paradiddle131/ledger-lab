@@ -620,6 +620,11 @@ REFUSALS = {
     "purpose-of-an-unknown-persona": "no persona nobody",
     "two-purposes-of-one-id": "share an id",
     "purpose-in-a-schema-the-engine-keeps": "a schema the engine keeps",
+    "purpose-in-a-kept-schema-by-another-case": "a schema the engine keeps",
+    "purpose-in-the-system-schema": "a schema the engine keeps",
+    "purpose-named-as-the-persona": "the persona's catalog name",
+    "purpose-id-that-is-no-slug": "an id is lowercase words joined by",
+    "two-tables-of-one-name": "two tables share a name",
 }
 
 
@@ -686,6 +691,18 @@ def refusal(
         purposes["purposes"].append(copy.deepcopy(review))
     elif change == "purpose-in-a-schema-the-engine-keeps":
         review["id"] = "main"
+    elif change == "purpose-in-a-kept-schema-by-another-case":
+        review["id"] = "MAIN"
+    elif change == "purpose-in-the-system-schema":
+        review["id"] = "system"
+    elif change == "purpose-named-as-the-persona":
+        persona = "auditor"
+        by_id["audit"]["id"] = persona
+    elif change == "purpose-id-that-is-no-slug":
+        review["id"] = "payment_review"
+    elif change == "two-tables-of-one-name":
+        # Two aggregate tables of one name, each valid alone, so only the shared name is refused.
+        aggregates["products"]["group-totals"]["tables"].append(copy.deepcopy(totals))
     return access, columns, aggregates, persona, purposes
 
 

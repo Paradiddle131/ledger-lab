@@ -15,7 +15,8 @@
 # the column list in access/columns.yaml). A cell is stated per tag but reached per product, so a
 # reader of payments states the bank tags too, which mark no column until the ERP's tables exist.
 # A persona that reads the warehouse but no such product still holds a masked-reader role on every
-# tag, so no query it may run fails on a tagged column; its cells are denied all the same.
+# tag, so a tagged column a purpose of it lists is read masked, never refused, and a column no
+# purpose of it lists is absent from its database; its cells are denied all the same.
 # A product cell states the rows; which of their columns a persona reads is its purposes'
 # (access/purposes.yaml). A clear or masked tag cell is how the persona reads the tag's columns
 # wherever its purposes list one; where they list none (the group controller's period close), the

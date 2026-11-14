@@ -33,6 +33,7 @@ row grant with no purpose) instead of leaving anything open. Persona, product, p
 ids are schema-checked slugs; every identifier and literal is quoted all the same.
 """
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,8 +58,11 @@ MASKING_RULES = frozenset({"nullify", "hash", "last-four"})
 STRING_ONLY = frozenset({"hash", "last-four"})
 
 # Schema names a purpose cannot take in the persona's database: the aggregate tables' own, those
-# DuckDB keeps, and the catalog name the build attaches the source under.
-RESERVED_SCHEMAS = frozenset({"main", "temp", "information_schema", "pg_catalog", SOURCE})
+# DuckDB keeps, and the catalog name the build attaches the source under. DuckDB compares names
+# without case, so these are compared lowercased; the persona's own catalog name is refused too.
+RESERVED_SCHEMAS = frozenset({"main", "temp", "system", "information_schema", "pg_catalog", SOURCE})
+# A purpose's id, as access/purposes.schema.json holds it: lowercase words joined by `-`.
+PURPOSE_ID = re.compile(r"[a-z][a-z0-9-]*[a-z0-9]")
 
 # A table's columns as the source holds them: name and DuckDB type, in table order.
 Schema = Mapping[str, Sequence[tuple[str, str]]]
@@ -189,13 +193,17 @@ def _purposes(
     plan: list[Rows] = []
     served: set[str] = set()
     for purpose in purposes["purposes"]:
+        where = schema_of(purpose["id"])
+        if where.lower() in RESERVED_SCHEMAS:
+            raise CompileError(f"purpose {purpose['id']}: {where} is a schema the engine keeps")
+        if not PURPOSE_ID.fullmatch(purpose["id"]):
+            raise CompileError(f"purpose {purpose['id']!r}: an id is lowercase words joined by -")
         if unknown := sorted(set(purpose["personas"]) - known):
             raise CompileError(f"purpose {purpose['id']}: no persona {', '.join(unknown)}")
         if persona not in purpose["personas"]:
             continue
-        where = schema_of(purpose["id"])
-        if where in RESERVED_SCHEMAS:
-            raise CompileError(f"purpose {purpose['id']}: {where} is a schema the engine keeps")
+        if where.lower() == persona.lower():
+            raise CompileError(f"purpose {purpose['id']}: {where} is the persona's catalog name")
         for table, listed in purpose["tables"].items():
             product = product_of.get(table)
             if product is None:

@@ -11,13 +11,16 @@
 # still clear or masked as access/columns.yaml says for the persona.
 # The compiler refuses a purpose for a persona with no row grant on the product (an aggregate
 # grant is none), a column or table the product lacks, a tagged column the persona reads neither
-# way, an entity-scoped table without `entity_id`, and a row grant on a product with tables but no
-# purpose of it. A product with no tables yet needs no purpose until the models build one.
+# way, an entity-scoped table without `entity_id`, an id that is no slug, an id whose schema the
+# engine keeps or that is the persona's own catalog name (compared without case, as DuckDB does),
+# and a row grant on a product with tables but no purpose of it. A product with no tables yet
+# needs no purpose until the models build one.
 #
 # A purpose lists every column it needs, by name, so a column the models add later reaches no one
 # until a purpose lists it. Two purposes below hold every column of their tables today, because
 # the duty they serve follows a payment or a figure to everything recorded about it; the other two
-# withhold columns from personas that read them before purposes existed.
+# leave out columns that personas read before purposes existed. A column left out is not always a
+# fact withheld: each purpose's comment says what its kept columns still tell.
 purposes:
   # Booking and reconciling one entity's payments, paying them, and judging the entries drafted
   # from them: each of these follows one payment to its payee, its document and the contract it
@@ -54,8 +57,11 @@ purposes:
   # day's rate and at constant rates, repeats left out, and the group totals in full. The
   # organisation paid stays, to find a payment between two of the group's entities (intercompany),
   # which the group's figures must remove; no person's key, no document and no contract is part of
-  # a group figure, so the payee as published, the document numbers and the contract and its award
-  # are withheld.
+  # a group figure, so a person's key, the published payee column (for a person its hashed name,
+  # for an organisation the organisation name kept below), both document numbers and the contract
+  # and its award are left out. Whether a payee is a person is
+  # not withheld: the organisation name is empty exactly for a person, so the group controller
+  # reads it on every payment, as a test in tests/access/test_purposes.py states.
   - id: group-close
     for: Summing and translating every entity's payments into the group's figures by period.
     personas: [group-controller]
@@ -98,7 +104,9 @@ purposes:
         - amount
   # Defining and versioning the governed metrics over the group totals: the columns the metrics'
   # semantic model reads (semantics/metricflow/group_totals.yml, held equal by a test), and none
-  # of the left-out figures, which no metric reads.
+  # of the left-out figures, which no metric reads. It lists what the metrics read and nothing
+  # more; it keeps nothing secret from the metric owner: a total's currency follows from its
+  # entity, and its amount from the amount at constant rates and the constant rate.
   - id: metric-definition
     for: Defining and versioning the governed metrics on the group totals.
     personas: [metric-owner]
