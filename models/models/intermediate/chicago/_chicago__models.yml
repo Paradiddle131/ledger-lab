@@ -99,13 +99,20 @@ models:
         description: >
           Why a row is a repeat, null on a first row: `exact`, a copy after the first of rows
           identical in every column (2,560 rows on the pinned files); `without_department`, a row
-          with no department beside an otherwise identical row that has one (7,300); or
+          with no department beside an otherwise identical row that has one (7,300);
+          `without_department_other_name`, a row with no department beside a row that has one
+          and is the same in voucher, amount, day or year and contract but for the vendor name, so
+          the City serves one payment under two names of its vendor, a spelling (`ACME INC`,
+          `ACME, INC.`) or an old and a new company name (3,982 rows, $3.04bn); or
           `rolled_up_itemised`, a rolled-up year whose amount equals to the cent the unflagged
-          dated payments of its vendor, contract and year (4).
+          dated payments of its vendor, contract and year (1). Two rows the same but for the
+          vendor name, neither with a department, are not flagged (1,194 groups on contracts):
+          nothing beside the name pairs them, and a wrong flag would drop a real payment from
+          every total.
         data_tests:
           - accepted_values:
               arguments:
-                values: [exact, without_department, rolled_up_itemised]
+                values: [exact, without_department, without_department_other_name, rolled_up_itemised]
       - name: is_rolled_up
         description: >
           True on a row the publisher rolled up: the payments of one vendor, contract and year in
@@ -143,3 +150,35 @@ unit_tests:
       rows:
         - {payment_key: kone-2002, fiscal_year: null, fiscal_period: null, is_repeat: false}
         - {payment_key: urs-2003, fiscal_year: 2003, fiscal_period: null, is_repeat: false}
+
+  - name: a_payment_under_a_second_name_without_a_department_is_a_repeat
+    description: >
+      Invented rows, labelled as invented: of two rows the same in voucher, amount, day and
+      contract but for the vendor name, the one without a department repeats the one with it and
+      is flagged; two such rows with no department on either are both kept, since nothing beside
+      the name pairs them; and a row with a department under a second name is a payment of its
+      own.
+    model: int_chicago__payments
+    given:
+      - input: ref('stg_chicago__payments')
+        rows:
+          - {payment_key: named, voucher_number: PV1, amount: 100, payment_date: 2025-03-01, department_name: DEPT OF EXAMPLE, contract_number: "1", vendor_name: EXAMPLE A LLC, vendor_is_hashed: false, copy_number: 1}
+          - {payment_key: renamed, voucher_number: PV1, amount: 100, payment_date: 2025-03-01, contract_number: "1", vendor_name: "EXAMPLE A, LLC", vendor_is_hashed: false, copy_number: 1}
+          - {payment_key: plain, voucher_number: PV2, amount: 200, payment_date: 2025-03-01, contract_number: "1", vendor_name: EXAMPLE A LLC, vendor_is_hashed: false, copy_number: 1}
+          - {payment_key: plain-renamed, voucher_number: PV2, amount: 200, payment_date: 2025-03-01, contract_number: "1", vendor_name: "EXAMPLE A, LLC", vendor_is_hashed: false, copy_number: 1}
+          - {payment_key: own, voucher_number: PV3, amount: 300, payment_date: 2025-03-01, department_name: DEPT OF EXAMPLE, contract_number: "1", vendor_name: EXAMPLE A LLC, vendor_is_hashed: false, copy_number: 1}
+          - {payment_key: own-other, voucher_number: PV3, amount: 300, payment_date: 2025-03-01, department_name: DEPT OF OTHER, contract_number: "1", vendor_name: "EXAMPLE A, LLC", vendor_is_hashed: false, copy_number: 1}
+      - input: ref('fiscal_periods')
+        rows: []
+      - input: ref('fiscal_calendar')
+        rows: []
+      - input: ref('int_chicago__contracts')
+        rows: []
+    expect:
+      rows:
+        - {payment_key: named, is_repeat: false, repeat_kind: null}
+        - {payment_key: renamed, is_repeat: true, repeat_kind: without_department_other_name}
+        - {payment_key: plain, is_repeat: false, repeat_kind: null}
+        - {payment_key: plain-renamed, is_repeat: false, repeat_kind: null}
+        - {payment_key: own, is_repeat: false, repeat_kind: null}
+        - {payment_key: own-other, is_repeat: false, repeat_kind: null}

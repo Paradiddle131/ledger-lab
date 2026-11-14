@@ -153,7 +153,8 @@ def test_the_cuts_vendors_are_companies_named_in_the_tree() -> None:
         "every_served_payment_is_one_row",
         "a_vendor_is_flagged_hashed_exactly_when_it_is",
         "a_repeat_leaves_its_first_row_unflagged",
-        "accepted_values_int_chicago__payments_repeat_kind__exact__without_department__rolled_up_itemised",
+        "accepted_values_int_chicago__payments_repeat_kind__exact__without_department"
+        "__without_department_other_name__rolled_up_itemised",
     ],
 )
 def test_each_payments_rule_ran_and_passed(build: Build, rule: str) -> None:
@@ -495,7 +496,9 @@ def test_the_real_landing_builds_the_payments_mart(tmp_path: Path) -> None:
         ("exact", True): (162, Decimal("76866731.54")),
         ("without_department", False): (3_869, Decimal("148723005.74")),
         ("without_department", True): (3_431, Decimal("2005570237.83")),
-        ("rolled_up_itemised", True): (4, Decimal("7482958.82")),
+        ("without_department_other_name", False): (1_444, Decimal("398837205.25")),
+        ("without_department_other_name", True): (2_538, Decimal("2642748669.61")),
+        ("rolled_up_itemised", True): (1, Decimal("426356.20")),
     }
     # Leaving the repeats out, more contracts are paid exactly their award: the evidence that a
     # repeat is the same payment served again rests on these totals, not on the City.
@@ -510,7 +513,7 @@ def test_the_real_landing_builds_the_payments_mart(tmp_path: Path) -> None:
         " from paid join int_chicago__contracts using (contract_number)",
     )
     print("contracts paid exactly their award (with repeats, without, twice):", paid_exactly)
-    assert paid_exactly == [(21_264, 21_960, 849)]
+    assert paid_exactly == [(21_264, 22_096, 849)]
     zero_and_negative = query(
         build,
         "with paid as (select contract_number, sum(amount) as paid from payments"
