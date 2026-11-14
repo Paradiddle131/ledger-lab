@@ -52,22 +52,8 @@ UNIT = "EUR thousand"
 YEAR = re.compile(r"[0-9]{4}")
 
 
-class MomentCount(TypedDict):
-    rows: int
-    non_zero: int
-
-
-class Years(TypedDict):
-    first: str
-    last: str
-
-
 class Profile(TypedDict):
     rows: int
-    years: Years
-    units: list[str]
-    moments: dict[str, dict[str, MomentCount]]
-    non_integer_amounts: int
     articles_on_several_rows: int
 
 
@@ -108,7 +94,7 @@ def step(raw: bytes) -> bytes:
 
 
 def profile(path: Path) -> Profile:
-    """The landed file's moments per year, and its mess, counted."""
+    """The landed file's rows and the articles it serves on several rows, counted."""
     con = duckdb.connect()
     con.read_parquet(str(path)).create_view("b")
 
@@ -121,26 +107,8 @@ def profile(path: Path) -> Profile:
     def one(sql: str) -> int:
         return int(str(first_row(sql)[0]))
 
-    moments: dict[str, dict[str, MomentCount]] = {}
-    for year, moment, n, non_zero in con.execute(
-        "SELECT Begrotingsjaar, moment, count(*),"
-        " count(*) FILTER (WHERE TRY_CAST(amount AS HUGEINT) <> 0) FROM b GROUP BY ALL"
-    ).fetchall():
-        moments.setdefault(str(year), {})[str(moment)] = MomentCount(
-            rows=int(n), non_zero=int(non_zero)
-        )
-    first, last = first_row("SELECT min(Begrotingsjaar), max(Begrotingsjaar) FROM b")
     return Profile(
         rows=one("SELECT count(*) FROM b"),
-        years=Years(first=str(first), last=str(last)),
-        units=[str(u) for (u,) in con.execute("SELECT DISTINCT unit FROM b ORDER BY 1").fetchall()],
-        moments={
-            year: {m: moments[year][m] for m in MOMENTS if m in moments[year]}
-            for year in sorted(moments)
-        },
-        non_integer_amounts=one(
-            "SELECT count(*) FROM b WHERE NOT regexp_full_match(amount, '-?[0-9]+')"
-        ),
         articles_on_several_rows=one(
             "SELECT count(*) FROM (SELECT 1 FROM b WHERE moment = 'StandOWB'"
             " GROUP BY Begrotingsjaar, VUO, HoofdstukRomeins, Artikelnummer HAVING count(*) > 1)"

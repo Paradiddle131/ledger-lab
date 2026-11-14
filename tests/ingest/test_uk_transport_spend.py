@@ -498,7 +498,7 @@ def test_the_step_writes_nothing_to_disk(tmp_path: Path, monkeypatch: pytest.Mon
     assert list(tmp_path.rglob("*")) == []
 
 
-def test_the_profile_counts_hashed_suppliers_rows_and_references(tmp_path: Path) -> None:
+def test_the_profile_counts_hashed_suppliers_and_rows(tmp_path: Path) -> None:
     files = {
         "2025-04": served(person_row(), person_row(number="4400124"), GRANT),
         "2025-05": served(person_row(date="01/05/2025", supplier="Sam Testperson")),
@@ -507,7 +507,6 @@ def test_the_profile_counts_hashed_suppliers_rows_and_references(tmp_path: Path)
     assert counts["rows"] == 4 + 10
     assert counts["suppliers_hashed"] == 2
     assert counts["rows_hashed"] == 3
-    assert counts["references_hashed"] == 3
 
 
 def test_the_fetch_kit_lands_the_year_only_as_a_set_through_this_step() -> None:

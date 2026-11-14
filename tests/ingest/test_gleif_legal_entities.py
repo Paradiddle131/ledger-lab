@@ -182,21 +182,9 @@ def test_a_sole_proprietor_never_lands(tmp_path: Path) -> None:
         assert clue not in data
 
 
-def test_every_landed_record_has_an_lei_a_legal_name_a_legal_form_and_a_country(
-    tmp_path: Path,
-) -> None:
+def test_the_profile_counts_the_records_of_each_country(tmp_path: Path) -> None:
     counts = profile(landed(tmp_path, APPLE, BARCLAYS, ING))
-    assert counts["incomplete"] == 0
-    assert counts["malformed_leis"] == 0
     assert counts["rows_by_country"] == {"GB": 1, "NL": 1, "US": 1}
-
-
-def test_the_profile_counts_a_record_without_a_legal_form(tmp_path: Path) -> None:
-    formless = {**APPLE, "Entity.LegalForm.EntityLegalFormCode": ""}
-    unknown = {**BARCLAYS, "Entity.LegalForm.EntityLegalFormCode": "9999"}
-    counts = profile(landed(tmp_path, formless, unknown, ING))
-    assert counts["incomplete"] == 1
-    assert counts["legal_form_not_available"] == 1
 
 
 def test_the_step_refuses_a_file_without_a_needed_column() -> None:

@@ -124,21 +124,9 @@ def test_the_fetch_kit_lands_the_statements_through_this_step() -> None:
     assert fetch.load_sources(fetch.SOURCES)["nl-government-budget"]["names_people"] is False
 
 
-def test_the_profile_counts_moments_per_year_units_and_split_articles(tmp_path: Path) -> None:
+def test_the_profile_counts_rows_and_split_articles(tmp_path: Path) -> None:
     counts = profile(landed(tmp_path, KING_2023, KING_2024, KING_2025, *TAXES_2024))
-    assert counts["rows"] == 5 * len(MOMENTS)
-    assert counts["units"] == [UNIT]
-    assert counts["non_integer_amounts"] == 0
-    assert counts["articles_on_several_rows"] == 1
-    assert counts["moments"]["2024"] == {
-        "StandOWB": {"rows": 3, "non_zero": 2},
-        "StandO1": {"rows": 3, "non_zero": 2},
-        "StandSBS": {"rows": 3, "non_zero": 2},
-        "StandO2": {"rows": 3, "non_zero": 3},
-        "Realisatie": {"rows": 3, "non_zero": 3},
-    }
-    assert sorted(counts["moments"]) == ["2023", "2024", "2025"]
-    assert counts["years"] == {"first": "2023", "last": "2025"}
+    assert counts == {"rows": 5 * len(MOMENTS), "articles_on_several_rows": 1}
 
 
 @pytest.mark.landed
