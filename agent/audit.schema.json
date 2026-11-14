@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Audit record",
-  "description": "One record per agent answer, per proposal the acting agent drafts and per human decision on a proposal, in one log the agent operator and the auditor read. A record holds in clear only what tells no reader any data value: who, when, which data, code, metric versions, query text and warehouse job; it holds a seal (agent/audit.py) in place of every value a reader of the log may not see (the question, query parameters, each query's result, the answer, a proposal's request, inputs and draft). The salt and value of each seal are kept outside the log, keyed by the record's position. Records form one hash chain: `prev` is the previous record's `digest`, `digest` the SHA-256 of the record's RFC 8785 canonical form without `digest`.",
+  "description": "One record per agent turn (answered, abstained, refused or stopped), per proposal the acting agent drafts and per human decision on a proposal, in one log the agent operator and the auditor read. A record holds in clear only what tells no reader any data value: who, when, which agent, data build, code, metric versions, query text and warehouse job; it holds a seal (agent/audit.py) in place of every value a reader of the log may not see (the question, query parameters, each query's result, the answer, a proposal's request, inputs and draft). A query's text enters a record only once agent/audit.py's check_bound passes it, so every value from a question or a result is a parameter. The salt and value of each seal are kept outside the log, keyed by the record's position. Records form one hash chain: `prev` is the previous record's `digest`, `digest` the SHA-256 of the record's RFC 8785 canonical form without `digest`; keeping one writer at a time is the writer's job, not the schema's. Every time is checked as a real instant by agent/audit.py, since the schema's pattern cannot.",
   "type": "object",
   "required": ["seq", "prev", "digest", "kind", "at"],
   "properties": {
@@ -18,7 +18,7 @@
       "$ref": "#/$defs/sha256"
     },
     "kind": {"enum": ["answer", "proposal", "approval"]},
-    "at": {"description": "When the answer was given, the proposal drafted or the decision taken.", "$ref": "#/$defs/time"}
+    "at": {"description": "When the turn ended, the proposal was drafted or the decision taken.", "$ref": "#/$defs/time"}
   },
   "allOf": [
     {"if": {"required": ["kind"], "properties": {"kind": {"const": "answer"}}}, "then": {"$ref": "#/$defs/answer"}},
@@ -29,8 +29,14 @@
   "$defs": {
     "position": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "commit": {"description": "A commit of this repository.", "type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "token": {
+      "description": "A short identifier: letters, digits and . _ : / -, no space, so it cannot carry a sentence.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+    },
     "sealed": {
-      "description": "A seal: SHA-256 of the RFC 8785 form of [salt, value], the salt random and kept with the value outside the log.",
+      "description": "A seal: SHA-256 of the RFC 8785 form of [salt, value], the salt random, one per field, and kept with the value outside the log.",
       "$ref": "#/$defs/sha256"
     },
     "time": {
@@ -44,10 +50,10 @@
       "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
     },
     "asker": {
-      "description": "The human persona who asked, the session they asked in and the turn of that session.",
+      "description": "The human persona who asked, the session they asked in and the turn of that session; the persona is absent only from a turn refused for having no identity.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["persona", "session", "turn"],
+      "required": ["session", "turn"],
       "properties": {
         "persona": {"$ref": "#/$defs/persona"},
         "session": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
@@ -55,11 +61,11 @@
       }
     },
     "release": {
-      "description": "The code the answer or proposal ran on: the commit of this repository, which holds the prompt, the tools, the models, the metric definitions and the catalogues.",
+      "description": "The code the turn or proposal ran on: the commit of this repository, which holds the prompt, the tools, the models, the metric definitions and the catalogues.",
       "type": "object",
       "additionalProperties": false,
       "required": ["commit"],
-      "properties": {"commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}
+      "properties": {"commit": {"$ref": "#/$defs/commit"}}
     },
     "model": {
       "description": "The model that wrote the text, as its provider names it, and every setting sent with the call; absent when no model wrote it.",
@@ -67,15 +73,22 @@
       "additionalProperties": false,
       "required": ["name", "settings"],
       "properties": {
-        "name": {"type": "string", "minLength": 1},
+        "name": {"$ref": "#/$defs/token"},
         "settings": {
           "type": "object",
-          "additionalProperties": {"type": ["string", "number", "boolean"]}
+          "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,63}$"},
+          "additionalProperties": {
+            "anyOf": [
+              {"type": "number"},
+              {"type": "boolean"},
+              {"type": "string", "pattern": "^[A-Za-z0-9._:/-]{1,64}$"}
+            ]
+          }
         }
       }
     },
     "data": {
-      "description": "The data the answer was read from: the warehouse build queried and every landed file it was built from, with when each landed, which is the answer's freshness.",
+      "description": "The data the turn read: the warehouse build queried, named by what makes it (the commit and variables it ran at, its target and every landed file it read), and when each file landed, which is the answer's freshness.",
       "type": "object",
       "additionalProperties": false,
       "required": ["build", "sources"],
@@ -83,10 +96,19 @@
         "build": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["id", "at"],
+          "required": ["id", "at", "commit", "target", "vars"],
           "properties": {
-            "id": {"description": "The build's run identifier, dbt's invocation id.", "type": "string", "minLength": 1},
-            "at": {"$ref": "#/$defs/time"}
+            "id": {"description": "The build's run identifier, dbt's invocation id.", "$ref": "#/$defs/token"},
+            "at": {"$ref": "#/$defs/time"},
+            "commit": {"description": "The commit the models were built at.", "$ref": "#/$defs/commit"},
+            "target": {"description": "The dbt profile's target the build ran on.", "enum": ["local", "bigquery"]},
+            "vars": {
+              "description": "The dbt variables given to the build over the commit's defaults; `source_rows` always, landed files or the committed samples.",
+              "type": "object",
+              "required": ["source_rows"],
+              "properties": {"source_rows": {"enum": ["landed", "sample"]}},
+              "additionalProperties": {"type": ["string", "number", "boolean", "object"]}
+            }
           }
         },
         "sources": {
@@ -106,17 +128,17 @@
       }
     },
     "metric": {
-      "description": "A MetricFlow metric the answer cites and the version of its definition it was answered at.",
+      "description": "A MetricFlow metric the answer cites and the version of its definition it was answered at; the version's scheme is the metric versioning's.",
       "type": "object",
       "additionalProperties": false,
       "required": ["name", "version"],
       "properties": {
         "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
-        "version": {"type": "string", "minLength": 1}
+        "version": {"$ref": "#/$defs/token"}
       }
     },
     "run": {
-      "description": "One warehouse job: the query as sent, the identity it ran as, the engine and job reference, and the seal of its result.",
+      "description": "One warehouse job that returned: the query as sent, the identity it ran as, the engine and job reference, and the seal of its result.",
       "type": "object",
       "additionalProperties": false,
       "required": ["query", "as", "engine", "job", "at", "result"],
@@ -127,7 +149,7 @@
           "required": ["text"],
           "properties": {
             "text": {
-              "description": "The SQL exactly as sent; every value taken from the question or from a result is bound as a parameter, never written into it.",
+              "description": "The SQL exactly as sent, passed by check_bound: no string literal and no number but 0 and 1, every other value bound as a parameter.",
               "type": "string",
               "minLength": 1
             },
@@ -139,36 +161,59 @@
         },
         "as": {"description": "The persona whose identity the warehouse ran the job as.", "$ref": "#/$defs/persona"},
         "engine": {"enum": ["duckdb", "bigquery"]},
-        "job": {"description": "The warehouse's reference to the job: a BigQuery job's project, location and id, or the local engine's run id.", "type": "string", "minLength": 1},
+        "job": {"description": "The warehouse's reference to the job: a BigQuery job's project, location and id, or the local engine's run id.", "$ref": "#/$defs/token"},
         "at": {"description": "When the job started.", "$ref": "#/$defs/time"},
         "result": {
-          "description": "The seal of the result as {columns: [name, ...], rows: [[cell, ...], ...]}, in the order returned, each cell the text the engine casts it to, or null.",
+          "description": "The seal of agent/audit.py's sealed_result: the columns, and the rows sorted by their canonical form, each cell the text the engine casts it to, or null; a rebuild matches it on the same engine.",
           "$ref": "#/$defs/sealed"
         }
       }
     },
     "answer": {
-      "description": "An answer to one question: answered, with at least one warehouse run and one metric, or abstained, when no metric or verified query covers the question.",
-      "required": ["asker", "question", "release", "outcome", "data", "metrics", "runs", "answer"],
+      "description": "One turn of a session: answered, with at least one warehouse run and one metric; abstained, when no metric or verified query covers the question; refused, for no identity or by policy; or stopped at a cap. Runs list only the jobs that returned.",
+      "required": ["asker", "agent", "question", "release", "outcome", "data", "metrics", "runs", "answer"],
       "properties": {
         "asker": {"$ref": "#/$defs/asker"},
+        "agent": {"description": "Which agent took the turn.", "enum": ["native-agent", "own-agent"]},
         "question": {"description": "The seal of the question as asked.", "$ref": "#/$defs/sealed"},
         "release": {"$ref": "#/$defs/release"},
         "model": {"$ref": "#/$defs/model"},
-        "outcome": {"enum": ["answered", "abstained"]},
+        "outcome": {"enum": ["answered", "abstained", "refused", "stopped"]},
+        "reason": {"description": "Why a turn was refused or stopped."},
         "data": {"$ref": "#/$defs/data"},
         "metrics": {"type": "array", "items": {"$ref": "#/$defs/metric"}},
         "runs": {"type": "array", "items": {"$ref": "#/$defs/run"}},
-        "answer": {"description": "The seal of the answer text as given.", "$ref": "#/$defs/sealed"}
+        "answer": {"description": "The seal of the text the turn showed.", "$ref": "#/$defs/sealed"}
       },
-      "if": {"properties": {"outcome": {"const": "answered"}}},
-      "then": {"properties": {"metrics": {"minItems": 1}, "runs": {"minItems": 1}}}
+      "allOf": [
+        {
+          "if": {"properties": {"outcome": {"const": "answered"}}},
+          "then": {"properties": {"metrics": {"minItems": 1}, "runs": {"minItems": 1}}}
+        },
+        {
+          "if": {"properties": {"outcome": {"const": "refused"}}},
+          "then": {"required": ["reason"], "properties": {"reason": {"enum": ["no-identity", "policy"]}}}
+        },
+        {
+          "if": {"properties": {"outcome": {"const": "stopped"}}},
+          "then": {"required": ["reason"], "properties": {"reason": {"enum": ["query-bytes-cap", "query-time-cap", "model-call-cap", "turn-cap"]}}}
+        },
+        {
+          "if": {"properties": {"outcome": {"enum": ["answered", "abstained"]}}},
+          "then": {"not": {"required": ["reason"]}}
+        },
+        {
+          "if": {"required": ["reason"], "properties": {"reason": {"const": "no-identity"}}},
+          "then": {"properties": {"asker": {"not": {"required": ["persona"]}}, "runs": {"maxItems": 0}}},
+          "else": {"properties": {"asker": {"required": ["persona"]}}}
+        }
+      ]
     },
     "proposal": {
       "description": "An entry the acting agent drafted at a human's request, before any decision on it.",
       "required": ["requester", "agent", "request", "release", "inputs", "draft"],
       "properties": {
-        "requester": {"$ref": "#/$defs/asker"},
+        "requester": {"$ref": "#/$defs/asker", "required": ["persona"]},
         "agent": {"description": "The agent persona that drafted the entry.", "$ref": "#/$defs/persona"},
         "request": {"description": "The seal of the request as made.", "$ref": "#/$defs/sealed"},
         "release": {"$ref": "#/$defs/release"},
@@ -178,7 +223,7 @@
       }
     },
     "approval": {
-      "description": "A human decision on one proposal: what they saw is sealed under the draft's salt, so its seal equals the proposal's draft exactly when they saw that draft.",
+      "description": "A human decision on one proposal: what they saw is sealed under the draft's salt, so its seal equals the proposal's draft exactly when they saw that draft; agent/audit.py's verify_links checks it against the proposal.",
       "required": ["proposal", "approver", "seen", "decision"],
       "properties": {
         "proposal": {
@@ -194,7 +239,7 @@
         "approver": {"$ref": "#/$defs/persona"},
         "seen": {"$ref": "#/$defs/sealed"},
         "decision": {"enum": ["approved", "rejected"]},
-        "posting": {"description": "The ERP's reference to the posted entry.", "type": "string", "minLength": 1}
+        "posting": {"description": "The ERP's reference to the posted entry.", "$ref": "#/$defs/token"}
       },
       "if": {"properties": {"decision": {"const": "approved"}}},
       "then": {"required": ["posting"]},

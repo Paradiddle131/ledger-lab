@@ -13,6 +13,7 @@ records:
     persona: accountant-chicago
     session: example-session-a
     turn: 1
+  agent: own-agent
   question: 3330784edee884e99be5c174d78abc74c1dc8a54921c15257f543829eb709291  # pragma: allowlist secret
   release:
     commit: cccccccccccccccccccccccccccccccccccccccc
@@ -26,6 +27,10 @@ records:
     build:
       id: example-build-1
       at: '2026-01-15T06:00:00Z'
+      commit: dddddddddddddddddddddddddddddddddddddddd
+      target: local
+      vars:
+        source_rows: landed
     sources:
     - name: chicago-contracts
       sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -47,9 +52,9 @@ records:
     at: '2026-01-15T10:00:02Z'
     result: 68628e2f02950f443cf2350ad64eb8a5b48867fddc8440ca1f39ff2f79cc2d6c  # pragma: allowlist secret
   answer: 51c0b0636a81933a49be12529398d6d5973921d17934fb3b49578f9657388e13  # pragma: allowlist secret
-  digest: bfd770a79167272fe298c99967c6d54f050ef19ff895425b4af54399839c019b  # pragma: allowlist secret
+  digest: e607fe414f9d31852facbcbb95b7517b7c6c57c4607818dd71bdcc667c0e907a  # pragma: allowlist secret
 - seq: 1
-  prev: bfd770a79167272fe298c99967c6d54f050ef19ff895425b4af54399839c019b  # pragma: allowlist secret
+  prev: e607fe414f9d31852facbcbb95b7517b7c6c57c4607818dd71bdcc667c0e907a  # pragma: allowlist secret
   kind: proposal
   at: '2026-01-15T11:00:00Z'
   requester:
@@ -66,19 +71,19 @@ records:
       temperature: 0
   inputs: d251224f912b7ea15e2e27c1c6b27a388fa447f7a54c1e18f7e22cb5f5544ce2  # pragma: allowlist secret
   draft: c05325477b36e25a697bd1e88dcf7cea7a0d521e0e6d63ffada46da0b03c4063  # pragma: allowlist secret
-  digest: e50bbd4c7f0960292eef0e2b8738dcd56d75ec360a892de6ff308f87cd7ff177  # pragma: allowlist secret
+  digest: d594fa87b2b0f1e3a833551713bfc562d7d685bfc5924af8273030b87fa0721b  # pragma: allowlist secret
 - seq: 2
-  prev: e50bbd4c7f0960292eef0e2b8738dcd56d75ec360a892de6ff308f87cd7ff177  # pragma: allowlist secret
+  prev: d594fa87b2b0f1e3a833551713bfc562d7d685bfc5924af8273030b87fa0721b  # pragma: allowlist secret
   kind: approval
   at: '2026-01-15T14:30:00Z'
   proposal:
     seq: 1
-    digest: e50bbd4c7f0960292eef0e2b8738dcd56d75ec360a892de6ff308f87cd7ff177  # pragma: allowlist secret
+    digest: d594fa87b2b0f1e3a833551713bfc562d7d685bfc5924af8273030b87fa0721b  # pragma: allowlist secret
   approver: approver
   seen: c05325477b36e25a697bd1e88dcf7cea7a0d521e0e6d63ffada46da0b03c4063  # pragma: allowlist secret
   decision: approved
   posting: example-move-1
-  digest: e2dca46490c3b30eece3427f5a02b7b15060c19929407534ad10374d3a6c3600  # pragma: allowlist secret
+  digest: 0b56340a246c0bbed285ab24c55c9420ebe1858da21925920a7bc0f3b421203e  # pragma: allowlist secret
 sealed:
   0:
     question:
