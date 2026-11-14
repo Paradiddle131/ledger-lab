@@ -90,8 +90,8 @@ controls:
   - id: payments-tie-to-awards
     layer: Data integrity
     owner: accountant-chicago
-    asserts: Every Chicago contract number, in the contracts table or only on payments, has one row in models/models/reconciliations/chicago_contract_reconciliation.sql with its award after revisions, its paid total without repeated rows and the one class that explains the difference, the first that holds in a fixed order; a contract paid over its award is always a break; and the unexplained breaks stay within 2 in 1,000 contract numbers and 2 in 1,000 of the dollars paid on contracts, or the build fails; over the landed files every contract's class is worked out again independently and each class's count is pinned, so any new unexplained break fails there.
+    asserts: Every Chicago contract number, in the contracts table or only on payments, has exactly one row and one class in models/models/reconciliations/chicago_contract_reconciliation.sql, its paid total leaving out the rows the repeat rule flags; every contract paid over its award is a break; and the count and the dollars of every class equal a reviewed baseline exactly, so any new or grown break fails until a person re-pins the baseline in a reviewed change. make check proves the mechanism on the committed cut, where a planted overpayment moves the pinned table; the control itself is the landed run over the full files (make reconcile-landed), whose baseline is pinned in the test and which fails on each of a planted $50m overpayment, 79 contracts paid twice, 50 term agreements paid three times their award and 200 contracts served again under a second name. A second implementation of the classes in the test guards the SQL against slips, not the definitions.
     proven_by:
-      - tests/models/test_contract_reconciliation.py::test_the_reconciliation_control_fails_on_a_break_no_class_explains
+      - tests/models/test_contract_reconciliation.py::test_the_reconciliation_control_fails_on_a_planted_break
       - tests/models/test_contract_reconciliation.py::test_the_real_landing_reconciles_every_contract
     status: implemented

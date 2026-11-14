@@ -3,14 +3,16 @@ models:
     description: >
       Chicago's payments tied to their contracts' awards: one row per contract number, each
       contract of the contracts table and each number payments carry that the contracts table
-      lacks, with its award after revisions, what was paid against it leaving out repeated rows,
-      the difference and one class saying why they differ, the first in a fixed order that holds
-      (the model's SQL gives the order). An award is a ceiling the City may pay up to, so a
-      contract paid less than its award (`unspent`) or nothing yet (`unpaid`) is not a break, nor
-      is a blanket awarded 0 (`no_fixed_award`); a contract paid over its award, a negative award
-      and a number the contracts table lacks are breaks, each classed by the first cause that
-      accounts for the excess, and `unexplained` where none does. Direct vouchers, which are on no
-      contract, stay out.
+      lacks, with the award the payments are held to, what was paid against it leaving out the
+      rows the repeat rule flags, the difference and one class saying why they differ, the first
+      in a fixed order that holds (the model's SQL gives the order). An award is a ceiling the
+      City may pay up to, so a contract paid less than its award (`unspent`) or nothing yet
+      (`unpaid`) is not a break, nor is a blanket whose every revision awards 0
+      (`no_fixed_award`); a contract paid over its award, a negative award and a number the
+      contracts table lacks are breaks, each classed by the first cause that accounts for the
+      excess, and `unexplained` where none does. Two tags describe a break without explaining
+      it (`is_term_agreement`, `excess_in_2002_row`). Direct vouchers, which are on no contract,
+      stay out.
     data_tests:
       - unique:
           arguments:
@@ -30,24 +32,34 @@ models:
         description: >
           The contract's award once every revision is applied (`int_chicago__contracts`); null
           where the contracts table lacks the number.
+      - name: award_held_to
+        description: >
+          The award the paid total is compared with: the award after revisions, except where
+          revisions that are not all 0 net to 0 (an award taken back in full, 1,476 contracts on
+          the pinned files), where it is the highest award ever in force, since a net 0 there is
+          no blanket and a payment over what was ever awarded is a break.
       - name: revision_count
         description: The revisions the award sums, its original award included; 0 where the number is not found.
       - name: is_term_agreement
         description: >
-          True on a term agreement: a contract typed `Term Agreement` on any of its rows, or
-          numbered `T` and five digits, as most contracts typed so are. Its payments seldom keep
-          to its award: on the pinned files 7 of the 1,156 paid term agreements with a fixed
-          award were paid it, against 25,099 of the 58,750 other contracts.
+          A tag, true on a term agreement: a contract typed `Term Agreement` on any of its rows,
+          or numbered `T` and five digits, as most contracts typed so are. Its payments seldom
+          keep to its award (on the pinned files 7 of the 1,156 paid term agreements with an award
+          were paid it, against 25,281 of the 58,759 other contracts), but being one explains no
+          particular excess, so it classes nothing.
         data_tests:
           - not_null
       - name: payment_rows
-        description: The payment rows on the number, leaving out repeats.
+        description: The payment rows on the number that the repeat rule does not flag.
         data_tests:
           - not_null
       - name: paid
         description: >
-          The US dollars paid on the number, leaving out every row flagged `is_repeat`, so each
-          payment counts once; 0 when nothing was paid.
+          The US dollars paid on the number over every row the repeat rule does not flag
+          (`is_repeat`), so a payment the rule finds served again counts once; 0 when nothing was
+          paid. Rows the same but for the vendor name with no department on either, which the
+          rule leaves unflagged, are both counted here, and `paid_again_under_another_name` says
+          how much the second names add.
         data_tests:
           - not_null
       - name: repeat_rows
@@ -62,48 +74,48 @@ models:
           - not_null
       - name: difference
         description: >
-          `paid` less `award_after_revisions`: positive when paid over the award; null where the
-          number is not found.
+          `paid` less `award_held_to`: positive when paid over the award; null where the number
+          is not found.
       - name: rounding_allowance
         description: >
           5 cents for each revision: the City serves each revision's award to the dime (no award
           amount on the pinned files has a second decimal), so a paid total within this of the
-          award ties (3,146 contracts on the pinned files tie this way and not to the cent).
+          award ties (3,189 contracts on the pinned files tie this way and not to the cent).
         data_tests:
           - not_null
       - name: paid_again_under_another_name
         description: >
-          What the rows add that repeat another unflagged row on the contract in every column but
-          the vendor name (same voucher, amount, day or rolled-up year): the City serves some
-          payments under two names of one vendor, a spelling (`ACME INC`, `ACME, INC.`) or an old
-          and a new company name, and the first name in sort order is kept. Null where nothing was
-          paid.
-      - name: peak_award_while_paid
+          What `paid` holds in rows that repeat another counted row on the number in every column
+          but the vendor name (same voucher, amount, day or rolled-up year), neither with a
+          department, the first name in sort order kept: 1,194 such pairs sit on contracts on the
+          pinned files, and on 401 of the 432 contracts holding one every payment is served twice
+          so, which is why a contract they take over its award is classed `paid_under_two_names`.
+          Null where nothing was paid.
+      - name: award_at_last_payment
         description: >
-          The highest award in force on any day a revision was approved, up to the end of the
-          period of the last payment; null where nothing was paid.
+          The award in force at the end of the period of the last payment (31 December of a
+          rolled-up row's year, 2002 for the 2002 row); null where nothing was paid or no
+          revision was approved by then.
       - name: paid_before_fixed_award
         description: >
-          What was paid, leaving out the copies under another name, in periods whose end found
-          the award in force at 0 or below, or before any revision was approved.
+          What `paid` holds in payments whose period ended before the award in force first rose
+          above 0, or on a contract whose award never did.
       - name: paid_in_2002_row
         description: >
-          What the 2002 row adds, leaving out the copies under another name: the City serves every
-          payment of 1996 to 2002 of a vendor and contract as that one amount.
+          What the 2002 row adds to `paid`: the City serves every payment of 1996 to 2002 of a
+          vendor and contract as that one amount.
       - name: break_class
         description: >
           Why the paid total and the award differ, the first that holds in this order:
           `contract_not_found` (payments carry a number the contracts table lacks),
-          `negative_award` (the revisions take off more than the award), `no_fixed_award` (an
-          award of 0, a blanket that depends upon requirements), `unpaid`, `paid_in_full` (within
-          the rounding allowance), `unspent` (paid less), and for a contract paid over its award
-          the first adjustment that brings it within the award, the allowance included:
-          `paid_under_two_names` (leaving out the copies under another name),
-          `reduced_after_payment` (within the peak award while paid: a later revision cut the
-          award below what had been paid), `paid_before_fixed_award` (leaving out what was paid
-          while the award was 0 or none), `term_agreement` (any term agreement),
-          `rolled_up_before_2003` (leaving out the 2002 row, whose 1996 to 2002 in one amount
-          no award in force can be checked against), and `unexplained` where none does.
+          `negative_award` (the revisions take off more than the award), `no_fixed_award` (every
+          revision awards 0, a blanket that depends upon requirements), `unpaid`,
+          `paid_in_full` (within the rounding allowance), `unspent` (paid less), and for a
+          contract paid over its award, the allowance included: `paid_under_two_names` (within
+          its award without the second-name rows), `reduced_after_payment` (within the award in
+          force at the end of the last payment's period: a later revision cut the award below
+          what had been paid), `paid_before_fixed_award` (within its award without what was paid
+          before the award first rose above 0), and `unexplained` where none of these holds.
         data_tests:
           - not_null
           - accepted_values:
@@ -118,78 +130,119 @@ models:
                   - paid_under_two_names
                   - reduced_after_payment
                   - paid_before_fixed_award
-                  - term_agreement
-                  - rolled_up_before_2003
                   - unexplained
       - name: is_break
         description: >
           True unless the class is `no_fixed_award`, `unpaid`, `paid_in_full` or `unspent`.
         data_tests:
           - not_null
+      - name: excess_in_2002_row
+        description: >
+          A tag, true on a contract paid over its award whose excess all sits in the 2002 row:
+          without that row it is within its award. It says where the excess is, not why: most
+          contracts with a 2002 row are paid in full (15,257 of the 27,238 with an award on the
+          pinned files), so the row is no cause by itself.
+        data_tests:
+          - not_null
 
 unit_tests:
   - name: each_contract_takes_the_first_class_that_holds
     description: >
-      Invented contracts and payments, one or two per class, labelled as invented: each contract
-      takes the first class in the order that holds, a repeated row stays out of the paid total,
-      a direct voucher is on no contract, and a contract over its award for two causes takes the
-      first (BLANKET's excess sits in its 2002 row too, which `rolled_up_before_2003` would also
-      explain).
+      Invented contracts and payments, labelled as invented: each contract takes the first class
+      in the order that holds, a repeated row stays out of the paid total, a direct voucher is on
+      no contract, and the tags mark without classing. Contracts that two classes fit take the
+      first (MULTI1 is within its award without its second-name rows and within the award at its
+      last payment; MULTI2 within the award at its last payment and without what was paid before
+      its award was fixed; BLANKET's excess also sits in its 2002 row); a contract a dime over
+      its award is over it (JUSTOVER), one 4 cents under ties (JUSTUNDER); a rolled-up year is
+      placed at its end (ROLLED is within the award in force on 31 December, not on 1 January);
+      and revisions that net to 0 are held to their highest award, so a payment within it after the
+      award was taken back is unspent (NETZEROLATE) and one over it a break (NETZERO).
     model: chicago_contract_reconciliation
     given:
       - input: ref('int_chicago__contracts')
         rows:
           - {contract_number: FULL, award_after_revisions: 1000.0, revision_count: 1}
+          - {contract_number: JUSTUNDER, award_after_revisions: 1000.0, revision_count: 1}
+          - {contract_number: JUSTOVER, award_after_revisions: 1000.0, revision_count: 1}
           - {contract_number: REPEATED, award_after_revisions: 1000.0, revision_count: 1}
           - {contract_number: UNSPENT, award_after_revisions: 1000.0, revision_count: 1}
           - {contract_number: UNPAID, award_after_revisions: 500.0, revision_count: 1}
           - {contract_number: BLANKET0, award_after_revisions: 0, revision_count: 1}
+          - {contract_number: ZEROUNPAID, award_after_revisions: 0, revision_count: 1}
+          - {contract_number: NETZERO, award_after_revisions: 0, revision_count: 2}
+          - {contract_number: NETZEROLATE, award_after_revisions: 0, revision_count: 2}
           - {contract_number: NEGATIVE, award_after_revisions: -200.0, revision_count: 2}
+          - {contract_number: NEGUNPAID, award_after_revisions: -200.0, revision_count: 2}
           - {contract_number: TWONAMES, award_after_revisions: 1000.0, revision_count: 1}
           - {contract_number: REDUCED, award_after_revisions: 800.0, revision_count: 2}
+          - {contract_number: ROLLED, award_after_revisions: 800.0, revision_count: 2}
+          - {contract_number: MULTI1, award_after_revisions: 800.0, revision_count: 2}
+          - {contract_number: MULTI2, award_after_revisions: 800.0, revision_count: 3}
           - {contract_number: BLANKET, award_after_revisions: 500.0, revision_count: 2}
           - {contract_number: T00001, award_after_revisions: 1000.0, revision_count: 1}
-          - {contract_number: TYPED, award_after_revisions: 1000.0, revision_count: 1}
           - {contract_number: OLD, award_after_revisions: 1000.0, revision_count: 1}
           - {contract_number: OVER, award_after_revisions: 1000.0, revision_count: 1}
       - input: ref('int_chicago__contract_revisions')
         rows:
           - {contract_number: FULL, approved_on: 2024-01-10, award_amount: 1000.0}
+          - {contract_number: JUSTUNDER, approved_on: 2024-01-10, award_amount: 1000.0}
+          - {contract_number: JUSTOVER, approved_on: 2024-01-10, award_amount: 1000.0}
           - {contract_number: REPEATED, approved_on: 2024-01-10, award_amount: 1000.0}
           - {contract_number: UNSPENT, approved_on: 2024-01-10, award_amount: 1000.0}
           - {contract_number: UNPAID, approved_on: 2024-01-10, award_amount: 500.0}
           - {contract_number: BLANKET0, approved_on: 2024-01-10, award_amount: 0}
+          - {contract_number: ZEROUNPAID, approved_on: 2024-01-10, award_amount: 0}
+          - {contract_number: NETZERO, approved_on: 2020-01-01, award_amount: 500.0}
+          - {contract_number: NETZERO, approved_on: 2021-01-01, award_amount: -500.0}
+          - {contract_number: NETZEROLATE, approved_on: 2020-01-01, award_amount: 500.0}
+          - {contract_number: NETZEROLATE, approved_on: 2021-01-01, award_amount: -500.0}
           - {contract_number: NEGATIVE, approved_on: 2024-01-10, award_amount: 100.0}
           - {contract_number: NEGATIVE, approved_on: 2024-02-10, award_amount: -300.0}
+          - {contract_number: NEGUNPAID, approved_on: 2024-01-10, award_amount: 100.0}
+          - {contract_number: NEGUNPAID, approved_on: 2024-02-10, award_amount: -300.0}
           - {contract_number: TWONAMES, approved_on: 2024-01-10, award_amount: 1000.0}
           - {contract_number: REDUCED, approved_on: 2023-01-01, award_amount: 1000.0}
           - {contract_number: REDUCED, approved_on: 2024-01-01, award_amount: -200.0}
+          - {contract_number: ROLLED, approved_on: 2010-06-01, award_amount: 1000.0}
+          - {contract_number: ROLLED, approved_on: 2011-03-01, award_amount: -200.0}
+          - {contract_number: MULTI1, approved_on: 2023-01-01, award_amount: 1000.0}
+          - {contract_number: MULTI1, approved_on: 2024-01-01, award_amount: -200.0}
+          - {contract_number: MULTI2, approved_on: 2020-01-01, award_amount: 0}
+          - {contract_number: MULTI2, approved_on: 2021-01-01, award_amount: 1000.0}
+          - {contract_number: MULTI2, approved_on: 2022-01-01, award_amount: -200.0}
           - {contract_number: BLANKET, approved_on: 2001-01-01, award_amount: 0}
           - {contract_number: BLANKET, approved_on: 2003-06-01, award_amount: 500.0}
           - {contract_number: T00001, approved_on: 2020-01-10, award_amount: 1000.0}
-          - {contract_number: TYPED, approved_on: 2020-01-10, award_amount: 1000.0}
           - {contract_number: OLD, approved_on: 1999-01-01, award_amount: 1000.0}
           - {contract_number: OVER, approved_on: 2024-01-10, award_amount: 1000.0}
       - input: ref('stg_chicago__contracts')
         rows:
           - {contract_number: T00001, contract_type: Commodities}
-          - {contract_number: TYPED, contract_type: Term Agreement}
-          - {contract_number: OVER, contract_type: Construction}
+          - {contract_number: OVER, contract_type: Term Agreement}
       - input: ref('int_chicago__payments')
         rows:
           - {payment_key: full, contract_number: FULL, document_number: V1, amount: 1000.04, payment_date: 2024-05-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 1000.0, is_repeat: false}
+          - {payment_key: justunder, contract_number: JUSTUNDER, document_number: V1, amount: 999.96, payment_date: 2024-05-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 1000.0, is_repeat: false}
+          - {payment_key: justover, contract_number: JUSTOVER, document_number: V1, amount: 1000.06, payment_date: 2024-05-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 1000.0, is_repeat: false}
           - {payment_key: repeated, contract_number: REPEATED, document_number: V2, amount: 1000.0, payment_date: 2024-05-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 1000.0, is_repeat: false}
           - {payment_key: repeated-again, contract_number: REPEATED, document_number: V2, amount: 1000.0, payment_date: 2024-05-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 1000.0, is_repeat: true}
           - {payment_key: unspent, contract_number: UNSPENT, document_number: V3, amount: 400.0, payment_date: 2024-05-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 1000.0, is_repeat: false}
           - {payment_key: blanket0, contract_number: BLANKET0, document_number: V4, amount: 300.0, payment_date: 2024-05-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 0, is_repeat: false}
+          - {payment_key: netzero, contract_number: NETZERO, document_number: V4, amount: 600.0, payment_date: 2020-06-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 0, is_repeat: false}
+          - {payment_key: netzerolate, contract_number: NETZEROLATE, document_number: V4, amount: 450.0, payment_date: 2021-06-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 0, is_repeat: false}
           - {payment_key: negative, contract_number: NEGATIVE, document_number: V5, amount: 50.0, payment_date: 2024-05-01, vendor_name: EXAMPLE A LLC, award_after_revisions: -200.0, is_repeat: false}
           - {payment_key: twonames, contract_number: TWONAMES, document_number: V6, amount: 1000.0, payment_date: 2024-03-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 1000.0, is_repeat: false}
           - {payment_key: twonames-other, contract_number: TWONAMES, document_number: V6, amount: 1000.0, payment_date: 2024-03-01, vendor_name: "EXAMPLE A, LLC", award_after_revisions: 1000.0, is_repeat: false}
           - {payment_key: reduced, contract_number: REDUCED, document_number: V7, amount: 900.0, payment_date: 2023-06-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 800.0, is_repeat: false}
+          - {payment_key: rolled, contract_number: ROLLED, amount: 900.0, rolled_up_year: 2010, vendor_name: EXAMPLE A LLC, award_after_revisions: 800.0, is_repeat: false}
+          - {payment_key: multi1, contract_number: MULTI1, document_number: V20, amount: 450.0, payment_date: 2023-03-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 800.0, is_repeat: false}
+          - {payment_key: multi1-other, contract_number: MULTI1, document_number: V20, amount: 450.0, payment_date: 2023-03-01, vendor_name: "EXAMPLE A, LLC", award_after_revisions: 800.0, is_repeat: false}
+          - {payment_key: multi2-early, contract_number: MULTI2, document_number: V21, amount: 300.0, payment_date: 2020-06-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 800.0, is_repeat: false}
+          - {payment_key: multi2-late, contract_number: MULTI2, document_number: V22, amount: 600.0, payment_date: 2021-06-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 800.0, is_repeat: false}
           - {payment_key: blanket-2002, contract_number: BLANKET, amount: 700.0, rolled_up_year: 2002, vendor_name: EXAMPLE A LLC, award_after_revisions: 500.0, is_repeat: false}
           - {payment_key: blanket-2004, contract_number: BLANKET, amount: 400.0, rolled_up_year: 2004, vendor_name: EXAMPLE A LLC, award_after_revisions: 500.0, is_repeat: false}
           - {payment_key: term, contract_number: T00001, document_number: V8, amount: 3000.0, payment_date: 2025-05-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 1000.0, is_repeat: false}
-          - {payment_key: typed, contract_number: TYPED, document_number: V9, amount: 3000.0, payment_date: 2025-05-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 1000.0, is_repeat: false}
           - {payment_key: old-2002, contract_number: OLD, amount: 800.0, rolled_up_year: 2002, vendor_name: EXAMPLE A LLC, award_after_revisions: 1000.0, is_repeat: false}
           - {payment_key: old-2003, contract_number: OLD, amount: 900.0, rolled_up_year: 2003, vendor_name: EXAMPLE A LLC, award_after_revisions: 1000.0, is_repeat: false}
           - {payment_key: over, contract_number: OVER, document_number: V10, amount: 1200.0, payment_date: 2025-05-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 1000.0, is_repeat: false}
@@ -197,17 +250,25 @@ unit_tests:
           - {payment_key: direct, document_number: V12, amount: 99.0, payment_date: 2025-05-01, vendor_name: EXAMPLE A LLC, is_repeat: false}
     expect:
       rows:
-        - {contract_number: FULL, paid: 1000.04, repeat_rows: 0, break_class: paid_in_full, is_break: false}
-        - {contract_number: REPEATED, paid: 1000.0, repeat_rows: 1, break_class: paid_in_full, is_break: false}
-        - {contract_number: UNSPENT, paid: 400.0, repeat_rows: 0, break_class: unspent, is_break: false}
-        - {contract_number: UNPAID, paid: 0, repeat_rows: 0, break_class: unpaid, is_break: false}
-        - {contract_number: BLANKET0, paid: 300.0, repeat_rows: 0, break_class: no_fixed_award, is_break: false}
-        - {contract_number: NEGATIVE, paid: 50.0, repeat_rows: 0, break_class: negative_award, is_break: true}
-        - {contract_number: TWONAMES, paid: 2000.0, repeat_rows: 0, break_class: paid_under_two_names, is_break: true}
-        - {contract_number: REDUCED, paid: 900.0, repeat_rows: 0, break_class: reduced_after_payment, is_break: true}
-        - {contract_number: BLANKET, paid: 1100.0, repeat_rows: 0, break_class: paid_before_fixed_award, is_break: true}
-        - {contract_number: T00001, paid: 3000.0, repeat_rows: 0, break_class: term_agreement, is_break: true}
-        - {contract_number: TYPED, paid: 3000.0, repeat_rows: 0, break_class: term_agreement, is_break: true}
-        - {contract_number: OLD, paid: 1700.0, repeat_rows: 0, break_class: rolled_up_before_2003, is_break: true}
-        - {contract_number: OVER, paid: 1200.0, repeat_rows: 0, break_class: unexplained, is_break: true}
-        - {contract_number: MISSING, paid: 250.0, repeat_rows: 0, break_class: contract_not_found, is_break: true}
+        - {contract_number: FULL, paid: 1000.04, repeat_rows: 0, break_class: paid_in_full, is_break: false, is_term_agreement: false, excess_in_2002_row: false}
+        - {contract_number: JUSTUNDER, paid: 999.96, repeat_rows: 0, break_class: paid_in_full, is_break: false, is_term_agreement: false, excess_in_2002_row: false}
+        - {contract_number: JUSTOVER, paid: 1000.06, repeat_rows: 0, break_class: unexplained, is_break: true, is_term_agreement: false, excess_in_2002_row: false}
+        - {contract_number: REPEATED, paid: 1000.0, repeat_rows: 1, break_class: paid_in_full, is_break: false, is_term_agreement: false, excess_in_2002_row: false}
+        - {contract_number: UNSPENT, paid: 400.0, repeat_rows: 0, break_class: unspent, is_break: false, is_term_agreement: false, excess_in_2002_row: false}
+        - {contract_number: UNPAID, paid: 0, repeat_rows: 0, break_class: unpaid, is_break: false, is_term_agreement: false, excess_in_2002_row: false}
+        - {contract_number: BLANKET0, paid: 300.0, repeat_rows: 0, break_class: no_fixed_award, is_break: false, is_term_agreement: false, excess_in_2002_row: false}
+        - {contract_number: ZEROUNPAID, paid: 0, repeat_rows: 0, break_class: no_fixed_award, is_break: false, is_term_agreement: false, excess_in_2002_row: false}
+        - {contract_number: NETZERO, paid: 600.0, repeat_rows: 0, break_class: unexplained, is_break: true, is_term_agreement: false, excess_in_2002_row: false}
+        - {contract_number: NETZEROLATE, paid: 450.0, repeat_rows: 0, break_class: unspent, is_break: false, is_term_agreement: false, excess_in_2002_row: false}
+        - {contract_number: NEGATIVE, paid: 50.0, repeat_rows: 0, break_class: negative_award, is_break: true, is_term_agreement: false, excess_in_2002_row: false}
+        - {contract_number: NEGUNPAID, paid: 0, repeat_rows: 0, break_class: negative_award, is_break: true, is_term_agreement: false, excess_in_2002_row: false}
+        - {contract_number: TWONAMES, paid: 2000.0, repeat_rows: 0, break_class: paid_under_two_names, is_break: true, is_term_agreement: false, excess_in_2002_row: false}
+        - {contract_number: REDUCED, paid: 900.0, repeat_rows: 0, break_class: reduced_after_payment, is_break: true, is_term_agreement: false, excess_in_2002_row: false}
+        - {contract_number: ROLLED, paid: 900.0, repeat_rows: 0, break_class: reduced_after_payment, is_break: true, is_term_agreement: false, excess_in_2002_row: false}
+        - {contract_number: MULTI1, paid: 900.0, repeat_rows: 0, break_class: paid_under_two_names, is_break: true, is_term_agreement: false, excess_in_2002_row: false}
+        - {contract_number: MULTI2, paid: 900.0, repeat_rows: 0, break_class: reduced_after_payment, is_break: true, is_term_agreement: false, excess_in_2002_row: false}
+        - {contract_number: BLANKET, paid: 1100.0, repeat_rows: 0, break_class: paid_before_fixed_award, is_break: true, is_term_agreement: false, excess_in_2002_row: true}
+        - {contract_number: T00001, paid: 3000.0, repeat_rows: 0, break_class: unexplained, is_break: true, is_term_agreement: true, excess_in_2002_row: false}
+        - {contract_number: OLD, paid: 1700.0, repeat_rows: 0, break_class: unexplained, is_break: true, is_term_agreement: false, excess_in_2002_row: true}
+        - {contract_number: OVER, paid: 1200.0, repeat_rows: 0, break_class: unexplained, is_break: true, is_term_agreement: true, excess_in_2002_row: false}
+        - {contract_number: MISSING, paid: 250.0, repeat_rows: 0, break_class: contract_not_found, is_break: true, is_term_agreement: false, excess_in_2002_row: false}
