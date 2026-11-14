@@ -4,17 +4,17 @@
 -- name is matched only when that rule's candidates are one legal entity, and ambiguous otherwise.
 with vendors as (
     select 'chicago' as entity_id, 'US' as home_country, vendor_name, count(*) as landed_rows
-    from {{ source('landing', 'chicago-contracts') }}
+    from {{ landed_or_sample('landing', 'chicago-contracts', 'vendor_contracts_sample') }}
     where vendor_name is not null
     group by vendor_name
     union all
     select 'chicago', 'US', vendor_name, count(*)
-    from {{ source('landing', 'chicago-payments') }}
+    from {{ landed_or_sample('landing', 'chicago-payments', 'vendor_payments_sample') }}
     where vendor_name is not null
     group by vendor_name
     union all
     select 'uk-transport', 'GB', supplier, count(*)
-    from {{ source('landing', 'uk-transport-spend-2025') }}
+    from {{ landed_or_sample('landing', 'uk-transport-spend-2025', 'vendor_suppliers_sample') }}
     where supplier is not null
     group by supplier
 ),
@@ -45,7 +45,7 @@ entity_names as (
         "Entity.LegalAddress.Country" as country,
         coalesce("Entity.EntityStatus" = 'ACTIVE', false) as active,
         {{ vendor_match_key('"Entity.LegalName"') }} as match_key
-    from {{ source('landing', 'gleif-legal-entities') }}
+    from {{ landed_or_sample('landing', 'gleif-legal-entities', 'vendor_legal_entities_sample') }}
 ),
 
 entity_keys as (

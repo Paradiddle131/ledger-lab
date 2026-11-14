@@ -1,68 +1,36 @@
-"""The UK Department for Transport's spend as the fixture landing holds it: the committed real rows
-(`uk_transport_sample.yaml`) and a few invented people, served again as the Department serves its
-monthly files and landed through the landing step with the test key, so every hashed cell is the
-step's own work and no hash made with a real key enters the tree.
+"""The UK Department for Transport's spend sample: the committed real rows
+(`uk_transport_sample.yaml`) served again as the Department serves its monthly files and landed
+through the landing step with a test key and the vendor seeds' register, so every hashed cell is
+the step's own work with that key and no hash made with a real key enters the tree. The UK sample
+seed holds exactly what this lands (`python -m tests.models.uk_transport_sample` rewrites it).
 
-Contains public sector information licensed under the Open Government Licence v3.0; every person's
-name and every figure on a person's row is invented.
+Contains public sector information licensed under the Open Government Licence v3.0.
 """
 
 import csv
 import io
+import tempfile
 from pathlib import Path
-from typing import Any
 
+import duckdb
 import yaml
 
 from ingest import fetch
 from ingest.entities import Record, Register
 from ingest.individuals import KEY_VARIABLE
-from ingest.uk_transport.spend import FAMILY, LAYOUTS, SET, step
+from ingest.uk_transport.spend import COLUMNS, FAMILY, LAYOUTS, SET, step
 
 SAMPLE = Path(__file__).with_name("uk_transport_sample.yaml")
-KEY = {KEY_VARIABLE: "k" * 32}
-# Invented people, each row as the sample's: file, paying body, date, supplier, transaction number
-# and amount as served. One person is paid in two files under one transaction number; the last row
-# is one the Department itself redacted.
-PEOPLE = (
-    (
-        "dft-spending-over-25000-april-2025.csv",
-        "Maritime and Coastguard Agency",
-        "15/04/2025",
-        "JANE EXAMPLE",
-        "4400123",
-        "£30,000.00",
-    ),
-    (
-        "dft-spending-over-25000-march-2026.csv",
-        "Maritime and Coastguard Agency",
-        "16/03/2026",
-        "JANE EXAMPLE",
-        "4400123",
-        "£31,250.50",
-    ),
-    (
-        "dft-spending-over-25000-september-2025.csv",
-        "National Highways",
-        "09/09/2025",
-        "JOHN Q EXAMPLE",
-        "1049999",
-        "£45,000.00",
-    ),
-    (
-        "dft-spending-over-25000-october-2025.csv",
-        "DVSA",
-        "14/10/2025",
-        "REDACTED",
-        "5100099999",
-        "£27,500.00",
-    ),
-)
+MODELS = Path(__file__).resolve().parents[2] / "models"
+SEED = MODELS / "seeds" / "staging" / "uk_transport" / "uk_transport_spend_sample.csv"
+REGISTER = MODELS / "seeds" / "intermediate" / "vendors" / "vendor_legal_entities_sample.csv"
+# The key the sample is landed with: a test key, so no committed row depends on the real one.
+TEST_KEY = {KEY_VARIABLE: "test-key-" + "k" * 32}
 
 
 def sample_rows() -> list[tuple[str, ...]]:
-    """The committed real rows, then the invented people's."""
-    return [tuple(r) for r in yaml.safe_load(SAMPLE.read_text())["rows"]] + list(PEOPLE)
+    """The committed rows: file, paying body, date, supplier, transaction number, amount."""
+    return [tuple(r) for r in yaml.safe_load(SAMPLE.read_text())["rows"]]
 
 
 def served_files(rows: list[tuple[str, ...]]) -> dict[str, bytes]:
@@ -83,9 +51,40 @@ def served_files(rows: list[tuple[str, ...]]) -> dict[str, bytes]:
     return {urls[f]: text.getvalue().encode("cp1252") for f, text in files.items()}
 
 
-def land(path: Path, register: list[dict[str, Any]]) -> Path:
-    """The sample landed at `path` through the step, with the sample register vouching as the
-    landed one does."""
-    vouching = Register(Record(r["legal_name"], r["category"], r["form"]) for r in register)
-    path.write_bytes(step(served_files(sample_rows()), KEY, vouching))
-    return path
+def landed() -> list[tuple[str | None, ...]]:
+    """The sample's rows as the step lands them, in `COLUMNS`, every cell as text or null."""
+    with REGISTER.open() as f:
+        register = Register(
+            Record(
+                r["Entity.LegalName"],
+                r["Entity.EntityCategory"],
+                r["Entity.LegalForm.EntityLegalFormCode"],
+            )
+            for r in csv.DictReader(f)
+        )
+    parquet = step(served_files(sample_rows()), TEST_KEY, register)
+    columns = ", ".join(f'cast("{c}" as varchar)' for c in COLUMNS)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / SET
+        path.write_bytes(parquet)
+        sql = f"select {columns} from read_parquet(?) order by source_file, source_row"  # noqa: S608
+        return duckdb.connect().execute(sql, [str(path)]).fetchall()
+
+
+def seed_rows() -> list[tuple[str | None, ...]]:
+    """The committed seed's rows, an empty cell read as null as dbt reads it."""
+    with SEED.open(newline="") as f:
+        rows = list(csv.reader(f))
+    assert tuple(rows[0]) == COLUMNS
+    return [tuple(cell or None for cell in row) for row in rows[1:]]
+
+
+def write_seed() -> None:
+    with SEED.open("w", newline="") as f:
+        writer = csv.writer(f, lineterminator="\n")
+        writer.writerow(COLUMNS)
+        writer.writerows([cell or "" for cell in row] for row in landed())
+
+
+if __name__ == "__main__":
+    write_seed()

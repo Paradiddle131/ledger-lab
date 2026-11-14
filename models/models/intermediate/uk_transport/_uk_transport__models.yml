@@ -109,6 +109,15 @@ models:
         description: "Null: the Department's files carry no award."
       - name: source_table
         description: "`uk-transport-spend-2025`, the landed set the row comes from."
+      - name: is_repeat
+        description: >
+          False on every row: nothing in the Department's files tells a payment served twice from
+          two equal lines of one document. On the pinned files 121 rows fall in 56 groups identical
+          in every landed cell within their file (65 extra copies); every group is consecutive rows
+          under one transaction number (21 groups a clear number, 2 the placeholder `#`, 33 a keyed
+          hash, whose rows' descriptions and postcodes the landing drops, so they are identical only
+          as landed), and the files carry no award or total to tie them against. Each stays a
+          payment of its own.
 
 unit_tests:
   - name: a_revised_month_supersedes_its_first_file_and_both_are_kept
