@@ -179,13 +179,13 @@ def test_the_rates_are_pinned_to_a_closed_period_over_the_covered_years() -> Non
 
 @pytest.mark.landed
 def test_the_landed_rates_cover_every_working_day_and_no_closing_day() -> None:
+    """Which days have a rate, by the TARGET calendar; the rates' keys, values and counts are
+    their quality suite's (`ingest/quality`)."""
     con = duckdb.connect()
     con.read_parquet(str(landed_file(SOURCE))).create_view("r")
     first, last = pinned_period()
     open_days, gaps = working_days(first, last)
     landed_rows = con.execute("SELECT date, currency, rate FROM r").fetchall()
-    assert len(landed_rows) == len({(d, c) for d, c, _ in landed_rows}), "one row per date"
-    assert all(Decimal(rate) > 0 for _, _, rate in landed_rows)
     for currency in ("GBP", "USD"):
         days = {date.fromisoformat(d) for d, c, _ in landed_rows if c == currency}
         assert days == open_days, f"{currency}: a working day is missing or a closed day landed"
@@ -193,4 +193,3 @@ def test_the_landed_rates_cover_every_working_day_and_no_closing_day() -> None:
             f"{currency}: {len(days)} rates from {min(days)} to {max(days)},"
             f" {len(gaps)} weekday closing days absent: {sorted(map(str, gaps))}"
         )
-    assert {c for _, c, _ in landed_rows} == {"GBP", "USD"}

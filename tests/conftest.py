@@ -75,6 +75,11 @@ def columns() -> dict[str, Any]:
 
 
 @pytest.fixture(scope="session")
+def visibility() -> dict[str, Any]:
+    return load_checked(REPO / "access/visibility.yaml", REPO / "access/visibility.schema.json")
+
+
+@pytest.fixture(scope="session")
 def glossary() -> dict[str, Any]:
     return load_checked(REPO / "semantics/glossary.yaml", REPO / "semantics/glossary.schema.json")
 

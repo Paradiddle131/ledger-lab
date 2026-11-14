@@ -1,0 +1,154 @@
+models:
+  - name: group_totals
+    description: >
+      The group-totals data product: what each entity spent, by span, in its own currency and in
+      the reporting currency (the `group_totals` var's, EUR) at actual and at constant rates. One
+      row per entity, span and basis; a span is one of the entity's fiscal periods, or its whole
+      fiscal year for figures the source gives only by year (`fiscal_period` null), and a yearly
+      figure is never spread over months. The entities bring different things, so every row says
+      what its figure is (`basis`): the City of Chicago all its payments, split into direct
+      vouchers, dated contract payments and yearly roll-ups, since its dated rows are almost all
+      direct vouchers before 2025 and mostly contract payments from then on; the UK Department for
+      Transport only its payments over £25,000 and only for fiscal 2025; the Dutch central
+      government no payments at all but its gross cash-expenditure outturn for a year, the whole
+      State's budget, so the scales differ by orders of magnitude. A group total for a span is the
+      sum of the rows of that span across entities, and is only as comparable as their bases: a
+      month's total is Chicago's direct vouchers and dated contract payments, with the UK's large
+      payments from April 2025 to March 2026; a calendar year's whole-year rows are Chicago's
+      yearly roll-ups (2023 and 2024) and the Dutch outturn (2023 to 2025), which no month holds,
+      and are about 99% Dutch. Left out, and counted beside the totals by entity, year, basis and
+      rule in `group_totals_left_out`: payments the source serves again, years the fiscal
+      calendars do not cover, Dutch years with no outturn served (2026: a budget never stands in
+      for spend), and any entity's span the ECB rates do not cover; commitments and receipts are
+      never spend and never figures. The figures themselves, one row per payment, are in the
+      intermediate layer (`int_group_totals__figures`), not in the product. Translated figures are derived from the ECB's reference rates (Source:
+      European Central Bank). Aggregation thresholds for the personas granted `aggregate` access
+      are not applied here.
+    columns:
+      - name: group_total_key
+        description: The row's key, entity, year, period (or `year`) and basis (`chicago-2024-3-direct-vouchers`).
+        data_tests:
+          - unique
+          - not_null
+      - name: entity_id
+        description: The entity, as in the fiscal calendars and access/personas.yaml.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [chicago, uk-transport, nl-government]
+      - name: fiscal_year
+        description: The entity's fiscal year, labelled by the calendar year it opens in.
+        data_tests:
+          - not_null
+      - name: fiscal_period
+        description: >
+          The entity's fiscal period (1 to 12, a calendar month); null on a row for a whole fiscal
+          year, whose figures have a year and no day.
+      - name: period_start
+        description: The span's first day, the period's or the fiscal year's.
+        data_tests:
+          - not_null
+      - name: period_end
+        description: The span's last day.
+        data_tests:
+          - not_null
+      - name: basis
+        description: "{{ doc('group_totals_basis') }}"
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [direct-vouchers, contract-payments, payments-year-rollup, payments-over-25k, cash-outturn]
+      - name: figures
+        description: How many figures (payments, or Dutch budget lines) the row sums.
+        data_tests:
+          - not_null
+      - name: currency
+        description: The entity's own currency, the currency of `amount`.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [USD, GBP, EUR]
+      - name: amount
+        description: The figures' sum in the entity's own currency, untranslated.
+        data_tests:
+          - not_null
+      - name: reporting_currency
+        description: The currency of the translated amounts, the `group_totals` var's.
+        data_tests:
+          - not_null
+      - name: amount_at_actual_rates
+        description: "{{ doc('group_totals_actual_rates') }}"
+        data_tests:
+          - not_null
+      - name: amount_at_constant_rates
+        description: >
+          The figures' sum in the reporting currency, each figure translated at the ECB rates of
+          `constant_rates_on` and rounded to the cent, so a change between spans shows spending
+          moving and not the rates.
+        data_tests:
+          - not_null
+      - name: constant_rates_on
+        description: >
+          The one day whose ECB rates translate every figure at constant rates (the `group_totals`
+          var's: 29 December 2023, the ECB's last rates of calendar 2023, the first calendar year
+          the calendars cover).
+        data_tests:
+          - not_null
+
+  - name: group_totals_left_out
+    description: >
+      What the group totals leave out, beside them: one row per entity, fiscal year, basis and
+      rule, with how many figures the rule leaves out and their amount in the entity's own
+      currency, so a gap in the totals is visible and sized. Built from `int_group_totals__figures`.
+    columns:
+      - name: entity_id
+        data_tests:
+          - not_null
+      - name: fiscal_year
+        description: The figures' fiscal year; null where the calendars do not cover it.
+      - name: basis
+        description: "{{ doc('group_totals_basis') }}"
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [direct-vouchers, contract-payments, payments-year-rollup, payments-over-25k, cash-outturn]
+      - name: left_out_by
+        description: "{{ doc('group_totals_left_out_by') }}"
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [repeat, outside-calendars, no-outturn, no-rate]
+      - name: figures
+        description: How many figures the rule leaves out.
+        data_tests:
+          - not_null
+      - name: currency
+        description: The entity's own currency.
+        data_tests:
+          - not_null
+      - name: amount
+        description: >
+          Their sum in the entity's own currency; null for Dutch lines of a year with no outturn,
+          which carry no figure.
+
+unit_tests:
+  - name: a_span_sums_its_counted_figures_only
+    description: >
+      Test inputs: two counted payments of one Chicago period, one of them a refund, and one left
+      out as a repeat: the row sums the two counted ones in dollars and in euros, and the one
+      left out is in no row.
+    model: group_totals
+    given:
+      - input: ref('int_group_totals__figures')
+        rows:
+          - {figure_key: a, entity_id: chicago, basis: direct-vouchers, fiscal_year: 2024, fiscal_period: 3, period_start: 2024-03-01, period_end: 2024-03-31, currency: USD, amount: 250.50, left_out_by: null, reporting_currency: EUR, amount_at_actual_rates: 230.77, amount_at_constant_rates: 226.70, constant_rates_on: 2023-12-29}
+          - {figure_key: b, entity_id: chicago, basis: direct-vouchers, fiscal_year: 2024, fiscal_period: 3, period_start: 2024-03-01, period_end: 2024-03-31, currency: USD, amount: -40.00, left_out_by: null, reporting_currency: EUR, amount_at_actual_rates: -36.85, amount_at_constant_rates: -36.20, constant_rates_on: 2023-12-29}
+          - {figure_key: c, entity_id: chicago, basis: direct-vouchers, fiscal_year: 2024, fiscal_period: 3, period_start: 2024-03-01, period_end: 2024-03-31, currency: USD, amount: 250.50, left_out_by: repeat, reporting_currency: EUR, amount_at_actual_rates: null, amount_at_constant_rates: null, constant_rates_on: 2023-12-29}
+    expect:
+      rows:
+        - {group_total_key: chicago-2024-3-direct-vouchers, figures: 2, amount: 210.50, amount_at_actual_rates: 193.92, amount_at_constant_rates: 190.50}

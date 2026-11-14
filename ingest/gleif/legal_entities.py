@@ -100,7 +100,6 @@ PARTNERSHIPS = {
 # Legal-form codes that name no form: blank, "other" (described only in free text) and
 # "not available".
 NO_LEGAL_FORM = frozenset({"", "8888", "9999"})
-LEGAL_FORM_NOT_AVAILABLE = "9999"
 # The largest unzipped CSV the step reads: the pinned file declares 5,060,480,759 bytes, and the
 # register grows by a few per cent a year, so 6 GiB leaves room for a re-pin and refuses a wrong
 # or hostile archive before any of it is decompressed.
@@ -145,10 +144,6 @@ REASONS = (
 
 class Profile(TypedDict):
     rows_by_country: dict[str, int]
-    incomplete: int
-    malformed_leis: int
-    duplicate_leis: int
-    legal_form_not_available: int
     left_out: dict[str, int]
     other_names_blanked: int
     still_to_leave_out: dict[str, int]
@@ -251,17 +246,10 @@ def step(raw: bytes) -> bytes:
 
 
 def profile(path: Path) -> Profile:
-    """The landed file's records counted by country, every gap the matching would trip on, what
-    the step left out, and any landed record it should have left out."""
+    """The landed file's records counted by country, what the step left out, and any landed
+    record it should have left out."""
     con = duckdb.connect()
     con.read_parquet(str(path)).create_view("e")
-
-    def one(sql: str) -> int:
-        row = con.execute(sql).fetchone()
-        if row is None:
-            raise LegalEntitiesError(f"no answer from {sql!r}")
-        return int(row[0])
-
     stored = con.execute(
         "SELECT value FROM parquet_kv_metadata(?) WHERE key = 'left out'", [str(path)]
     ).fetchone()
@@ -277,17 +265,6 @@ def profile(path: Path) -> Profile:
     by_country = con.execute(f'SELECT "{COUNTRY}", count(*) FROM e GROUP BY 1').fetchall()  # noqa: S608
     return Profile(
         rows_by_country={str(k): int(v) for k, v in by_country},
-        incomplete=one(
-            f'SELECT count(*) FROM e WHERE "LEI" IS NULL OR "{LEGAL_NAME}" IS NULL'  # noqa: S608
-            f' OR "{LEGAL_FORM}" IS NULL OR "{COUNTRY}" IS NULL'
-        ),
-        malformed_leis=one(
-            """SELECT count(*) FROM e WHERE NOT regexp_full_match("LEI", '[0-9A-Z]{18}[0-9]{2}')"""
-        ),
-        duplicate_leis=one('SELECT count(*) - count(DISTINCT "LEI") FROM e'),
-        legal_form_not_available=one(
-            f"""SELECT count(*) FROM e WHERE "{LEGAL_FORM}" = '{LEGAL_FORM_NOT_AVAILABLE}'"""  # noqa: S608
-        ),
         left_out=left_out,
         other_names_blanked=blanked,
         still_to_leave_out=dict(still),

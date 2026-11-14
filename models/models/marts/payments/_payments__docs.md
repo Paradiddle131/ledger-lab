@@ -6,10 +6,11 @@ For the UK Department for Transport it is `uk-transport:`, the served file's nam
 
 {% docs payment_entity_id %}
 The entity that paid, by its id in `access/personas.yaml` and the calendar seeds (`chicago`, `uk-transport`).
+The Dutch government's `nl-government` is accepted too, though no row carries it: its budget file holds budget lines, not payments, so it adds none.
 {% enddocs %}
 
 {% docs payment_currency %}
-The currency the entity paid in, its own (`USD` for Chicago, `GBP` for the UK department); amounts are never translated here.
+The currency the entity paid in, its own (`USD` for Chicago, `GBP` for the UK department, `EUR`, which no row carries yet, for the Dutch government); amounts are never translated here.
 {% enddocs %}
 
 {% docs payment_date %}
@@ -55,9 +56,9 @@ An award of 0 is no fixed award, not a break: the City describes a blanket contr
 
 {% docs payment_is_repeat %}
 True on a row that repeats another served row of the same entity, so a sum that leaves repeats out counts each payment once; false on the first row of each group and wherever an entity has no rule for repeats.
-For Chicago a row is a repeat when it is a copy after the first of rows identical in every landed column (2,560 rows on the pinned files), when it has no department beside an otherwise identical row that has one (the row with the department is the first; 7,300 rows), or when it is a rolled-up year whose amount equals to the cent the year's other dated payments of its vendor and contract (the dated rows are the first; 4 rows).
-These are 9,864 of 475,609 rows and $3.999bn; that they are the same payment served again rests on paid totals, not on the City saying so: with repeats left out, 21,960 contracts are paid exactly their award after revisions, against 21,264 with them, and 849 contracts are paid exactly twice their award with them.
-For the UK department no row is flagged: 121 rows of the pinned files fall in 56 groups identical as landed (65 extra copies), each group consecutive rows under one transaction number; 43 groups are identical in every served cell too, and nothing in the files tells those from two equal lines of one document, while 13 hashed groups (27 rows) differ in the description the landing drops, so they are certainly separate lines (`int_uk_transport__payments` gives the evidence).
+For Chicago a row is a repeat when it is a copy after the first of rows identical in every landed column, when it has no department beside an otherwise identical row that has one (the row with the department is the first), or when it is a rolled-up year whose amount equals to the cent the year's other dated payments of its vendor and contract (the dated rows are the first); `int_chicago__payments` names each repeat's kind.
+That they are the same payment served again rests on paid totals, not on the City saying so: with repeats left out, more contracts are paid exactly their award after revisions than with them.
+For the UK department no row is flagged: its rows identical as landed are consecutive rows under one transaction number, and nothing in the files tells those identical in every served cell from two equal lines of one document, while hashed ones that differ in the description the landing drops are certainly separate lines (`int_uk_transport__payments` gives the evidence).
 {% enddocs %}
 
 {% docs payment_source_table %}

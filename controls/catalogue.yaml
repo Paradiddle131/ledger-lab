@@ -20,6 +20,14 @@ controls:
     asserts: Every agent query runs on the asking persona's identity; two personas asking the same question get different rows, and a question without a user identity gets no answer.
     proven_by: [tests/agent/test_identity.py::test_two_personas_same_question_different_rows]
     status: not-implemented
+  - id: no-persona-holds-conflicting-duties
+    layer: Identity and delegation
+    owner: group-controller
+    asserts: "No persona's grants in access/personas.yaml hold both sides of a conflicting pair of duties in access/review.yaml that the grants can state, within the pair's scope; today that is entering an entry (draft) and approving an entry (post), on any ledgers. Three pairs are reported as not checkable, never as passing, since no grant states one of their duties (creating and paying a vendor, making and deploying a change, administering access and running transactions). The agent account, which can act as every persona, holds entering and approving through the proposer and the approver; the access review shows it and the check does not refuse it."
+    proven_by:
+      - tests/access/test_review.py::test_a_planted_conflict_fails_the_duty_check
+      - tests/access/test_review.py::test_no_persona_holds_a_conflicting_pair
+    status: implemented
   - id: warehouse-enforces-visibility
     layer: Data access
     owner: group-controller
@@ -62,12 +70,32 @@ controls:
     asserts: Answers are scored by executing their queries against a golden set, and a metric change that moves the score is reported.
     proven_by: [tests/agent/test_evaluation.py::test_metric_change_shows_as_drift]
     status: not-implemented
+  - id: landed-file-breaks-fail-its-quality-suite
+    layer: Evaluation and monitoring
+    owner: group-controller
+    asserts: python -m ingest.quality <source> runs the landed file's GX Core suite and exits non-zero when the file breaks its schema, has a null key, holds a value out of its range or moves a known-mess count from the value measured on the pinned file; each suite passes on a fixture of its source and fails on that fixture with one planted break of each kind; and a broken rule on a column that can hold a name reports a count, never the name.
+    proven_by:
+      - tests/ingest/test_quality.py::test_each_suite_passes_on_its_fixture
+      - tests/ingest/test_quality.py::test_each_suite_fails_on_its_fixture_with_one_planted_break
+      - tests/ingest/test_quality.py::test_the_command_exits_non_zero_on_a_break_and_names_each_landed_file_of_a_set
+      - tests/ingest/test_quality.py::test_a_break_in_a_name_column_reports_counts_and_never_the_name
+      - tests/ingest/test_quality.py::test_a_column_that_can_hold_a_name_carries_only_rules_whose_result_is_a_count
+    status: implemented
   - id: release-ships-as-one-unit
     layer: Change management
     owner: approver
     asserts: Prompt, model, tools and metric definitions ship and roll back together, and a failed gate blocks the release.
     proven_by: [tests/operations/test_release.py::test_failed_gate_blocks_release]
     status: not-implemented
+  - id: breaking-contract-change-stopped
+    layer: Change management
+    owner: group-controller
+    asserts: make check fails when a data contract in the working tree breaks a consumer of the one on origin/main, matched by contract id wherever the file sits (a column removed or renamed, a type changed, a column made nullable, a key or uniqueness dropped, an accepted value added, a bound loosened, a quality rule removed, renamed or changed beyond its wording, a personal classification removed, the contract retired, renamed or unreadable), and when origin/main is not in the clone to compare with; while origin/main holds no contract the first one passes.
+    proven_by:
+      - tests/models/test_payments_contract.py::test_a_breaking_change_fails_the_gate
+      - tests/models/test_payments_contract.py::test_the_gate_matches_contracts_by_id_wherever_they_are
+      - tests/models/test_payments_contract.py::test_a_clone_without_main_fails_and_says_how_to_fetch_it
+    status: implemented
   - id: answer-rebuilt-from-audit
     layer: Accountability
     owner: group-controller
