@@ -8,12 +8,16 @@ organisation is fictional.
 
 import csv
 import io
+import uuid
 import zipfile
 from pathlib import Path
 
 import duckdb
 import pytest
+from fsspec.implementations.memory import MemoryFileSystem
 
+from ingest import fetch
+from ingest.bucket import Bucket
 from ingest.chicago.table import Table, land_all
 from ingest.entities import (
     LEGAL_PERSONS,
@@ -34,6 +38,7 @@ from ingest.gleif.legal_entities import (
     SOLE_PROPRIETORSHIPS,
 )
 from ingest.individuals import KEY_VARIABLE, person_hasher, pseudonymiser
+from ingest.scrub import MEMORY
 
 ENV = {KEY_VARIABLE: "k" * 32}
 # Codes from GLEIF's list: a California for-profit corporation, a British public limited company,
@@ -238,12 +243,8 @@ def test_nothing_else_is_vouched_for(register: Register, name: str, why: str) ->
     assert not register.vouches(name), why
 
 
-def test_the_landed_register_is_read_from_the_landing_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("LEDGER_LAB_LANDING", str(tmp_path))
-    with pytest.raises(RegisterError, match=REGISTER):
-        Register.landed()
+def one_hospital_register() -> bytes:
+    """A landed register vouching for the hospital, through the register's own step."""
     columns = [*legal_entities.COLUMNS]
     text = io.StringIO()
     writer = csv.DictWriter(text, columns)
@@ -260,8 +261,38 @@ def test_the_landed_register_is_read_from_the_landing_path(
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w") as z:
         z.writestr("golden-copy.csv", text.getvalue())
-    (tmp_path / REGISTER).write_bytes(legal_entities.step(archive.getvalue()))
+    return legal_entities.step(archive.getvalue())
+
+
+def test_the_landed_register_is_read_from_the_landing_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LEDGER_LAB_LANDING", str(tmp_path))
+    with pytest.raises(RegisterError, match=REGISTER):
+        Register.landed()
+    (tmp_path / REGISTER).write_bytes(one_hospital_register())
     assert Register.landed().vouches(HOSPITAL)
+
+
+def test_the_landed_register_is_read_from_the_landing_bucket_in_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LEDGER_LAB_LANDING", str(tmp_path))
+    served = one_hospital_register()
+    fs = MemoryFileSystem(skip_instance_cache=True)
+    root = f"/bucket-{uuid.uuid4().hex}"
+    fs.mkdir(root)
+    monkeypatch.setattr(fetch, "landing", lambda: Bucket(fs, root))
+    try:
+        with pytest.raises(RegisterError, match=f"cannot read {REGISTER}"):
+            Register.landed()
+        fs.pipe_file(f"{root}/{REGISTER}", served)
+        before = set(MEMORY.find("/"))
+        assert Register.landed().vouches(HOSPITAL)
+        assert set(MEMORY.find("/")) == before, "the read leaves no in-memory file behind"
+        assert list(tmp_path.iterdir()) == [], "nothing is written to disk"
+    finally:
+        fs.rm(root, recursive=True)
 
 
 SPEC = Table(

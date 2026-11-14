@@ -28,9 +28,10 @@ The unzipped CSV (about 5 GB for the whole world) is never written: it is decomp
 one record at a time in memory, and an archive declaring more than `MAX_UNZIPPED` is refused before
 any of it is read. Only the screened records that land are written, to a temporary CSV in a private
 folder (`.gleif-legal-entities.<random>`, mode 0700) under the landing path, next to the landed
-file, and DuckDB writes the Parquet beside it; the step removes the folder before it returns, also
-on an error. A process killed outright leaves that folder behind, holding at most those screened
-records and a partial Parquet file, never more than the landing would. What the step left out is
+file, or in the system's temporary folder when the landing is the bucket, and DuckDB writes the
+Parquet beside it; the step removes the folder before it returns, also on an error. A process
+killed outright leaves that folder behind, holding at most those screened records and a partial
+Parquet file, never more than the landing would. What the step left out is
 counted by reason in the Parquet file's key-value metadata (`left out`), which `profile` reads.
 """
 
@@ -227,14 +228,12 @@ def _screen(records: Iterable[list[str]], header: list[str], out: io.TextIOBase)
 def step(raw: bytes) -> bytes:
     """The verified archive's records for the vendors' countries as Parquet, with everything that
     may name a person left out."""
-    from ingest.fetch import landing_path  # the kit imports this module to register its step
+    from ingest.fetch import work_folder  # the kit imports this module to register its step
 
     archive, member = _member(raw)
-    landing = landing_path()
-    landing.mkdir(parents=True, exist_ok=True)
     with (
         archive.open(member) as served,
-        tempfile.TemporaryDirectory(dir=landing, prefix=".gleif-legal-entities.") as work,
+        tempfile.TemporaryDirectory(dir=work_folder(), prefix=".gleif-legal-entities.") as work,
     ):
         reader = csv.reader(io.TextIOWrapper(served, encoding="utf-8", newline=""))
         kept, parquet = Path(work, "entities.csv"), Path(work, "entities.parquet")
