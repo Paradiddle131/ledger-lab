@@ -23,7 +23,7 @@ from datacontract.data_contract import DataContract
 
 from ingest.entities import Register
 from ingest.fetch import landing_path
-from ingest.individuals import is_organisation, person_hasher
+from ingest.individuals import identifier_hasher, is_organisation, person_hasher
 from ingest.uk_transport.spend import BODIES
 from models.contracts import engine, gate
 from tests.models.dbt_build import PROJECT, Build, built, query
@@ -680,59 +680,103 @@ def test_the_real_landing_keeps_the_contract(tmp_path: Path) -> None:
     split_payees_and_documents(build, landing)
 
 
-# The landed files' own count of hashed and clear payees, and of document numbers a clear column
-# may show: on a clear payee's row, no keyed hash, and carried by no hashed payee's row.
+# The landed files' own counts: hashed and clear payees per entity, Chicago's voucher numbers a
+# clear column may show (a clear payee's, no placeholder, carried by no hashed payee's row), and
+# the hashed rows whose amount and served date no other payee shares, which the publisher's file
+# then names the payee by.
 LANDED_SPLIT = """
 with rows as (
-    select 'chicago' as entity_id, vendor_name like 'person:%' as hashed,
-        voucher_number as number
+    select 'chicago' as entity_id, vendor_name as payee, voucher_number as number,
+        amount, check_date as day
     from read_parquet($chicago)
     union all
-    select 'uk-transport', supplier like 'person:%', transaction_number
+    select 'uk-transport', supplier, transaction_number, amount, date
     from read_parquet($uk)
+),
+pairs as (
+    select entity_id, amount, day, count(distinct payee) as payees
+    from rows group by all
 )
-select entity_id, count(*) filter (where hashed), count(*) filter (where not hashed),
-    count(*) filter (where not hashed and number not like 'id:%' and number not in (
-        select number from rows as h
-        where h.hashed and h.entity_id = rows.entity_id and number is not null))
-from rows group by entity_id
+select rows.entity_id,
+    count(*) filter (where payee like 'person:%'),
+    count(*) filter (where payee not like 'person:%'),
+    count(*) filter (where rows.entity_id = 'chicago' and payee not like 'person:%'
+        and number <> 'Multiple' and number not in (
+            select number from rows as h
+            where h.entity_id = 'chicago' and h.payee like 'person:%' and number is not null)),
+    count(*) filter (where payee like 'person:%' and payees = 1)
+from rows
+join pairs on rows.entity_id = pairs.entity_id
+    and rows.amount is not distinct from pairs.amount and rows.day is not distinct from pairs.day
+group by rows.entity_id
 """
+# A UK placeholder, `#` where the department gives no number, which the landing hashes too.
+UK_PLACEHOLDER = "#"
+
+
+def uk_shared_transactions(landing: Path) -> dict[str, int]:
+    """The UK transactions a clear row shows in clear and a hashed row carries as a keyed hash,
+    found by the landing's own identifier hasher, and the hashed placeholder's rows; counts only."""
+    as_id = identifier_hasher()
+    rows = (
+        duckdb.connect()
+        .execute(
+            "select supplier, transaction_number from read_parquet($uk)",
+            {"uk": str(landing / "uk-transport-spend-2025")},
+        )
+        .fetchall()
+    )
+    keyed = [(s, t) for s, t in rows if t and t.startswith("id:")]
+    shown = [t for _, t in rows if t and not t.startswith("id:") and t != UK_PLACEHOLDER]
+    hits = {as_id(t) for t in set(shown)} & {t for _, t in keyed}
+    placeholder = as_id(UK_PLACEHOLDER)
+    return {
+        "shared numbers": len(hits),
+        "clear rows showing one": sum(1 for t in shown if as_id(t) in hits),
+        "hashed rows carrying one": sum(1 for _, t in keyed if t in hits),
+        "hashed placeholder rows": sum(1 for _, t in keyed if t == placeholder),
+        "payees on the hashed placeholder": len({s for s, t in keyed if t == placeholder}),
+    }
 
 
 def split_payees_and_documents(build: Build, landing: Path) -> None:
     """The split columns on the real landing: as many person keys, organisation names and clear
-    document numbers per entity as the landed files' own counts give; every clear name an
-    organisation by the landing's own classifier and register; no clear name whose person hash is a
-    key; and no clear document number that a hashed payee's row carries."""
+    references per entity as the landed files' own counts give; every clear name an organisation
+    by the landing's own classifier and register; no clear name whose person hash is a key; no
+    clear reference a hashed payee's row carries; and no UK reference, since the UK landing's
+    keyed numbers hide which clear numbers a hashed payee's line shares."""
     files = {
         "chicago": str(landing / "chicago-payments"),
         "uk": str(landing / "uk-transport-spend-2025"),
     }
     served = {e: rest for e, *rest in duckdb.connect().execute(LANDED_SPLIT, files).fetchall()}
-    print("landed hashed, clear and clear-document rows by entity:", served)
+    print("landed hashed, clear, clear-reference and amount-and-date-pinned rows:", served)
     assert served == {
-        "chicago": [350_698, 124_911, 84_783],
-        "uk-transport": [12_008, 19_095, 19_094],
+        "chicago": [350_698, 124_911, 84_783, 247_360],
+        "uk-transport": [12_008, 19_095, 0, 11_845],
+    }
+    shared = uk_shared_transactions(landing)
+    print("UK transactions shown in clear beside a hashed line:", shared)
+    assert shared == {
+        "shared numbers": 89,
+        "clear rows showing one": 135,
+        "hashed rows carrying one": 114,
+        "hashed placeholder rows": 729,
+        "payees on the hashed placeholder": 91,
     }
     split = {
         e: rest
         for e, *rest in query(
             build,
             "select entity_id, count(vendor_person_key), count(vendor_organisation_name),"
-            " count(document_reference), count(document_key),"
+            " count(document_reference),"
             " count(*) filter (where (vendor_person_key is null)"
             " = (vendor_organisation_name is null))"
             " from payments group by 1",
         )
     }
-    print(
-        "person keys, organisation names, document references, document keys, rows with not"
-        " exactly one of name and key, by entity:",
-        split,
-    )
-    assert split == {
-        e: [*served[e], keys, 0] for e, keys in (("chicago", 0), ("uk-transport", 12_009))
-    }
+    print("person keys, organisation names, references, rows with not one of name and key:", split)
+    assert split == {e: [*served[e][:3], 0] for e in served}
     names: dict[str, set[str]] = {e: set() for e in split}
     keys: dict[str, set[str]] = {e: set() for e in split}
     for e, name, key in query(
