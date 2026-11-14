@@ -16,6 +16,9 @@
 # when its parent files (TransUnion's operating LLC matched only by a dropped legal form; Jacobs
 # Engineering Group Inc., under whose LEI the mapping lists the share of its parent since a
 # holding-company reorganisation, is left out as contradictory evidence).
+# The list is every vendor with such a chain that the City paid at least a million dollars, but
+# for those whose annual reports are filed outside the first quarters the set pins: Microsoft (year
+# end in June, reports in July), Tetra Tech and Maximus (September, reports in November).
 # `name` is the legal name as the register records it; the regulator may file under another
 # (ShotSpotter, Inc. files as SoundThinking, Inc. since its rename, under the same CIK).
 companies:

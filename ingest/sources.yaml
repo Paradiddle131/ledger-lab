@@ -149,12 +149,15 @@ sources:
   # The SEC's Financial Statement Data Sets for the first quarter of four years: each a dated zip of
   # the numbers on the primary statements of every report filed with XBRL that quarter, as filed,
   # landed together as the set sec-annual-filings through its step, which keeps the listed
-  # companies' annual-report revenue (ingest/filings/companies.yaml); no quarter lands alone. A
+  # companies' annual-report revenue (ingest/filings/companies.yaml); no quarter lands alone. Only
+  # reports and amendments filed in a first quarter are in the set: one filed from April to
+  # December (an amendment, a late report) is not seen. A
   # posted quarter is not rewritten as later filings arrive (those go to later quarters), so a
   # re-fetch verifies; the SEC reprocessed every posted quarter once (December 2024, the 2023 and
   # 2024 files' last change), and a reprocessing like it moves the hashes and fails the fetch until
   # re-pinned. The largest is 127,765,057 bytes, a quarter of the kit's cap; the four are held in
-  # memory together before the step runs.
+  # memory together before the step runs (about 451 MB, which no cap bounds), so a fifth quarter
+  # needs a step that streams each archive, not more memory.
   sec-annual-filings-2023q1:
     url: https://www.sec.gov/files/dera/data/financial-statement-data-sets/2023q1.zip
     sha256: 479638c1be4088fa2ae42d2947468913eaff5ad0f093c412ba4340af8a8f791e  # pragma: allowlist secret

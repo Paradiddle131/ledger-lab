@@ -7,7 +7,7 @@ Securities and Exchange Commission, EDGAR): Pitney Bowes's 2023 revenue as its 2
 and as its 2024 report restated it for a discontinued business, its 2025 report and that report's
 amendment, Axon Enterprise's 2022 and 2023 revenue as filed and as restated a year later, and,
 to be left out, a company outside the list, a figure broken down by segment and one that is no
-revenue.
+revenue. Of each filing's submission row only what the step reads and the filer's name are kept.
 """
 
 import io
@@ -32,57 +32,42 @@ PITNEY_BOWES, AXON, MASTEC = "78814", "1069183", "15615"
 LISTED = (PITNEY_BOWES, AXON)
 ARCHIVES = "https://www.sec.gov/files/dera/data/financial-statement-data-sets/"
 REVENUE = "RevenueFromContractWithCustomerExcludingAssessedTax"
+# The list's inclusion rule: at least this much paid by the City, but for Pitney Bowes, kept for its
+# amended report.
+MILLION = Decimal(1_000_000)
+KEPT_BELOW_THE_BAR = {"PBI"}
 
 
-def sub(*fields: str) -> str:
-    return "\t".join(fields)
+def sub(adsh: str, cik: str, name: str, form: str, period: str, filed: str, accepted: str) -> str:
+    """A `sub.txt` row with the fields the step reads and the filer's name; the others, which
+    describe the filer (addresses, telephone, tax number, former names) and its XBRL, are blank."""
+    read = {"adsh": adsh, "cik": cik, "name": name, "form": form, "period": period}
+    read |= {"filed": filed, "accepted": accepted}
+    return "\t".join(read.get(column, "") for column in SUB_COLUMNS)
 
 
-# Each filing as `sub.txt` serves it: the filer and its business and mailing addresses, then the
-# filing's fiscal year end, form, period, fiscal year, filing date and acceptance time.
+PBI_NAME, AXON_NAME = "PITNEY BOWES INC /DE/", "AXON ENTERPRISE, INC."
+# Each filing as `sub.txt` serves it, but for the blanked fields.
 SERVED_SUBS = {
     "2024q1": [
-        sub("0000078814-24-000004", PITNEY_BOWES, "PITNEY BOWES INC /DE/", "3579", "US", "CT",
-            "STAMFORD", "06926-0700", "PITNEY BOWES INC", "3001 SUMMER STREET", "203-356-5000",
-            "US", "CT", "STAMFORD", "06926-0700", "3001 SUMMER STREET", "", "US", "DE",
-            "060495050", "", "", "1-LAF", "1", "1231", "10-K", "20231231", "2023", "FY",
-            "20240220", "2024-02-20 13:12:00.0", "0", "1", "pbi-20231231_htm.xml", "1", ""),
-        sub("0001069183-24-000006", AXON, "AXON ENTERPRISE, INC.", "3480", "US", "AZ",
-            "SCOTTSDALE", "85255", "17800 N. 85TH ST.", "", "480-991-0797", "US", "AZ",
-            "SCOTTSDALE", "85255", "17800 N. 85TH ST.", "", "US", "DE", "860741227",
-            "TASER INTERNATIONAL INC", "20010212", "1-LAF", "1", "1231", "10-K", "20231231",
-            "2023", "FY", "20240227", "2024-02-27 16:32:00.0", "0", "1",
-            "axon-20231231x10k_htm.xml", "1", ""),
+        sub("0000078814-24-000004", PITNEY_BOWES, PBI_NAME, "10-K", "20231231", "20240220",
+            "2024-02-20 13:12:00.0"),
+        sub("0001069183-24-000006", AXON, AXON_NAME, "10-K", "20231231", "20240227",
+            "2024-02-27 16:32:00.0"),
     ],
     "2025q1": [
-        sub("0000015615-25-000021", MASTEC, "MASTEC INC", "1623", "US", "FL", "CORAL GABLES",
-            "33134", "800 S. DOUGLAS ROAD", "12TH FLOOR", "3055991800", "US", "FL",
-            "CORAL GABLES", "33134", "800 S. DOUGLAS ROAD", "12TH FLOOR", "US", "FL", "650829355",
-            "BURNUP & SIMS INC", "19920703", "1-LAF", "1", "1231", "10-K", "20241231", "2024",
-            "FY", "20250228", "2025-02-28 06:07:00.0", "0", "1", "mtz-20241231_htm.xml", "1", ""),
-        sub("0000078814-25-000015", PITNEY_BOWES, "PITNEY BOWES INC /DE/", "3579", "US", "CT",
-            "STAMFORD", "06926-0700", "PITNEY BOWES INC", "3001 SUMMER STREET", "203-356-5000",
-            "US", "CT", "STAMFORD", "06926-0700", "3001 SUMMER STREET", "", "US", "DE",
-            "060495050", "", "", "1-LAF", "1", "1231", "10-K", "20241231", "2024", "FY",
-            "20250221", "2025-02-21 11:15:00.0", "0", "1", "pbi-20241231_htm.xml", "1", ""),
-        sub("0001069183-25-000019", AXON, "AXON ENTERPRISE, INC.", "3480", "US", "AZ",
-            "SCOTTSDALE", "85255", "17800 N. 85TH ST.", "", "480-991-0797", "US", "AZ",
-            "SCOTTSDALE", "85255", "17800 N. 85TH ST.", "", "US", "DE", "860741227",
-            "TASER INTERNATIONAL INC", "20010212", "1-LAF", "1", "1231", "10-K", "20241231",
-            "2024", "FY", "20250228", "2025-02-28 16:22:00.0", "0", "1", "axon-20241231_htm.xml",
-            "1", ""),
+        sub("0000015615-25-000021", MASTEC, "MASTEC INC", "10-K", "20241231", "20250228",
+            "2025-02-28 06:07:00.0"),
+        sub("0000078814-25-000015", PITNEY_BOWES, PBI_NAME, "10-K", "20241231", "20250221",
+            "2025-02-21 11:15:00.0"),
+        sub("0001069183-25-000019", AXON, AXON_NAME, "10-K", "20241231", "20250228",
+            "2025-02-28 16:22:00.0"),
     ],
     "2026q1": [
-        sub("0001628280-26-009650", PITNEY_BOWES, "PITNEY BOWES INC /DE/", "3579", "US", "CT",
-            "SHELTON", "06484", "PITNEY BOWES INC", "27 WATERVIEW DRIVE", "203-922-4000", "US",
-            "CT", "SHELTON", "06484", "27 WATERVIEW DRIVE", "", "US", "DE", "060495050", "", "",
-            "1-LAF", "1", "1231", "10-K", "20251231", "2025", "FY", "20260219",
-            "2026-02-19 15:32:00.0", "0", "1", "pbi-20251231_htm.xml", "1", ""),
-        sub("0001628280-26-009921", PITNEY_BOWES, "PITNEY BOWES INC /DE/", "3579", "US", "CT",
-            "SHELTON", "06484", "PITNEY BOWES INC", "27 WATERVIEW DRIVE", "203-922-4000", "US",
-            "CT", "SHELTON", "06484", "27 WATERVIEW DRIVE", "", "US", "DE", "060495050", "", "",
-            "1-LAF", "1", "1231", "10-K/A", "20251231", "2025", "FY", "20260220",
-            "2026-02-19 19:05:00.0", "0", "1", "pbi-20251231_htm.xml", "1", ""),
+        sub("0001628280-26-009650", PITNEY_BOWES, PBI_NAME, "10-K", "20251231", "20260219",
+            "2026-02-19 15:32:00.0"),
+        sub("0001628280-26-009921", PITNEY_BOWES, PBI_NAME, "10-K/A", "20251231", "20260220",
+            "2026-02-19 19:05:00.0"),
     ],
 }  # fmt: skip
 
@@ -224,6 +209,9 @@ def adding(quarter: str, *, subs: tuple[str, ...] = (), nums: tuple[str, ...] = 
 
 
 FIRST_NUM = SERVED_NUMS["2026q1"][0]
+# A fact the amended report does not serve (its 2022 revenue), valid on its own, so a refusal of
+# it below has the one defect each case gives it as its only cause.
+NEW_FACT = FIRST_NUM.replace("\t20251231\t", "\t20221231\t")
 WITHOUT_MASTEC = [n for n in SERVED_NUMS["2025q1"] if not n.startswith("0000015615")]
 
 
@@ -231,10 +219,10 @@ WITHOUT_MASTEC = [n for n in SERVED_NUMS["2025q1"] if not n.startswith("00000156
     ("files", "listed"),
     [
         (adding("2026q1", nums=(FIRST_NUM,)), LISTED),
-        (adding("2026q1", nums=(FIRST_NUM.replace("1892629000.0000", "1.892629e9"),)), LISTED),
-        (adding("2026q1", nums=(FIRST_NUM.replace("20251231", "20251331"),)), LISTED),
-        (adding("2026q1", nums=(FIRST_NUM.replace("\t4\t", "\tfour\t"),)), LISTED),
-        (adding("2026q1", nums=(FIRST_NUM + "\textra",)), LISTED),
+        (adding("2026q1", nums=(NEW_FACT.replace("1892629000.0000", "1.892629e9"),)), LISTED),
+        (adding("2026q1", nums=(NEW_FACT.replace("20221231", "20221331"),)), LISTED),
+        (adding("2026q1", nums=(NEW_FACT.replace("\t4\t", "\tfour\t"),)), LISTED),
+        (adding("2026q1", nums=(NEW_FACT + "\textra",)), LISTED),
         (adding("2026q1", subs=(SERVED_SUBS["2025q1"][0],)), LISTED),
         (adding("2026q1", subs=(SERVED_SUBS["2026q1"][0],)), LISTED),
         (adding("2026q1", subs=(SERVED_SUBS["2026q1"][0][:-3],)), LISTED),
@@ -259,6 +247,22 @@ def test_the_step_refuses_what_is_not_the_data_set(
 ) -> None:
     with pytest.raises(FilingsError):
         step(files, listed)
+
+
+def test_the_fact_the_refusals_spoil_lands_when_unspoilt(tmp_path: Path) -> None:
+    landed_rows = rows(landed(tmp_path, adding("2026q1", nums=(NEW_FACT,))))
+    assert ("0001628280-26-009921", "20221231", "1892629000.0000") in {
+        (r["accession_number"], r["period_end"], r["value"]) for r in landed_rows
+    }
+
+
+def test_a_report_accepted_on_the_quarters_last_evening_belongs_to_it(tmp_path: Path) -> None:
+    """Filed the next day, accepted after hours on 31 March: the archive of that quarter may
+    hold it."""
+    late = sub("0001069183-24-000099", AXON, AXON_NAME, "10-K/A", "20231231", "20240401",
+               "2024-03-31 17:45:00.0")  # fmt: skip
+    files = served(**{"2024q1": ([*SERVED_SUBS["2024q1"], late], SERVED_NUMS["2024q1"])})
+    assert rows(landed(tmp_path, files))
 
 
 def test_the_step_refuses_another_header_a_second_archive_or_another_name() -> None:
@@ -288,7 +292,6 @@ def isin_valid(isin: str) -> bool:
 
 def test_the_company_list_keeps_its_schema_and_real_identifiers() -> None:
     listed = facts.companies()
-    assert 10 <= len(listed) <= 20
     assert all(isin_valid(c["isin"]) for c in listed), "an ISIN's check digit is wrong"
     assert isin_valid("US6200763075") and not isin_valid("US6200763076")
 
@@ -304,6 +307,20 @@ def test_the_set_is_the_regulators_dated_quarterly_archives_fetched_as_one() -> 
         assert url.path == f"/files/dera/data/financial-statement-data-sets/{name[-6:]}.zip"
         assert entry["names_people"] is False
     assert fetch.CLIENT_NAME == "ledger-lab research-bot", "the regulator's host refuses others"
+
+
+# The fiscal years (by the year of the period each report covers, `/A` for an amendment) whose
+# annual reports the set holds, where they differ from 2022 to 2025: the set is first quarters
+# only, and an archive need not hold every report of its quarter.
+REPORT_GAPS = {
+    "27419": "2023 2024 2025 2026",  # Target's years end in late January
+    "1351636": "2022 2024 2025",  # SoundThinking filed its 2023 report on 1 April 2024
+    "1488139": "2022 2023 2024",  # Ameresco's 2025 report (3 March 2026) is not in the archive
+    "78814": "2022 2023 2024 2025 2025/A",  # Pitney Bowes amended its 2025 report in February
+}
+# Lengths the filer got wrong, as the archives serve them: L3Harris's 2025 report gives its 2025
+# annual revenue no four-quarter length, and its 2024 annual revenue also a one-quarter one.
+WRONG_LENGTHS = [("0000202058-26-000015",), ("0000202058-26-000015", "20241231")]
 
 
 @pytest.mark.landed
@@ -322,6 +339,28 @@ def test_the_landed_filings_keep_every_restated_period_and_amended_report() -> N
         " having count(*) filter (where period_end = report_period) = 0"
     ).fetchall()
     assert without == [], "an annual report with no revenue for the period it reports"
+    reports = dict(
+        con.execute(
+            "select cik, string_agg(year, ' ' order by year) from (select distinct cik,"
+            " left(report_period, 4) || case when is_amendment then '/A' else '' end as year"
+            " from f) group by cik"
+        ).fetchall()
+    )
+    expected = {cik: "2022 2023 2024 2025" for cik in ciks} | REPORT_GAPS
+    assert reports == expected, "a company's reports in the set differ from the stated ones"
+    one_quarter_own = con.execute(
+        "select accession_number from f group by accession_number, report_period"
+        " having count(*) filter (where period_end = report_period and quarters = '4') = 0"
+    ).fetchall()
+    annual_as_one_quarter = con.execute(
+        "select a.accession_number, a.period_end from f a join f b"
+        " using (accession_number, concept, unit, period_end, value)"
+        " where a.quarters = '1' and b.quarters = '4'"
+    ).fetchall()
+    assert sorted(one_quarter_own + annual_as_one_quarter) == WRONG_LENGTHS, (
+        "a report whose own year's revenue has no four-quarter length, or an annual figure"
+        " served with a one-quarter length, beyond the known ones"
+    )
     counts = con.execute(
         "select count(*), count(distinct cik), count(distinct accession_number),"
         " count(distinct accession_number) filter (where is_amendment) from f"
@@ -331,15 +370,11 @@ def test_the_landed_filings_keep_every_restated_period_and_amended_report() -> N
         " list(accession_number || ' ' || filing_date || ' ' || value order by filing_date)"
         " from f group by all having count(distinct value) > 1 order by all"
     ).fetchall()
-    one_quarter_own = con.execute(
-        "select accession_number from f group by accession_number, report_period"
-        " having count(*) filter (where period_end = report_period and quarters = '4') = 0"
-    ).fetchall()
     concepts = con.execute("select concept, count(distinct cik) from f group by all order by all")
     print(
         f"facts {counts[0]}, companies {counts[1]}, filings {counts[2]}, amended {counts[3]},"
-        f" restated periods {len(restated)}: {restated}; reports whose own year has only a"
-        f" one-quarter figure: {one_quarter_own}; companies by concept: {concepts.fetchall()}"
+        f" restated periods {len(restated)}: {restated}; companies by concept:"
+        f" {concepts.fetchall()}"
     )
     assert counts[3] >= 1 and len(restated) >= 1
     axon = con.execute(
@@ -363,7 +398,8 @@ def test_the_landed_filings_keep_every_restated_period_and_amended_report() -> N
 def test_each_listed_company_is_a_vendor_matched_to_its_own_legal_entity(tmp_path: Path) -> None:
     """Over the vendor landing (`LEDGER_LAB_LANDING` holding the vendors' sources and the
     register): each company's LEI is the legal entity `vendor_entity` matched a Chicago vendor to
-    by the exact or the same-legal-form rule, and the City paid it."""
+    by the exact or the same-legal-form rule, and the City paid it at least a million dollars, but
+    for the one company the list names as kept for its amended report."""
     from tests.models.dbt_build import dbt
 
     landing = fetch.landing_path().resolve()
@@ -393,4 +429,7 @@ def test_each_listed_company_is_a_vendor_matched_to_its_own_legal_entity(tmp_pat
     for company in listed:
         rules, total = by_lei[company["lei"]]
         assert set(rules.split(",")) <= {"exact", "same_legal_form"}, company["name"]
-        assert total > 0, company["name"]
+        if company["ticker"] in KEPT_BELOW_THE_BAR:
+            assert 0 < total < MILLION, company["name"]
+        else:
+            assert total >= MILLION, company["name"]

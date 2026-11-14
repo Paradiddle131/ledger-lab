@@ -15,16 +15,25 @@ a second filing, and an amended report is a submission of its own whose form end
 (`FORMS`) of a company in `companies.yaml`, every revenue figure (`CONCEPTS`, the US GAAP
 taxonomy's only) for the company as a whole (no dimension, no co-registrant), one row per fact per
 filing (`COLUMNS`): the CIK, the filing's accession number, form, amendment flag, filing date and
-the period the filing reports, then the concept, the fact's period end and length in quarters,
+the period the filing reports, then the concept, the fact's period end, its length in quarters as
+filed (a filer can get it wrong: L3Harris's 2025 annual revenue is served as one quarter long),
 its unit and its value as filed. Every column but the flag is the publisher's text, so a value
 never passes through a float, and a nil value lands as null; nothing is collapsed to a latest
 value.
 
+Only what an archive in the set holds lands, and the set is first quarters only, so a report or
+amendment filed from April to December is not seen: SoundThinking's 2023 report (filed 1 April
+2024) and Axon's amended 2024 report (filed 7 May 2025, with revenue in it) do not land. An
+archive also need not hold every report filed in its quarter: Ameresco's 2025 report, filed 3 March
+2026, is not in the 2026 file. A consumer reading "amended" off this landing sees only amendments
+filed in a first quarter.
+
 The step refuses, naming the file and row, never a value: an archive without both files or with
-another header, a row of another width, a submission filed outside the quarter its archive is
-named for (so none is in two archives), a quarter or a submission served twice, a period end or
-length that is no date or count, a value that is not a plain decimal, one fact served twice in one
-filing, a company of the list with no annual report in the set, and a set with no fact at all.
+another header, a row of another width, a submission neither filed nor accepted in the quarter its
+archive is named for (so none is in two archives), a quarter or a submission served twice, a period
+end or length that is no date or count, a value that is not a plain decimal, one fact served twice
+in one filing, a company of the list with no annual report in the set, and a set with no fact at
+all.
 """
 
 import csv
@@ -147,8 +156,10 @@ def _filings(
         if len(row) != len(SUB_COLUMNS):
             raise FilingsError(f"{source} sub.txt row {number}: not {len(SUB_COLUMNS)} fields")
         sub = dict(zip(SUB_COLUMNS, row, strict=True))
-        filed = _day(sub["filed"])
-        if filed is None or not first <= filed <= last:
+        # A report accepted after hours on a quarter's last day carries the next day's filing
+        # date; its acceptance day (the timestamp's date) still lies in the quarter.
+        days = (_day(sub["filed"]), _day(sub["accepted"][:10].replace("-", "")))
+        if not any(day is not None and first <= day <= last for day in days):
             raise FilingsError(f"{source} sub.txt row {number}: filed outside the quarter")
         if sub["adsh"] in seen:
             raise FilingsError(f"{source} sub.txt row {number}: a submission served twice")
