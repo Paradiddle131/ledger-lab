@@ -121,9 +121,9 @@ def landing() -> Path | Bucket:
     """Where files land: `LEDGER_LAB_LANDING`, a local folder (default `landing`) or the lab's
     landing bucket."""
     value = os.environ.get("LEDGER_LAB_LANDING") or "landing"
-    if not is_bucket(value):
-        return Path(value)
     try:
+        if not is_bucket(value):
+            return Path(value)
         return Bucket.of_landing(value, os.environ)
     except BucketError as error:
         raise FetchError(f"LEDGER_LAB_LANDING: {error}") from None
@@ -237,38 +237,47 @@ def land_all(name: str, files: dict[Path, bytes]) -> list[Path]:
     an old file beside a new one; landing again replaces them all."""
     partials: dict[Path, Path] = {}
     aside: dict[Path, Path] = {}
-    placed: list[Path] = []
+    existed: set[Path] = set()  # the places that held a file
+    touched = False  # whether any place may have changed
+    done = False  # every new file placed, or every old one put back
     path = next(iter(files))
     try:
         for path, data in files.items():
             path.parent.mkdir(parents=True, exist_ok=True)
             partials[path] = _hidden(path)
             partials[path].write_bytes(data)
+        existed = {path for path in files if path.is_file()}
+        touched = True
         for path in files:
-            if path.is_file():
+            if path in existed:
                 old = path.with_name(f".{path.name}.old.{uuid.uuid4().hex}")
                 path.replace(old)
                 aside[path] = old
         for path, partial in partials.items():
             partial.replace(path)
-            placed.append(path)
-    except OSError as error:
+        done = True
+    except BaseException as error:
         try:
-            for landed in placed:
-                landed.unlink(missing_ok=True)
+            for landed in files if touched else ():
+                if landed not in existed or landed in aside:  # what is there now is new
+                    landed.unlink(missing_ok=True)
             for landed, old in list(aside.items()):
                 old.replace(landed)
                 del aside[landed]
+            done = True
         except OSError:
             kept = ", ".join(old.name for old in aside.values())
-            aside.clear()  # the old files stay where they were moved aside
+            why = error.strerror if isinstance(error, OSError) else type(error).__name__
             raise FetchError(
-                f"{name}: cannot write {path}: {error.strerror}, nor move back what it replaced,"
+                f"{name}: cannot write {path}: {why}, nor move back what it replaced,"
                 f" which is kept as {kept}"
             ) from None
-        raise FetchError(f"{name}: cannot write {path}: {error.strerror}") from None
+        if isinstance(error, OSError):
+            raise FetchError(f"{name}: cannot write {path}: {error.strerror}") from None
+        raise
     finally:
-        for leftover in [*partials.values(), *aside.values()]:
+        # A moved-aside old file is deleted only once nothing needs it: it may be the only copy.
+        for leftover in [*partials.values(), *(aside.values() if done else ())]:
             leftover.unlink(missing_ok=True)
     return list(files)
 
@@ -353,6 +362,12 @@ def main(argv: list[str]) -> int:
         return 1
     for file in files:
         print(file if isinstance(place, Path) else f"{file} in {place}")
+    if isinstance(place, Bucket) and place.left_behind:
+        print(
+            f"fetch: kept {', '.join(place.left_behind)}, left by an interrupted landing; each may"
+            " be the only copy of an earlier file: delete it by hand once it is not needed",
+            file=sys.stderr,
+        )
     return 0
 
 

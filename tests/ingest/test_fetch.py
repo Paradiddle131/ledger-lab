@@ -644,6 +644,28 @@ def test_files_that_fail_to_land_together_leave_the_old_ones_as_they_were(
     assert everything_under(tmp_path) == [first, second]
 
 
+def test_ctrl_c_while_placing_files_puts_the_old_ones_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Interrupted after both old files are moved aside, as the first new one is placed: the old
+    files go back, never deleted while they are the only copy."""
+    first, second = tmp_path / "set-1", tmp_path / "set-2"
+    first.write_bytes(b"old one")
+    second.write_bytes(b"old two")
+    rename = Path.replace
+
+    def replace(self: Path, to: Path) -> Path:
+        if Path(to) == first and self.name.startswith(".set-1.new."):
+            raise KeyboardInterrupt
+        return rename(self, to)
+
+    monkeypatch.setattr(Path, "replace", replace)
+    with pytest.raises(KeyboardInterrupt):
+        fetch.land_all("set", {first: b"new one", second: b"new two"})
+    assert (first.read_bytes(), second.read_bytes()) == (b"old one", b"old two")
+    assert everything_under(tmp_path) == [first, second]
+
+
 def test_files_whose_rollback_fails_too_keep_the_old_ones_aside(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -922,3 +944,28 @@ def test_the_command_lands_in_the_bucket_and_never_prints_its_name(
     out = capsys.readouterr().out
     assert out == "payments in the landing bucket\n"
     assert "the-lab-project" not in out and bucket.root not in out
+
+
+def test_the_command_reports_the_old_copies_an_interrupted_landing_left(
+    site: Site,
+    bucket: Bucket,
+    write_sources: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bucket.fs.pipe_file(f"{bucket.root}/.payments.old.0", b"an earlier file")
+    bucket.fs.pipe_file(f"{bucket.root}/.payments.new.0", b"an unplaced upload")
+    write_sources(payments=entry(f"{site.base}/file.csv", sha256(FILE)))
+    assert fetch.main(["payments"]) == 0
+    assert objects(bucket) == {"payments": FILE, ".payments.old.0": b"an earlier file"}
+    err = capsys.readouterr().err
+    assert "kept .payments.old.0" in err and "delete it by hand" in err
+    assert "the-lab-project" not in err and bucket.root not in err
+
+
+@pytest.mark.parametrize("value", ["GS://another-bucket", "gcs://another-bucket", "s3://x"])
+def test_a_landing_of_another_scheme_is_refused_not_taken_for_a_folder(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("LEDGER_LAB_LANDING", value)
+    with pytest.raises(fetch.FetchError, match="a local folder or gs://"):
+        fetch.landing()

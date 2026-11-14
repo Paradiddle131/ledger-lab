@@ -4,17 +4,29 @@ The fetch kit writes there exactly the bytes it would write to a local landing, 
 verification and the same step in memory, as objects at the bucket's root named as the local files
 are (`chicago-contracts`), so no name holds a slash. The bucket must be the lab's own, named from
 `LEDGER_LAB_GCP_PROJECT` through `platform/gcp_project.py` as `platform/gcp/landing.tf` names it;
-any other bucket, or a folder inside it, is refused before any call.
+any other bucket, a folder inside it, or another scheme is refused before any call.
+
+One landing at a time: a landing first creates the lock object `.landing.lock` at the bucket's
+root, only if no object of that name exists (a generation-match-0 precondition), and deletes it at
+the end; a landing that finds it refuses, naming the lock and how to remove it. A killed landing,
+or one whose rollback failed, leaves the lock behind on purpose: nothing lands until an operator
+has checked the landed files and deleted it by hand.
 
 Object storage has no rename, so a set lands in the order a local landing renames, with copies:
 every new file is uploaded under a hidden temporary name (`.<name>.new.<random>`) first; then each
 object already landed under a file's name is copied aside to a hidden name (`.<name>.old.<random>`)
-and deleted; then each temporary object is copied to its file's name. A failure on the way removes
-what it placed and copies the old objects back, so the bucket holds every new file or every old
-one; if copying back fails too, the old objects stay under their hidden names, which the error
-names. A process killed mid-way leaves hidden objects behind, and a name it had emptied stays empty,
-never an old object beside a new one; landing again replaces them all. A copy within the bucket
+and deleted; then each temporary object is copied to its file's name. A failure or an interrupt
+(Ctrl-C included) on the way deletes every name of the set that held no object before, and those
+whose old object it moved aside, and copies the old objects back, so the bucket holds every new
+file or every old one, even when a copy succeeded but its answer was lost. An old object's hidden
+copy is deleted only after the new set is placed or the old one put back: if copying back fails,
+the old objects stay under their hidden names, which the error names. A copy within the bucket
 replaces an object whole, so a reader never sees half of one.
+
+A process killed mid-way leaves the lock, hidden objects and at worst emptied names, never an old
+object beside a new one. Once the lock is deleted, the next landing of those names deletes their
+stale `.new.` uploads, which are never the only copy of a landed file, and keeps every `.old.` copy,
+which may be: it reports them (`left_behind`) for an operator to delete by hand.
 
 The credential is the one the session's network proxy adds to every request to Cloud Storage, as
 for `make cost-check`; the client sends none of its own.
@@ -22,6 +34,7 @@ for `make cost-check`; the client sends none of its own.
 
 import contextlib
 import importlib.util
+import logging
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
@@ -30,7 +43,13 @@ from typing import Any
 from fsspec import AbstractFileSystem
 
 SCHEME = "gs://"
+LOCK = ".landing.lock"
 PROJECT_SEAM = Path(__file__).resolve().parent.parent / "platform" / "gcp_project.py"
+HELD = (
+    f"another landing holds the lock object {LOCK} at the landing bucket's root, or a killed one"
+    " left it: once no landing runs and the landed files are checked, delete it by hand"
+    f" (`gcloud storage rm gs://<lab project>-landing/{LOCK}`)"
+)
 
 
 class BucketError(Exception):
@@ -39,7 +58,12 @@ class BucketError(Exception):
 
 
 def is_bucket(landing: str) -> bool:
-    return landing.startswith(SCHEME)
+    """A `gs://` landing; any other URL is refused, never taken for a local folder."""
+    if landing.startswith(SCHEME):
+        return True
+    if "://" in landing:
+        raise BucketError(f"a landing is a local folder or {SCHEME}<lab project>-landing")
+    return False
 
 
 def lab_project(env: Mapping[str, str]) -> str:
@@ -58,22 +82,27 @@ def lab_project(env: Mapping[str, str]) -> str:
 
 def bucket_name(landing: str, env: Mapping[str, str]) -> str:
     """The bucket a `gs://` landing names, refused unless it is the lab's landing bucket."""
-    name = landing.removeprefix(SCHEME)
-    if "/" in name.rstrip("/"):
+    name = landing.removeprefix(SCHEME).removesuffix("/")
+    if "/" in name:
         raise BucketError("a bucket landing is the bucket's root, never a folder inside it")
-    if name.rstrip("/") != f"{lab_project(env)}-landing":
+    if name != f"{lab_project(env)}-landing":
         raise BucketError(
             "a bucket landing must be the lab's landing bucket, gs://<project>-landing"
         )
-    return name.rstrip("/")
+    return name
 
 
 def cloud_storage() -> AbstractFileSystem:
     """gcsfs's plain client: JSON API calls over aiohttp through the session's proxy, with every
     upload's MD5 checked against the one Cloud Storage computes. The plain class, not the package's
-    default, which first asks a gRPC API whether a bucket is zonal."""
+    default, which first asks a gRPC API whether a bucket is zonal. Its logger is silenced: on a
+    refused call it logs Google's own words, which name the bucket and the account, and Python's
+    last-resort handler would print them."""
     from gcsfs.core import GCSFileSystem
 
+    log = logging.getLogger("gcsfs")
+    log.addHandler(logging.NullHandler())
+    log.propagate = False
     return GCSFileSystem(
         token="anon",  # noqa: S106 - no credential of its own; the proxy adds the session's
         consistency="md5",
@@ -89,6 +118,8 @@ class Bucket:
     def __init__(self, fs: AbstractFileSystem, root: str) -> None:
         self.fs = fs
         self.root = root
+        # The `.old.` copies of an interrupted landing that the last landing found and kept.
+        self.left_behind: list[str] = []
 
     @classmethod
     def of_landing(cls, landing: str, env: Mapping[str, str]) -> "Bucket":
@@ -101,9 +132,9 @@ class Bucket:
     def _at(self, name: str) -> str:
         return f"{self.root}/{name}"
 
-    def _call(self, doing: str, name: str, call: Any, *args: Any) -> Any:
+    def _call(self, doing: str, name: str, call: Any, *args: Any, **kwargs: Any) -> Any:
         try:
-            return call(*args)
+            return call(*args, **kwargs)
         except Exception as error:
             raise BucketError(f"cannot {doing} {name} ({type(error).__name__})") from None
 
@@ -125,45 +156,81 @@ class Bucket:
     def _remove(self, name: str) -> None:
         self._call("delete", name, self.fs.rm_file, self._at(name))
 
+    def _discard(self, name: str) -> None:
+        """Delete the object if it is there."""
+        try:
+            self.fs.rm_file(self._at(name))
+        except FileNotFoundError:
+            pass
+        except Exception as error:
+            raise BucketError(f"cannot delete {name} ({type(error).__name__})") from None
+
+    def _lock(self) -> None:
+        try:
+            self.fs.pipe_file(self._at(LOCK), b"", mode="create")
+        except FileExistsError:
+            raise BucketError(HELD) from None
+        except Exception as error:
+            raise BucketError(f"cannot create the lock {LOCK} ({type(error).__name__})") from None
+
     def land_all(self, files: Mapping[str, bytes]) -> list[str]:
         """Land every file or none, by name, leaving what was landed before as it was."""
-        hidden: list[str] = []
+        self._lock()
+        self.left_behind = []
+        partials: dict[str, str] = {}
         aside: dict[str, str] = {}
-        placed: list[str] = []
+        existed: set[str] = set()  # the names that held an object
+        touched = False  # whether any name may have changed
+        done = False  # every new file placed, or every old one put back
         try:
-            partials = {name: f".{name}.new.{uuid.uuid4().hex}" for name in files}
+            listed = self.names()
+            for name in files:
+                for hidden in sorted(listed):
+                    if hidden.startswith(f".{name}.new."):
+                        self._discard(hidden)  # an interrupted landing's upload, never placed
+                    elif hidden.startswith(f".{name}.old."):
+                        self.left_behind.append(hidden)
             for name, data in files.items():
-                hidden.append(partials[name])
+                partials[name] = f".{name}.new.{uuid.uuid4().hex}"
                 self._call(
                     "upload", partials[name], self.fs.pipe_file, self._at(partials[name]), data
                 )
-            landed = self.names()
+            existed = {name for name in files if name in listed}
+            touched = True
             for name in files:
-                if name in landed:
+                if name in existed:
                     old = f".{name}.old.{uuid.uuid4().hex}"
-                    hidden.append(old)
                     self._copy(name, old)
                     aside[name] = old
                     self._remove(name)
             for name, partial in partials.items():
                 self._copy(partial, name)
-                placed.append(name)
-        except BucketError as error:
+            done = True
+        except BaseException as error:
+            restored: list[str] = []
             try:
-                for name in placed:
-                    self._remove(name)
-                for name, old in list(aside.items()):
+                for name in files if touched else ():
+                    if name not in existed or name in aside:  # what is there now is new
+                        self._discard(name)
+                for name, old in aside.items():
                     self._copy(old, name)
-                    del aside[name]
+                    restored.append(name)
+                done = True
             except BucketError:
-                kept = ", ".join(aside.values())
-                hidden = [h for h in hidden if h not in aside.values()]
+                why = str(error) if isinstance(error, BucketError) else type(error).__name__
+                kept = ", ".join(old for name, old in aside.items() if name not in restored)
                 raise BucketError(
-                    f"{error}, nor put back what it replaced, kept as {kept}"
+                    f"{why}, nor put back what it replaced, kept as {kept}; the lock {LOCK} stays"
+                    " until they are checked"
                 ) from None
             raise
         finally:
-            for leftover in hidden:
-                with contextlib.suppress(BucketError):  # never uploaded, or left for the operator
-                    self._remove(leftover)
+            for partial in partials.values():
+                with contextlib.suppress(BucketError):
+                    self._discard(partial)
+            if done:
+                # An old object's copy goes only now: until here it may be the only copy.
+                for old in aside.values():
+                    self._discard(old)
+                self._remove(LOCK)
         return list(files)
