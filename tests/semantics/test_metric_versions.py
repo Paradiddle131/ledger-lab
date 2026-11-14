@@ -60,7 +60,7 @@ def git_repo(tmp_path: Path, main: dict[str, str] | None) -> Path:
     """A repository whose `origin/main` holds the files `main`, or (None) no `origin/main`; its
     working tree starts as `main`."""
     repo = tmp_path / "repo"
-    repo.mkdir()
+    repo.mkdir(parents=True)
     run(repo, "init", "--quiet")
     (repo / "README.md").write_text("a clone\n")
     write(repo, main or {})
@@ -143,13 +143,17 @@ def measure(model: str, name: str, key: str, value: object, path: str = CONTRACT
 
 
 def bump(name: str, path: str = CONTRACTS, to: int = 2, was: int = 1) -> Edit:
-    """The metric's version raised in its own line of text, so two such edits merge cleanly."""
+    """The metric's version raised in its own line of text, so two such edits merge cleanly; in a
+    file another edit wrote back as YAML of its own, through that YAML."""
 
     def edit(files: dict[str, str]) -> None:
         text = files[path]
-        start = text.index(f"\n  - name: {name}\n")
-        at = text.index(f"version: {was}}}", start)
-        files[path] = text[:at] + f"version: {to}}}" + text[at + len(f"version: {was}}}") :]
+        line = f"version: {was}}}"
+        if f"\n  - name: {name}\n" not in text:
+            metric(name, lambda b: b["config"]["meta"].update(version=to), path)(files)
+            return
+        at = text.index(line, text.index(f"\n  - name: {name}\n"))
+        files[path] = text[:at] + f"version: {to}}}" + text[at + len(line) :]
 
     return edit
 
