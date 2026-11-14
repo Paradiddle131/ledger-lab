@@ -1,0 +1,19 @@
+# Where the models run, read from the environment; nothing here names a project or an account.
+# `local`: an in-process DuckDB file, the default.
+# `bigquery`: chosen when LEDGER_LAB_GCP_PROJECT is set (never the session's GCP_PROJECT), and
+# needs `uv sync --group bigquery`; every job is capped by maximum_bytes_billed.
+ledger_lab:
+  target: "{{ 'bigquery' if env_var('LEDGER_LAB_GCP_PROJECT', '') else 'local' }}"
+  outputs:
+    local:
+      type: duckdb
+      path: "{{ env_var('LEDGER_LAB_DUCKDB_PATH', 'target/ledger_lab.duckdb') }}"
+      threads: 4
+    bigquery:
+      type: bigquery
+      method: oauth
+      project: "{{ env_var('LEDGER_LAB_GCP_PROJECT', '') }}"
+      dataset: "{{ env_var('LEDGER_LAB_BQ_DATASET', 'ledger_lab') }}"
+      location: "{{ env_var('LEDGER_LAB_BQ_LOCATION', 'US') }}"
+      maximum_bytes_billed: 1000000000
+      threads: 4

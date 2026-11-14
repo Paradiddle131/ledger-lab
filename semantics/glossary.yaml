@@ -1,0 +1,109 @@
+# The finance vocabulary the models, metrics and agents use; every later definition points at a
+# term by its `id`. `owner` is the persona (access/personas.yaml) that owns the meaning.
+# Shape: semantics/glossary.schema.json.
+
+terms:
+  - id: procure-to-pay
+    term: Procure-to-pay
+    definition: The chain from agreeing to buy something to paying for it, through contract or order, invoice, voucher and payment.
+    owner: payables-clerk
+    see_also: [award, voucher, three-way-match]
+  - id: record-to-report
+    term: Record-to-report
+    definition: The chain from posting transactions in the ledger to publishing figures, through period close, reconciliation and consolidation.
+    owner: group-controller
+    see_also: [trial-balance, open-and-closed-period, intercompany]
+  - id: voucher
+    term: Voucher
+    definition: The approved record that an invoice may be paid, naming the vendor, the amount and the contract it is charged to.
+    owner: payables-clerk
+    see_also: [award, three-way-match]
+  - id: award
+    term: Award
+    definition: The amount a contract allows to be spent with a vendor; it can be raised, lowered or cancelled after signing.
+    owner: payables-clerk
+    see_also: [commitment, voucher]
+  - id: commitment
+    term: Commitment
+    definition: Spending promised under a contract or order but not yet invoiced, which the budget already counts as used.
+    owner: payables-clerk
+    see_also: [award, outturn]
+  - id: accrual
+    term: Accrual
+    definition: An entry that books a cost or income in the period it belongs to, before the invoice or payment arrives.
+    owner: group-controller
+    see_also: [reversing-accrual, posting-date]
+  - id: reversing-accrual
+    term: Reversing accrual
+    definition: An accrual that is undone automatically at the start of the next period, so the real invoice can be booked without counting the cost twice.
+    owner: group-controller
+    see_also: [accrual]
+  - id: posting-date
+    term: Posting date
+    definition: The date an entry counts in the ledger, which decides its fiscal period; it can differ from the document date and the payment date.
+    owner: group-controller
+    see_also: [fiscal-calendar, open-and-closed-period]
+  - id: fiscal-calendar
+    term: Fiscal calendar
+    definition: How an entity splits its financial year into periods and when that year starts, such as January to December or April to March.
+    owner: group-controller
+    see_also: [open-and-closed-period, posting-date]
+  - id: open-and-closed-period
+    term: Open and closed period
+    definition: A period still taking entries is open; once closed, its figures are final and a change goes into a later open period instead.
+    owner: group-controller
+    see_also: [fiscal-calendar, restatement]
+  - id: outturn
+    term: Outturn
+    definition: What was actually spent or received in a year, set against the budget for the same year.
+    owner: accountant-nl-government
+    see_also: [budget-moment, commitment]
+  - id: budget-moment
+    term: Budget moment
+    definition: One of the points in a year at which a government publishes or revises its budget, from the draft budget through supplementary budgets to the annual report.
+    owner: accountant-nl-government
+    see_also: [outturn]
+  - id: reference-rate
+    term: Reference rate
+    definition: An exchange rate published by a central bank for one day, used to translate amounts between currencies the same way everywhere.
+    owner: group-controller
+    see_also: [constant-currency]
+  - id: constant-currency
+    term: Constant currency
+    definition: Figures from different periods translated at one fixed set of exchange rates, so a change shows the business moving and not the rates.
+    owner: group-controller
+    see_also: [reference-rate]
+  - id: trial-balance
+    term: Trial balance
+    definition: The list of every account's balance at one date; its debits and credits must add up to the same total.
+    owner: group-controller
+    see_also: [record-to-report]
+  - id: three-way-match
+    term: Three-way match
+    definition: The check that an invoice agrees with the order or contract and with what was received before it is paid.
+    owner: payables-clerk
+    see_also: [voucher, procure-to-pay]
+  - id: intercompany
+    term: Intercompany
+    definition: A transaction between two entities of the same group, which must be removed when their figures are added together.
+    owner: group-controller
+    see_also: [record-to-report]
+  - id: restatement
+    term: Restatement
+    definition: A change to figures already published for a closed period, made and disclosed because they were wrong or a rule changed.
+    owner: group-controller
+    see_also: [open-and-closed-period]
+  - id: legal-entity-identifier
+    term: Legal entity identifier
+    definition: A 20-character code that names one legal entity worldwide, from a public register, used to tell apart vendors with similar names.
+    owner: payables-clerk
+  - id: segregation-of-duties
+    term: Segregation of duties
+    definition: The rule that no one person both starts and approves the same transaction, so one mistake or fraud needs two people.
+    owner: auditor
+    see_also: [maker-checker]
+  - id: maker-checker
+    term: Maker-checker
+    definition: A workflow where one identity prepares a change and a different identity approves it before it takes effect.
+    owner: auditor
+    see_also: [segregation-of-duties]

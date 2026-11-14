@@ -30,7 +30,7 @@ def test_every_owner_is_a_human_persona(controls: dict[str, Any], access: dict[s
 
 
 def test_proving_tests_are_distinct(controls: dict[str, Any]) -> None:
-    counts = Counter(c["proven_by"] for c in controls["controls"])
+    counts = Counter(test for c in controls["controls"] for test in c["proven_by"])
     assert [t for t, n in counts.items() if n > 1] == []
 
 
@@ -44,9 +44,10 @@ def defined_tests(path: str) -> set[str]:
 
 def test_an_implemented_control_has_its_proving_test(controls: dict[str, Any]) -> None:
     for control in controls["controls"]:
-        path, name = control["proven_by"].split("::")
-        exists = name in defined_tests(path)
-        if control["status"] == "implemented":
-            assert exists, f"{control['id']}: {control['proven_by']} does not exist"
-        else:
-            assert not exists, f"{control['id']}: its test exists; mark it implemented"
+        for test in control["proven_by"]:
+            path, name = test.split("::")
+            exists = name in defined_tests(path)
+            if control["status"] == "implemented":
+                assert exists, f"{control['id']}: {test} does not exist"
+            else:
+                assert not exists, f"{control['id']}: its test exists; mark it implemented"

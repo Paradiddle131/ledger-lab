@@ -1,0 +1,35 @@
+# The layered models. The engine is a profile target (profiles.yml): DuckDB in the session by
+# default, BigQuery once the lab project is set; model SQL stays the same on both.
+name: ledger_lab
+version: "0.0.0"
+config-version: 2
+profile: ledger_lab
+
+model-paths: ["models"]
+clean-targets: ["target"]
+
+flags:
+  send_anonymous_usage_stats: false
+
+# The fiscal years the calendars cover, the same for every entity, each labelled by the calendar
+# year it starts in; the period-status seed holds a row for every period of these years.
+vars:
+  fiscal_years:
+    first: 2023
+    last: 2026
+  # Where every model reading a fetched source reads it (the `landed_or_sample` macro): `landed`,
+  # the files the fetch kit lands under LEDGER_LAB_LANDING, or `sample`, the committed seeds of
+  # real rows the tests pass explicitly.
+  source_rows: landed
+
+models:
+  ledger_lab:
+    +materialized: view
+    calendars:
+      +materialized: table
+    intermediate:
+      +materialized: table
+    reference:
+      +materialized: table
+    marts:
+      +materialized: table

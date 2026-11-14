@@ -48,4 +48,4 @@ No `local` gates: cloud is the only environment.
 
 ## Known conditions
 
-- This environment's `GCP_PROJECT` and `CLOUDSDK_AUTH_ACCESS_TOKEN` belong to another lab, and the session-start lines report that lab's cost: `LEDGER_LAB_GCP_PROJECT` is unset; treat GCP as absent; seen 2026-11-12.
+- The `ledger-lab` environment sets `LEDGER_LAB_GCP_PROJECT`, `LEDGER_LAB_BQ_LOCATION` and `LEDGER_LAB_BILLING_EXPORT` (a view of the lab's own rows of the billing export) and no `GCP_PROJECT`; its injected `*.googleapis.com` credential is the lab's own agent service account.

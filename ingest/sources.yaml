@@ -1,0 +1,184 @@
+# Each source the fetch kit downloads: `uv run python -m ingest.fetch <name>`.
+# Validated by sources.schema.json. An entry, by name (also the landed file's name):
+#   <name>:
+#     url: https://...?format=csv       # a fixed file, its query string sent as written; or:
+#     query:                            # a live table; fixed parameters (a row limit) in its url
+#       url: https://...?$limit=50000
+#       order: {<param>: <value>}
+#       cut_off: {<param>: <value>}
+#     sha256: <SHA-256 of the bytes the publisher serves, undecoded>
+#     licence: https://...              # the licence, confirmed on the source's issue
+#     publisher: <who publishes it>
+#     names_people: false               # true: lands only through the source's step
+# A live table is ordered by its content, every column, never by the portal's row id, which the
+# City reassigns when it recreates rows; rows that tie on every column are identical bytes.
+sources:
+  # Chicago's contracts and payments land together as the set chicago, through its step, so neither
+  # table's descriptions name a payee the other hashes; neither lands alone.
+  # City of Chicago contracts (rsxa-ify5), every row approved by the cut-off. The table is live:
+  # a row the City edits changes the bytes, and a re-pin moves the hash.
+  chicago-contracts:
+    query:
+      url: https://data.cityofchicago.org/resource/rsxa-ify5.csv?$limit=500000
+      order: {$order: "purchase_order_contract_number, revision_number, specification_number, contract_type, start_date, end_date, approval_date, department, vendor_name, vendor_id, address_1, address_2, city, state, zip, award_amount, procurement_type, contract_pdf, purchase_order_description"}
+      cut_off: {$where: "approval_date <= '2026-10-31T23:59:59'"}
+    sha256: c17c32c54203ce30b5f67464da2eb59af5cd5a5cdfb3c2d6bac1fd9d34d11e4a  # pragma: allowlist secret
+    licence: https://www.chicago.gov/city/en/narr/foia/data_disclaimer.html
+    publisher: City of Chicago
+    names_people: true
+  # City of Chicago payments (s4vu-giwb), every row the portal created by the cut-off. Check dates
+  # are text in two forms and payments with old check dates arrive every day, so the cut-off is the
+  # portal's row-creation time. The City reloads the whole table when it rolls payments older than
+  # two years up by year, and a reload moves the hash.
+  chicago-payments:
+    query:
+      url: https://data.cityofchicago.org/resource/s4vu-giwb.csv?$limit=1000000
+      order: {$order: "voucher_number, check_date, amount, contract_number, vendor_name, department_name"}
+      cut_off: {$where: ":created_at <= '2026-10-31T23:59:59'"}
+    sha256: 840db59a961f62cc2ce514d9359acee13abdd6b16043f3b559d4a962405d8a53  # pragma: allowlist secret
+    licence: https://www.chicago.gov/city/en/narr/foia/data_disclaimer.html
+    publisher: City of Chicago
+    names_people: true
+  # The Dutch central government's budget statements (Rijksbegrotingsstaten), every year since
+  # 2013 in one fixed file, each article's amounts per budget moment in thousands of euros.
+  nl-government-budget:
+    url: https://www.rijksfinancien.nl/sites/default/files/bestanden/open_data/Begrotingsstaten_2013-2027.csv
+    sha256: f22c12d1cb04787b4e43d575759d35cb3cbe4826c11e78852f54cc66c32cbd84  # pragma: allowlist secret
+    licence: https://creativecommons.org/publicdomain/zero/1.0/
+    publisher: Ministerie van Financiën
+    names_people: false
+  # The ECB's daily euro reference rates for the pound and the US dollar, from the first covered
+  # year to a fixed end date, as CSV, which carries no generated timestamp: a re-fetch serves the
+  # same bytes, and a rate the ECB changed behind the end date shows as a drift. A later end date
+  # is a new pin, with a new hash.
+  ecb-rates:
+    url: https://data-api.ecb.europa.eu/service/data/EXR/D.GBP+USD.EUR.SP00.A?startPeriod=2023-01-01&endPeriod=2026-10-31&format=csvdata&detail=dataonly
+    sha256: d1aadebbba9390aa9acda3288e3c766ce28aee2164de7f216e1b2ac37ed22077  # pragma: allowlist secret
+    licence: https://www.ecb.europa.eu/home/disclaimer/html/index.en.html
+    publisher: European Central Bank
+    names_people: false
+  # The GLEIF register's golden copy published 2026-11-01 00:00 UTC (LEI-CDF 3.1, every record in
+  # the world, 507,213,646 bytes): a dated file the publisher writes once and keeps serving, so a
+  # re-fetch verifies; a re-pin is a later dated file and moves the hash. Its step keeps the
+  # vendors' countries and leaves out what may name a person. The kit holds the whole response in
+  # memory under its 512 MiB cap, and the newest file grows about 4 MB a month, so a re-pin to a
+  # file past the cap needs the download streamed through the step instead of held whole, not a
+  # raised cap.
+  gleif-legal-entities:
+    url: https://goldencopy.gleif.org/storage/golden-copy-files/2026/11/01/1295525/20261101-0000-gleif-goldencopy-lei2-golden-copy.csv.zip
+    sha256: 478014c91f99cab99e3d01f503aacdc7d0b0557173dfc1d0e5613230678dc325  # pragma: allowlist secret
+    licence: https://www.gleif.org/en/meta/lei-data-terms-of-use
+    publisher: GLEIF
+    names_people: true
+  # The Department for Transport's spending over £25,000, one file a month of fiscal year 2025
+  # (April 2025 to March 2026), landed together as the set uk-transport-spend-2025 through its
+  # step; no month lands alone. GOV.UK keeps each file at its media URL; a month the Department
+  # revises gets a new file and a change note on its publication page, so its pin moves.
+  uk-transport-spend-2025-apr:
+    url: https://assets.publishing.service.gov.uk/media/6877653439d0452326e28f1a/dft-spending-over-25000-april-2025.csv
+    sha256: b1afd7d3926a708bdaf3d03cbd94d200e8672fa9a2aef4518f9de9fe0e058267  # pragma: allowlist secret
+    licence: https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/
+    publisher: Department for Transport
+    names_people: true
+  uk-transport-spend-2025-may:
+    url: https://assets.publishing.service.gov.uk/media/687794e62bad77c3dae4dc68/dft-spending-over-25000-may-2025.csv
+    sha256: 5ff6fcf2798ee385c247395f46fb12459926556b2a0c6c99274561a2b5503b3f  # pragma: allowlist secret
+    licence: https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/
+    publisher: Department for Transport
+    names_people: true
+  uk-transport-spend-2025-jun:
+    url: https://assets.publishing.service.gov.uk/media/68f9f8c035dbb2bcedb5f903/dft-spending-24k-jun-25.csv
+    sha256: b15fe090b2d1693e67d35711a366b716388bdc924ae2883abaf708e6b2a6be69  # pragma: allowlist secret
+    licence: https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/
+    publisher: Department for Transport
+    names_people: true
+  uk-transport-spend-2025-jul:
+    url: https://assets.publishing.service.gov.uk/media/68f9f98dc18f97edd2b636e4/dft-spending-25k-jul-25.csv
+    sha256: 8117ba991dcb203b69939e1319772bf0c237674b17d59d70decd3e3cebb0c7cb  # pragma: allowlist secret
+    licence: https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/
+    publisher: Department for Transport
+    names_people: true
+  uk-transport-spend-2025-aug:
+    url: https://assets.publishing.service.gov.uk/media/696f68815b6060ca6736a08b/dft-spending-over-25000-august-2025.csv
+    sha256: 3b88558359dd52d654c3e95e1a65d6d9b9b898fb9ca7cf7b4cb4a6175a2014e5  # pragma: allowlist secret
+    licence: https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/
+    publisher: Department for Transport
+    names_people: true
+  uk-transport-spend-2025-sep:
+    url: https://assets.publishing.service.gov.uk/media/696f69abc0f4afaa9536a098/dft-spending-over-25000-september-2025.csv
+    sha256: 4b968a03092993fe6ccfd4440f92747e6bf32836d0c443aab34f9c169dc0cf9b  # pragma: allowlist secret
+    licence: https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/
+    publisher: Department for Transport
+    names_people: true
+  uk-transport-spend-2025-oct:
+    url: https://assets.publishing.service.gov.uk/media/698da22a492ea446ea7f42e5/dft-spending-over-25000-october-2025.csv
+    sha256: 2ef89ae3761093963cc91c02fe3d12c7ec93d2a0fbc75fcf96301b05620be2b7  # pragma: allowlist secret
+    licence: https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/
+    publisher: Department for Transport
+    names_people: true
+  uk-transport-spend-2025-nov:
+    url: https://assets.publishing.service.gov.uk/media/698da3d57da91680ad7f42e8/dft-spending-over-25000-november-2025.csv
+    sha256: bde65de7f3c63f31d8b9e8fedbcdc871271c2bd7f7dc97b3e6932ac51a0637a5  # pragma: allowlist secret
+    licence: https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/
+    publisher: Department for Transport
+    names_people: true
+  uk-transport-spend-2025-dec:
+    url: https://assets.publishing.service.gov.uk/media/69e8aee6d36883a64473b821/dft-spending-over-25000-december-2025.csv
+    sha256: 3f7cc785878163a0d544127131f650427bd69e979dcaa631f596bd85a7b2c77b  # pragma: allowlist secret
+    licence: https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/
+    publisher: Department for Transport
+    names_people: true
+  uk-transport-spend-2025-jan:
+    url: https://assets.publishing.service.gov.uk/media/6a06eb97ee62840dba48a32a/dft-spending-25k-jan-26.csv
+    sha256: 11922997d0ca79e5186af634ad8be0ee2cef89ea179161aff7afc05da6db0eed  # pragma: allowlist secret
+    licence: https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/
+    publisher: Department for Transport
+    names_people: true
+  uk-transport-spend-2025-feb:
+    url: https://assets.publishing.service.gov.uk/media/6a315e930ec8c2ef515a5c34/dft-spending-25k-feb-26.csv
+    sha256: 3b2fb1e39daa726af10673033718be270176d5bc19d9c0bf7537cd7a0701884f  # pragma: allowlist secret
+    licence: https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/
+    publisher: Department for Transport
+    names_people: true
+  uk-transport-spend-2025-mar:
+    url: https://assets.publishing.service.gov.uk/media/6a635e9d9a419980593b2b9b/dft-spending-over-25000-march-2026.csv
+    sha256: 0384e90fc4b1c9b08646552d673392556bdc7203d60cb0e1d811feb8c5eb640a  # pragma: allowlist secret
+    licence: https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/
+    publisher: Department for Transport
+    names_people: true
+  # The SEC's Financial Statement Data Sets for the first quarter of four years: each a dated zip of
+  # the numbers on the primary statements of every report filed with XBRL that quarter, as filed,
+  # landed together as the set sec-annual-filings through its step, which keeps the listed
+  # companies' annual-report revenue (ingest/filings/companies.yaml); no quarter lands alone. Only
+  # reports and amendments filed in a first quarter are in the set: one filed from April to
+  # December (an amendment, a late report) is not seen. A
+  # posted quarter is not rewritten as later filings arrive (those go to later quarters), so a
+  # re-fetch verifies; the SEC reprocessed every posted quarter once (December 2024, the 2023 and
+  # 2024 files' last change), and a reprocessing like it moves the hashes and fails the fetch until
+  # re-pinned. The largest is 127,765,057 bytes, a quarter of the kit's cap; the four are held in
+  # memory together before the step runs (about 451 MB, which no cap bounds), so a fifth quarter
+  # needs a step that streams each archive, not more memory.
+  sec-annual-filings-2023q1:
+    url: https://www.sec.gov/files/dera/data/financial-statement-data-sets/2023q1.zip
+    sha256: 479638c1be4088fa2ae42d2947468913eaff5ad0f093c412ba4340af8a8f791e  # pragma: allowlist secret
+    licence: https://www.sec.gov/privacy
+    publisher: U.S. Securities and Exchange Commission
+    names_people: false
+  sec-annual-filings-2024q1:
+    url: https://www.sec.gov/files/dera/data/financial-statement-data-sets/2024q1.zip
+    sha256: 94c7894b00903f8ff7186c4250ba1c1daa1bde8b3a0b26fae68f72608b2ffc9b  # pragma: allowlist secret
+    licence: https://www.sec.gov/privacy
+    publisher: U.S. Securities and Exchange Commission
+    names_people: false
+  sec-annual-filings-2025q1:
+    url: https://www.sec.gov/files/dera/data/financial-statement-data-sets/2025q1.zip
+    sha256: 4386e7057cc216b6fc729d8f957998acb831d29be7b16f6d8ed0f6b1ab74eba5  # pragma: allowlist secret
+    licence: https://www.sec.gov/privacy
+    publisher: U.S. Securities and Exchange Commission
+    names_people: false
+  sec-annual-filings-2026q1:
+    url: https://www.sec.gov/files/dera/data/financial-statement-data-sets/2026q1.zip
+    sha256: d18c01c615da8f5cd46273b0dacaeee5b1163f4089171da0f84153a5f3c362f6  # pragma: allowlist secret
+    licence: https://www.sec.gov/privacy
+    publisher: U.S. Securities and Exchange Commission
+    names_people: false

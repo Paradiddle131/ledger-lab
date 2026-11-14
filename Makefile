@@ -4,7 +4,7 @@
 LOADOUT ?= $(or $(shell sed -n 's/^The collection .* is cloned at `\([^`]*\)`.*/\1/p' $(HOME)/.claude/CLAUDE.md 2>/dev/null),../loadout)
 GUARDS := $(LOADOUT)/cloud/githooks
 
-.PHONY: check sync lint typecheck test ids portable scan
+.PHONY: check sync lint typecheck test ids portable scan stack-up stack-down stack-test cost-check fresh-clone tofu fences-validate
 
 check: lint typecheck test ids portable scan
 	@echo "make check: all passed"
@@ -33,3 +33,53 @@ portable:
 scan: sync
 	git ls-files -z | xargs -0 uv run detect-secrets-hook
 	@echo "scan: $$(git ls-files | wc -l) tracked files, no secret"
+
+# The container stack: the shared database always, one more service per PROFILE=<name>.
+# Each checkout is its own Compose project (containers, network, volume) and the database takes a
+# free loopback port unless LEDGER_LAB_DB_PORT names one, so checkouts sharing a daemon never meet.
+# The database password comes from LEDGER_LAB_DB_PASSWORD, else from a file generated at the first
+# start, ignored by git and deleted by `make stack-down` with the volume it unlocks.
+STACK_ENV := $(CURDIR)/platform/stack/.env.generated
+stack-up stack-down stack-test: export COMPOSE_PROJECT_NAME := ledger-lab-$(shell printf '%s' '$(CURDIR)' | cksum | cut -d' ' -f1)
+stack-up stack-test: export COMPOSE_FILE := $(CURDIR)/platform/stack/compose.yaml
+stack-up stack-test: export COMPOSE_ENV_FILES := $(STACK_ENV)
+
+$(STACK_ENV):
+	@umask 077 && printf 'LEDGER_LAB_DB_PASSWORD=%s\n' "$$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" > $@
+
+stack-up: $(STACK_ENV)
+	docker compose $(if $(PROFILE),--profile $(PROFILE)) up -d --wait
+	@echo "stack-up: project $$COMPOSE_PROJECT_NAME, database at $$(docker compose port db 5432)"
+
+# By project name alone, with no compose file to resolve (so no password needed): Compose finds the
+# project's containers, under any profile, its network and its volumes by their labels.
+stack-down:
+	docker compose down --volumes --remove-orphans
+	rm -f $(STACK_ENV)
+
+# The live stack test against this checkout's running database; kept out of `make check`.
+stack-test: sync stack-up
+	uv run pytest -m stack
+
+# The lab's month-to-date GCP cost and its spend fences, read live; $0.00 by absence, with no GCP
+# call, while LEDGER_LAB_GCP_PROJECT is unset.
+cost-check:
+	@uv run --no-sync python platform/cost_check.py
+
+# Clone the committed HEAD and prove it holds no secret, identifier or data (also a test in `test`).
+fresh-clone: sync
+	@uv run python platform/fresh_clone.py
+
+# The lab project's definitions (platform/gcp): the pinned OpenTofu validates them with no backend
+# and no credentials, then evaluates the access rules it generates from the catalogues for the
+# `tofu` tests; only the owner plans and applies them.
+TOFU := $(HOME)/.local/bin/tofu
+
+tofu:
+	@bash platform/gcp/install-tofu.sh
+
+fences-validate: tofu sync
+	$(TOFU) -chdir=platform/gcp fmt -check
+	$(TOFU) -chdir=platform/gcp init -backend=false -input=false >/dev/null
+	$(TOFU) -chdir=platform/gcp validate
+	TOFU=$(TOFU) uv run pytest -m tofu

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Listed companies whose annual reports the regulator's filings set lands",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["companies"],
+  "properties": {
+    "companies": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "cik", "lei", "isin", "ticker"],
+        "properties": {
+          "name": {
+            "description": "The company's legal name as the legal-entity register records it.",
+            "type": "string",
+            "minLength": 1
+          },
+          "cik": {
+            "description": "The regulator's company id, as its data sets write it: digits, no leading zero.",
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,9}$"
+          },
+          "lei": {
+            "description": "The company's legal-entity identifier, the one vendor matching gives the vendor.",
+            "type": "string",
+            "pattern": "^[A-Z0-9]{18}[0-9]{2}$"
+          },
+          "isin": {
+            "description": "The listed share the register's ISIN mapping files under the LEI; its middle nine characters are the CUSIP.",
+            "type": "string",
+            "pattern": "^US[A-Z0-9]{9}[0-9]$"
+          },
+          "ticker": {
+            "description": "The ticker the regulator's fails-to-deliver files give that CUSIP, and its ticker list maps to the CIK.",
+            "type": "string",
+            "pattern": "^[A-Z]{1,5}$"
+          }
+        }
+      }
+    }
+  }
+}

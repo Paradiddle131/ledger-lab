@@ -1,0 +1,134 @@
+models:
+  - name: stg_chicago__contracts
+    description: >
+      One row per landed row of the City of Chicago's contracts: the original award of a contract
+      or one revision of it, typed. Codes and names stay as landed, and a vendor who is or may be a
+      person keeps the keyed hashes the landing gave them.
+    columns:
+      - name: contract_number
+        description: The purchase-order or contract number, as served; the key payments carry.
+        data_tests:
+          - not_null
+      - name: revision_number
+        description: >
+          `0` for the original award, `1`, `2`, ... for later revisions, and the document number of
+          a modification or time extension imported from the City's legacy system (`C514026`,
+          `P90853`).
+        data_tests:
+          - not_null
+      - name: specification_number
+        description: The specification the contract was bid under, as served.
+      - name: contract_type
+        description: The kind of contract or revision, as served (`Modification`, `DELEGATE AGENCY`).
+      - name: procurement_type
+        description: How the contract was procured, as served (`BID`, `RFP`, `SOLE SOURCE`).
+      - name: department
+        description: The City department the contract is for, as served.
+      - name: vendor_name
+        description: The vendor's name in clear, or `person:` and its keyed hash, as landed.
+        data_tests:
+          - not_null
+      - name: vendor_is_hashed
+        description: True when the vendor's name is a keyed hash.
+      - name: approved_on
+        description: The day the award or revision was approved.
+        data_tests:
+          - not_null
+      - name: starts_on
+        description: The day the contract starts, where served.
+      - name: ends_on
+        description: The day the contract ends, where served (blanket contracts only).
+      - name: award_amount
+        description: >
+          The US dollars this row adds to the contract's award: the original award on revision `0`,
+          the change on a revision, negative when it takes scope and money off.
+        data_tests:
+          - not_null
+
+  - name: stg_chicago__payments
+    description: >
+      One row per landed row of the City of Chicago's payments, typed. Payments older than two
+      years are rolled up by the publisher into one row per vendor, contract and year, carrying the
+      bare year and no voucher number; those from 1996 to 2002 share the year 2002.
+    columns:
+      - name: payment_key
+        description: >
+          A hash of the entity and every landed column, numbered among rows identical in all of
+          them: unique, and the same in every landing made with the same hash key; a row the
+          publisher changes gets a new key.
+        data_tests:
+          - unique
+          - not_null
+      - name: voucher_number
+        description: >
+          The voucher the payment was made on, as served; `Multiple` for a payment covering several
+          vouchers; null on a rolled-up row.
+      - name: amount
+        description: The US dollars paid, a decimal with its sign as served (a refund is negative).
+        data_tests:
+          - not_null
+      - name: payment_date
+        description: The check date of an itemised payment; null on a rolled-up row.
+      - name: rolled_up_year
+        description: >
+          The bare year of a rolled-up row (2002: the payments of 1996 to 2002); null on an
+          itemised payment.
+      - name: department_name
+        description: The City department that paid, where served.
+      - name: contract_number
+        description: The contract paid against, as served; `DV` for a direct voucher, paid on no contract.
+        data_tests:
+          - not_null
+      - name: vendor_name
+        description: The payee's name in clear, or `person:` and its keyed hash, as landed.
+        data_tests:
+          - not_null
+      - name: vendor_is_hashed
+        description: True when the payee's name is a keyed hash.
+      - name: copy_number
+        description: >
+          1 on a row, and 2, 3, ... on each further row identical to it in every landed column; the
+          key numbers copies by it, and `int_chicago__payments` flags every copy after the first.
+
+seeds:
+  - name: chicago_contracts_sample
+    description: >
+      Real rows of the City's contracts for the builds inside `make check`, read when the
+      `source_rows` var is `sample`: the cut in `tests/models/chicago_sample.yaml` (companies only,
+      descriptions, contract links, vendor ids and places left out, since no model reads them) as
+      the landing's step lands it with a test hash key, so its hashed vendors (companies the test
+      register does not vouch for) carry that key's hashes, never the real one's; a test lands the
+      cut again and holds this file to it.
+    config:
+      column_types:
+        purchase_order_description: string
+        purchase_order_contract_number: string
+        revision_number: string
+        specification_number: string
+        contract_type: string
+        start_date: string
+        end_date: string
+        approval_date: string
+        department: string
+        vendor_name: string
+        vendor_id: string
+        city: string
+        state: string
+        zip: string
+        award_amount: string
+        procurement_type: string
+        contract_pdf: string
+  - name: chicago_payments_sample
+    description: >
+      Real rows of the City's payments for the builds inside `make check`, read when the
+      `source_rows` var is `sample`: the cut in `tests/models/chicago_sample.yaml` as the
+      landing's step lands it with a test hash key; a test lands the cut again and holds this file
+      to it.
+    config:
+      column_types:
+        voucher_number: string
+        amount: string
+        check_date: string
+        department_name: string
+        contract_number: string
+        vendor_name: string
