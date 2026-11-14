@@ -97,7 +97,11 @@ def test_each_landed_file_is_one_parquet_load_job_replacing_its_landed_table() -
     first = bq.calls[0]
     assert first == load_command(PROJECT, "us-central1", BUCKET, "chicago-contracts")
     assert first[:4] == ["bq", f"--project_id={PROJECT}", "--location=us-central1", "--headless"]
-    for flag in ("--source_format=PARQUET", "--replace", "--max_bad_records=0"):
+    for flag in (
+        "--source_format=PARQUET",
+        "--replace",
+        "--max_bad_records=0",
+    ):
         assert flag in first
     assert first[-2:] == [f"{PROJECT}:landed.chicago_contracts", f"gs://{BUCKET}/chicago-contracts"]
 
@@ -256,7 +260,7 @@ BIGQUERY_TYPE = {
 HASHED_NAMES = {
     "chicago-contracts": "vendor_name",
     "chicago-payments": "vendor_name",
-    "uk-transport-spend": "supplier",
+    "uk-transport-spend-2025": "supplier",
 }
 HASH = re.compile(r"^person:[0-9a-f]{64}$")
 
@@ -289,34 +293,52 @@ def test_each_landed_table_holds_its_local_file_row_for_row_and_column_for_colum
     """Every file of the local landing is a `landed` table with as many rows, the same columns
     in the same order and of the matching types, and in each column as many non-null cells, so
     no row is dropped or split and no cell moved; the row counts from the table's metadata, the
-    cells from one capped query per table."""
-    from ingest.load import run_tool, show_command, table_of
+    cells from one capped query per table. Prints the counts of every file, then fails on any
+    that differs or is not loaded."""
+    from ingest.load import call, run_tool, show_command, table_of
 
     env = lab_env()
-    report = {}
+    project, where = env["LEDGER_LAB_GCP_PROJECT"], env["LEDGER_LAB_BQ_LOCATION"]
+    report: dict[str, tuple[int, int | str]] = {}
+    wrong: dict[str, str] = {}
     for name in local_files():
         path = str(landing_path() / name)
         con = duckdb.connect()
         described = con.execute("DESCRIBE SELECT * FROM read_parquet(?)", [path]).fetchall()
         columns = [(str(c), expected_type(str(t))) for c, t, *_ in described]
-        (local_rows,) = con.execute("SELECT count(*) FROM read_parquet(?)", [path]).fetchone() or (
-            0,
+        local_rows = int(
+            (con.execute("SELECT count(*) FROM read_parquet(?)", [path]).fetchone() or [0])[0]
         )
-        project, where = env["LEDGER_LAB_GCP_PROJECT"], env["LEDGER_LAB_BQ_LOCATION"]
-        table = table_of(name, run_tool(show_command(project, where, name)))
-        assert list(table.columns) == columns, name
-        assert table.rows == local_rows, name
+        local_counts = list(
+            con.execute(
+                "SELECT "  # noqa: S608
+                + ", ".join(f'count("{c}")' for c, *_ in described)
+                + " FROM read_parquet(?)",
+                [path],
+            ).fetchone()
+            or ()
+        )
+        try:
+            table = table_of(
+                name, call(run_tool, f"describe {name}'s table", show_command(project, where, name))
+            )
+        except LoadError as error:
+            report[name], wrong[name] = (local_rows, "not loaded"), str(error)
+            continue
+        report[name] = (local_rows, table.rows)
+        if list(table.columns) != columns:
+            wrong[name] = "its columns differ"
+            continue
         counts = ", ".join(f"COUNT(`{c}`) AS c{i}" for i, (c, _) in enumerate(columns))
-        local_counts = con.execute(
-            "SELECT " + ", ".join(f'count("{c}")' for c, _ in columns) + " FROM read_parquet(?)",  # noqa: S608
-            [path],
-        ).fetchone()
         (row,) = query(f"SELECT {counts} FROM {full(name, env)}", env)  # noqa: S608
-        assert [int(row[f"c{i}"]) for i in range(len(columns))] == list(local_counts or ()), name
-        report[table.table] = (local_rows, table.rows)
-    print("table, local rows, loaded rows:")
-    for table, (local, loaded) in report.items():
-        print(f"{table} {local} {loaded}")
+        if table.rows != local_rows:
+            wrong[name] = "its row count differs"
+        elif [int(row[f"c{i}"]) for i in range(len(columns))] != local_counts:
+            wrong[name] = "a column's non-null count differs"
+    print("landed file, local rows, loaded rows:")
+    for name, (local, loaded) in report.items():
+        print(f"{name} {local} {loaded}")
+    assert wrong == {}
 
 
 @pytest.mark.warehouse
