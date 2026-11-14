@@ -165,7 +165,7 @@ def breaks(before: Contract, after: Contract) -> tuple[list[str], list[str]]:
 
 def major(contract: Contract) -> int | None:
     """The major number of the contract's `version`, or None when it is not MAJOR.MINOR.PATCH."""
-    match = SEMVER.fullmatch(str(contract.get("version")))
+    match = SEMVER.match(str(contract.get("version")))
     return int(match.group(1)) if match else None
 
 
