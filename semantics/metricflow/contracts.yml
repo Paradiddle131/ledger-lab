@@ -56,7 +56,7 @@ semantic_models:
         agg: sum
         expr: >
           case when award_held_to > 0 then
-            case when paid < award_held_to then award_held_to - paid else 0 end
+            award_held_to - paid
           end
       - name: paid_over_award
         description: >
