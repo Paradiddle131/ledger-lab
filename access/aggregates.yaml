@@ -13,12 +13,30 @@
 # `entity_rows` says whether the grain keeps each entity apart: when true the table also groups by
 # `entity_group_by` and sums `entity_sum`; when false it gives figures across all entities only.
 # No table groups by or sums a tagged column of access/columns.yaml.
-# Differencing two allowed answers is not stopped here.
+# A table of figures across all entities (`entity_rows: false`) also keeps a group only when it
+# holds at least `minimum_entities` entities whose rows the persona reads in no product, or reads
+# per entity in an aggregate table, and those entities' rows alone hold the minimum group: a
+# persona can work out its own entities' share of a group and take it away, so without this a
+# group of one other entity, or the group less the persona's own, would be one entity's figure or
+# a small group. Such a table shows one translated amount only: the same figures at two sets of
+# rates are two equations in the entities' own-currency amounts, which with two entities and the
+# public rates split the group between them.
+# Differencing two answers of different grains is not stopped here: within one table each row
+# counts in one group, and the two group-totals tables sum different figures.
 
 # Ten, a common small-cell threshold, and the one the adversarial cases measure their targets
 # against (agent/evals/adversarial.yaml, held equal by a test); BigQuery states it as the policy's
 # `threshold`.
 minimum_group: 10
+# Two: the stricter reading of aggregate access, which is open with the owner. A kept group is then
+# the combined figure of at least two entities the persona does not read, which nothing in its
+# database splits between them. Its cost on today's data: a reader of Chicago's payments (its
+# accountant, the approver) is given no group totals at all, the UK's accountant 2 of the 49 spans
+# and the Dutch accountant 12, and no left-out group is given to any of them. One gives the looser
+# reading, a group of one other entity's figure as long as its rows hold the minimum; it does not
+# give back what aggregate readers had before this rule, since a group of only the reader's own
+# entities stays dropped.
+minimum_entities: 2
 
 products:
   # The metric owner's payments, by entity and fiscal period: each entity's rows apart, as its
@@ -36,15 +54,18 @@ products:
         units: {name: payees, count_distinct: vendor_name}
   # What aggregate access to the group totals means is open with the owner: all-entity figures
   # only, or each entity's rows of at least the minimum group. This is the stricter of the two:
-  # a span's figures in euros across every entity, with no entity, basis or own currency in the
-  # grain. `entity_rows: true` gives the other reading, each entity's span and basis.
+  # a span's figures, in euros at constant rates, across every entity, with no entity, basis or
+  # own currency in the grain. `entity_rows: true` gives the other reading, each entity's span
+  # and basis, with its amount at actual rates too.
   group-totals:
     entity_rows: false
     tables:
       - name: group_totals
         from: group_totals
         group_by: [period_start, period_end, reporting_currency, constant_rates_on]
-        sum: [figures, amount_at_actual_rates, amount_at_constant_rates]
+        # At constant rates, not actual: a constant-rate figure moves with the figures alone, so
+        # spans and builds compare, while the actual-rate one also carries the mix of payment days.
+        sum: [figures, amount_at_constant_rates]
         entity_group_by:
           - group_total_key
           - entity_id
@@ -52,7 +73,7 @@ products:
           - fiscal_period
           - basis
           - currency
-        entity_sum: [amount]
+        entity_sum: [amount, amount_at_actual_rates]
         units: {name: payees, max: payees}
       - name: group_totals_left_out
         from: group_totals_left_out
