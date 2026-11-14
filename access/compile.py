@@ -199,6 +199,7 @@ def _purposes(
         for table, listed in purpose["tables"].items():
             product = product_of.get(table)
             if product is None:
+                continue
                 raise CompileError(f"purpose {purpose['id']}: {table} is no product's table")
             if product not in reads:
                 how = "only in aggregate" if product in aggregated else "with no row grant"
