@@ -99,6 +99,15 @@ def aggregates() -> dict[str, Any]:
     return load_aggregates()
 
 
+def load_purposes() -> dict[str, Any]:
+    return load_checked(REPO / "access/purposes.yaml", REPO / "access/purposes.schema.json")
+
+
+@pytest.fixture(scope="session")
+def purposes() -> dict[str, Any]:
+    return load_purposes()
+
+
 @pytest.fixture(scope="session")
 def warehouse(build: "Build") -> Path:
     """The warehouse the personas read: the dbt project built over the committed samples."""
@@ -110,12 +119,14 @@ def as_persona(
     access: dict[str, Any],
     columns: dict[str, Any],
     aggregates: dict[str, Any],
+    purposes: dict[str, Any],
     warehouse: Path,
     tmp_path: Path,
 ) -> Iterator[Callable[[str], duckdb.DuckDBPyConnection]]:
     """`as_persona(<id>)`: a local engine connection to a database compiled for the persona, holding
-    only its rows, column values and aggregates (`access/compile.py`); each database, derived data
-    with hashed names in it, is deleted when the test ends."""
+    only its purposes' rows and columns, its column values and its aggregates
+    (`access/compile.py`); each database, derived data with hashed names in it, is deleted when the
+    test ends."""
     opened: list[duckdb.DuckDBPyConnection] = []
     directories: list[Path] = []
 
@@ -123,7 +134,9 @@ def as_persona(
         directory = tmp_path / f"persona-{len(directories)}"
         directory.mkdir()
         directories.append(directory)
-        opened.append(open_persona(access, columns, aggregates, persona, warehouse, directory))
+        opened.append(
+            open_persona(access, columns, aggregates, purposes, persona, warehouse, directory)
+        )
         return opened[-1]
 
     yield act

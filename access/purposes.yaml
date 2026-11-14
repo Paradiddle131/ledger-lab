@@ -1,0 +1,165 @@
+# What each persona reads a data product's rows for: one purpose per kind of work, the columns of
+# each product table that work needs, and the personas that do it. Shape:
+# access/purposes.schema.json.
+#
+# A persona with a `read` or `edit` grant (access/personas.yaml) on a product the models build
+# tables of reads its rows only through its purposes: the local engine stores each purpose's
+# columns of a table, and nothing else of it, as `<purpose>.<table>` in the persona's database
+# (the purpose's id with `_` for `-`), and the table itself is not there (access/compile.py).
+# A purpose narrows columns on top of the grants and the policy tags, and replaces neither: its
+# rows are still only the entities the persona's grants name, and a tagged column it lists is
+# still clear or masked as access/columns.yaml says for the persona.
+# The compiler refuses a purpose for a persona with no row grant on the product (an aggregate
+# grant is none), a column or table the product lacks, a tagged column the persona reads neither
+# way, an entity-scoped table without `entity_id`, and a row grant on a product with tables but no
+# purpose of it. A product with no tables yet needs no purpose until the models build one.
+#
+# A purpose lists every column it needs, by name, so a column the models add later reaches no one
+# until a purpose lists it. Two purposes below hold every column of their tables today, because
+# the duty they serve follows a payment or a figure to everything recorded about it; the other two
+# withhold columns from personas that read them before purposes existed.
+purposes:
+  # Booking and reconciling one entity's payments, paying them, and judging the entries drafted
+  # from them: each of these follows one payment to its payee, its document and the contract it
+  # was paid against, so every column is needed. A masked reader still reads the tagged columns
+  # masked.
+  - id: payment-review
+    for: Booking, reconciling, paying and approving payments one by one.
+    personas:
+      - accountant-chicago
+      - accountant-uk-transport
+      - accountant-nl-government
+      - payables-clerk
+      - approver
+    tables:
+      payments:
+        - payment_key
+        - entity_id
+        - currency
+        - payment_date
+        - fiscal_year
+        - fiscal_period
+        - amount
+        - vendor_name
+        - vendor_is_hashed
+        - document_number
+        - contract_number
+        - award_after_revisions
+        - source_table
+        - is_repeat
+        - vendor_organisation_name
+        - vendor_person_key
+        - document_reference
+  # Closing the group's periods: each entity's payments summed by fiscal period, translated at the
+  # day's rate and at constant rates, repeats left out, and the group totals in full. The
+  # organisation paid stays, to find a payment between two of the group's entities (intercompany),
+  # which the group's figures must remove; no person's key, no document and no contract is part of
+  # a group figure, so the payee as published, the document numbers and the contract and its award
+  # are withheld.
+  - id: group-close
+    for: Summing and translating every entity's payments into the group's figures by period.
+    personas: [group-controller]
+    tables:
+      payments:
+        - payment_key
+        - entity_id
+        - currency
+        - payment_date
+        - fiscal_year
+        - fiscal_period
+        - amount
+        - source_table
+        - is_repeat
+        - vendor_organisation_name
+      group_totals:
+        - group_total_key
+        - entity_id
+        - fiscal_year
+        - fiscal_period
+        - period_start
+        - period_end
+        - basis
+        - figures
+        - payees
+        - currency
+        - amount
+        - reporting_currency
+        - amount_at_actual_rates
+        - amount_at_constant_rates
+        - constant_rates_on
+      group_totals_left_out:
+        - entity_id
+        - fiscal_year
+        - basis
+        - left_out_by
+        - figures
+        - payees
+        - currency
+        - amount
+  # Defining and versioning the governed metrics over the group totals: the columns the metrics'
+  # semantic model reads (semantics/metricflow/group_totals.yml, held equal by a test), and none
+  # of the left-out figures, which no metric reads.
+  - id: metric-definition
+    for: Defining and versioning the governed metrics on the group totals.
+    personas: [metric-owner]
+    tables:
+      group_totals:
+        - group_total_key
+        - entity_id
+        - fiscal_year
+        - fiscal_period
+        - period_start
+        - basis
+        - reporting_currency
+        - amount_at_constant_rates
+        - constant_rates_on
+  # Reading everything there is and changing nothing: every column of every table the auditor's
+  # grants reach. Whether the auditor reads the tagged columns in clear or masked is open with the
+  # owner and is access/columns.yaml's line, not this one.
+  - id: audit
+    for: Reading every record as it is, changing nothing.
+    personas: [auditor]
+    tables:
+      payments:
+        - payment_key
+        - entity_id
+        - currency
+        - payment_date
+        - fiscal_year
+        - fiscal_period
+        - amount
+        - vendor_name
+        - vendor_is_hashed
+        - document_number
+        - contract_number
+        - award_after_revisions
+        - source_table
+        - is_repeat
+        - vendor_organisation_name
+        - vendor_person_key
+        - document_reference
+      group_totals:
+        - group_total_key
+        - entity_id
+        - fiscal_year
+        - fiscal_period
+        - period_start
+        - period_end
+        - basis
+        - figures
+        - payees
+        - currency
+        - amount
+        - reporting_currency
+        - amount_at_actual_rates
+        - amount_at_constant_rates
+        - constant_rates_on
+      group_totals_left_out:
+        - entity_id
+        - fiscal_year
+        - basis
+        - left_out_by
+        - figures
+        - payees
+        - currency
+        - amount

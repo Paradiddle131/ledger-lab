@@ -26,13 +26,15 @@ from access.compile import (
     Rows,
     compile_persona,
     open_persona,
+    schema_of,
     source_schema,
     statements,
 )
-from tests.conftest import REPO, landed_file
+from tests.conftest import REPO, landed_file, load_purposes
 
 AsPersona = Callable[[str], duckdb.DuckDBPyConnection]
 Doc = dict[str, Any]
+PURPOSES = load_purposes()
 
 
 def builder(warehouse: Path, sql: str, *params: object) -> list[tuple[Any, ...]]:
@@ -66,8 +68,24 @@ def reader(columns: Doc, tag: str, kind: str) -> str:
     return next(t[kind][0] for t in columns["tags"] if t["id"] == tag)
 
 
-def plan_of(access: Doc, columns: Doc, aggregates: Doc, persona: str, warehouse: Path) -> Plan:
-    return compile_persona(access, columns, aggregates, persona, source_schema(warehouse))
+def plan_of(
+    access: Doc,
+    columns: Doc,
+    aggregates: Doc,
+    persona: str,
+    warehouse: Path,
+    purposes: Doc = PURPOSES,
+) -> Plan:
+    return compile_persona(access, columns, aggregates, purposes, persona, source_schema(warehouse))
+
+
+def held_as(persona: str, table: str) -> str:
+    """Where the persona reads a product table: under its first purpose that lists the table."""
+    return next(
+        f"{schema_of(p['id'])}.{table}"
+        for p in PURPOSES["purposes"]
+        if persona in p["personas"] and table in p["tables"]
+    )
 
 
 # The row rule.
@@ -78,7 +96,8 @@ def test_an_entity_accountant_sees_no_other_entitys_row(
 ) -> None:
     for persona, entity in accountants(access).items():
         db = as_persona(persona)
-        seen = db.execute("select entity_id, count(*) from payments group by entity_id").fetchall()
+        mine = held_as(persona, "payments")
+        seen = db.execute(f"select entity_id, count(*) from {mine} group by entity_id").fetchall()  # noqa: S608
         own = builder(
             warehouse,
             "select entity_id, count(*) from payments where entity_id = ? group by 1",
@@ -90,7 +109,7 @@ def test_an_entity_accountant_sees_no_other_entitys_row(
         )
         assert others, "the samples hold another entity's payment"
         (key,) = others[0]
-        assert db.execute("select * from payments where payment_key = ?", [key]).fetchall() == []
+        assert db.execute(f"select * from {mine} where payment_key = ?", [key]).fetchall() == []  # noqa: S608
 
 
 def test_the_row_rule_follows_the_grants_with_no_code_edit(
@@ -129,8 +148,10 @@ def test_a_masked_column_returns_masked_values(
         )
         assert any(stored.values()), f"the samples hold no {column}"
         for kind in ("masked", "clear"):
-            db = as_persona(reader(columns, tag, kind))
-            seen = dict(db.execute(f"select payment_key, {column} from payments").fetchall())  # noqa: S608
+            persona = reader(columns, tag, kind)
+            db = as_persona(persona)
+            mine = held_as(persona, "payments")
+            seen = dict(db.execute(f"select payment_key, {column} from {mine}").fetchall())  # noqa: S608
             assert seen, kind
             for key, value in seen.items():
                 if kind == "clear" or stored[key] is None:
@@ -143,49 +164,28 @@ def test_a_masked_column_returns_masked_values(
 def test_a_filter_on_a_masked_column_sees_the_masked_value(
     as_persona: AsPersona, columns: Doc, warehouse: Path
 ) -> None:
-    db = as_persona(reader(columns, "individual-id", "masked"))
-    (entity,) = {e for (e,) in db.execute("select distinct entity_id from payments").fetchall()}
+    persona = reader(columns, "individual-id", "masked")
+    db = as_persona(persona)
+    mine = held_as(persona, "payments")
+    (entity,) = {e for (e,) in db.execute(f"select distinct entity_id from {mine}").fetchall()}  # noqa: S608
     ((name, payments),) = builder(
         warehouse,
         "select vendor_name, count(*) from payments where entity_id = ?"
         " group by 1 order by 2 desc, 1 limit 1",
         entity,
     )
-    count = "select count(*) from payments where vendor_name = ?"
+    count = f"select count(*) from {mine} where vendor_name = ?"  # noqa: S608
     assert db.execute(count, [name]).fetchone() == (0,)
     assert db.execute(count, [sha256_rendered(name)]).fetchone() == (payments,)
     # Equal stored values mask alike, so a masked column still joins and counts.
     assert (
-        db.execute("select count(distinct vendor_name) from payments").fetchone()
+        db.execute(f"select count(distinct vendor_name) from {mine}").fetchone()  # noqa: S608
         == builder(
             warehouse,
             "select count(distinct vendor_name) from payments where entity_id = ?",
             entity,
         )[0]
     )
-
-
-def test_a_persona_that_reads_a_tag_neither_way_gets_no_column(
-    access: Doc, columns: Doc, aggregates: Doc, warehouse: Path, tmp_path: Path
-) -> None:
-    persona = reader(columns, "individual-id", "masked")
-    neither = copy.deepcopy(columns)
-    for tag in neither["tags"]:
-        tag["masked"].remove(persona)
-    db = open_persona(access, neither, aggregates, persona, warehouse, tmp_path)
-    try:
-        held = {
-            c
-            for (c,) in db.execute(
-                "select column_name from duckdb_columns() where table_name = 'payments'"
-            ).fetchall()
-        }
-        assert held and held.isdisjoint(tagged(columns))
-        for column in tagged(columns):
-            with pytest.raises(duckdb.BinderException):
-                db.execute(f"select {column} from payments")  # noqa: S608
-    finally:
-        db.close()
 
 
 @pytest.mark.parametrize("rule", ["last-four", "nullify"])
@@ -202,9 +202,10 @@ def test_last_four_and_nullify_mask_as_bigquerys_rules(
     if persona not in invented["tags"][0]["masked"]:
         pytest.fail("the first tag's masked readers lack the persona")
     stored = dict(builder(warehouse, "select payment_key, contract_number from payments"))
-    db = open_persona(access, invented, aggregates, persona, warehouse, tmp_path)
+    db = open_persona(access, invented, aggregates, PURPOSES, persona, warehouse, tmp_path)
     try:
-        seen = dict(db.execute("select payment_key, contract_number from payments").fetchall())
+        mine = held_as(persona, "payments")
+        seen = dict(db.execute(f"select payment_key, contract_number from {mine}").fetchall())  # noqa: S608
     finally:
         db.close()
     assert any(stored[k] for k in seen)
@@ -271,9 +272,10 @@ def test_a_group_totals_query_over_fewer_than_the_minimum_group_returns_nothing(
     )
     readers = aggregate_readers(access, "group-totals")
     assert readers
-    span = "select * from group_totals where period_start = ? and period_end = ?"
     for persona in [*readers, clear]:
         db = as_persona(persona)
+        table = held_as(persona, "group_totals") if persona == clear else "group_totals"
+        span = f"select * from {table} where period_start = ? and period_end = ?"  # noqa: S608
         for start, end in small:
             got = db.execute(span, [start, end]).fetchall()
             assert (got == []) == (persona != clear), (persona, start)
@@ -308,7 +310,7 @@ def test_the_minimum_is_one_catalogue_line(
     persona = aggregate_readers(access, "group-totals")[0]
     expected = kept_spans(warehouse, own[persona], 2, 1)
     assert expected, "the samples hold a span of at least two payees of another entity"
-    db = open_persona(access, columns, lower, persona, warehouse, tmp_path)
+    db = open_persona(access, columns, lower, PURPOSES, persona, warehouse, tmp_path)
     try:
         seen = db.execute(
             "select period_start, period_end, figures,"
@@ -360,7 +362,7 @@ def test_an_all_entity_figure_holds_two_entities_the_persona_reads_no_rows_of(
     for persona in aggregate_readers(access, "group-totals"):
         directory = tmp_path / persona
         directory.mkdir()
-        db = open_persona(access, columns, lower, persona, warehouse, directory)
+        db = open_persona(access, columns, lower, PURPOSES, persona, warehouse, directory)
         try:
             seen[persona] = db.execute(
                 "select period_start, period_end, figures,"
@@ -419,9 +421,11 @@ def test_an_entity_read_per_entity_in_aggregate_counts_as_known(
     catalogue["grants"].append(
         {"persona": "metric-owner", "product": "group-totals", "access": "aggregate"}
     )
+    purposes = copy.deepcopy(PURPOSES)
+    purposes["purposes"] = [p for p in purposes["purposes"] if "metric-owner" not in p["personas"]]
     (totals,) = [
         t
-        for t in plan_of(catalogue, columns, aggregates, "metric-owner", warehouse).tables
+        for t in plan_of(catalogue, columns, aggregates, "metric-owner", warehouse, purposes).tables
         if isinstance(t, Aggregate) and t.name == "group_totals"
     ]
     per_entity = {
@@ -489,7 +493,7 @@ def test_the_kept_groups_over_the_samples_are_pinned(
     ):
         directory = tmp_path / persona
         directory.mkdir()
-        db = open_persona(access, columns, doc, persona, warehouse, directory)
+        db = open_persona(access, columns, doc, PURPOSES, persona, warehouse, directory)
         try:
             for table in sorted(tables):
                 if reads_aggregate(access, doc, persona, table):
@@ -553,7 +557,7 @@ def test_an_aggregate_reader_sees_only_its_granted_entities(
     for name, catalogue in (("all", access), ("chicago", one)):
         directory = tmp_path / name
         directory.mkdir()
-        db = open_persona(catalogue, columns, lower, persona, warehouse, directory)
+        db = open_persona(catalogue, columns, lower, PURPOSES, persona, warehouse, directory)
         try:
             rows = db.execute("select distinct entity_id from payments_by_period").fetchall()
             seen[name] = {e for (e,) in rows}
@@ -606,13 +610,28 @@ REFUSALS = {
     "clear-and-masked": "both in clear and masked",
     "rows-and-aggregate": "both by rows and in aggregate",
     "hash-on-a-number": "masks strings only",
+    "purpose-for-an-aggregate-reader": "reads group-totals only in aggregate",
+    "purpose-with-no-grant": "reads group-totals with no row grant",
+    "purpose-column-the-product-lacks": "payments has no no_such_column",
+    "purpose-table-of-no-product": "fx_rates is no product's table",
+    "purpose-tag-read-neither-way": "neither in clear nor masked",
+    "row-grant-with-no-purpose": "holds no purpose of it",
+    "purpose-without-the-entity": "without its entity_id",
+    "purpose-of-an-unknown-persona": "no persona nobody",
+    "two-purposes-of-one-id": "share an id",
+    "purpose-in-a-schema-the-engine-keeps": "a schema the engine keeps",
 }
 
 
-def refusal(change: str, access: Doc, columns: Doc, aggregates: Doc) -> tuple[Doc, Doc, Doc, str]:
-    """The three catalogues with one line changed, and the persona to compile."""
+def refusal(
+    change: str, access: Doc, columns: Doc, aggregates: Doc
+) -> tuple[Doc, Doc, Doc, str, Doc]:
+    """The four catalogues with one line changed, and the persona to compile."""
     access, columns, aggregates = (copy.deepcopy(d) for d in (access, columns, aggregates))
+    purposes = copy.deepcopy(PURPOSES)
     persona = "accountant-chicago"
+    by_id = {p["id"]: p for p in purposes["purposes"]}
+    review = by_id["payment-review"]
     totals = aggregates["products"]["group-totals"]["tables"][0]
     if change == "unknown-access":
         access["grants"].append({"persona": persona, "product": "audit-log", "access": "export"})
@@ -645,16 +664,38 @@ def refusal(change: str, access: Doc, columns: Doc, aggregates: Doc) -> tuple[Do
         access["grants"].append({"persona": persona, "product": "group-totals", "access": "read"})
     elif change == "hash-on-a-number":
         columns["products"]["payments"]["columns"]["payments.amount"] = "individual-id"
-    return access, columns, aggregates, persona
+    elif change == "purpose-for-an-aggregate-reader":
+        by_id["group-close"]["personas"].append(persona)
+    elif change == "purpose-with-no-grant":
+        persona = "payables-clerk"
+        by_id["group-close"]["personas"].append(persona)
+    elif change == "purpose-column-the-product-lacks":
+        review["tables"]["payments"].append("no_such_column")
+    elif change == "purpose-table-of-no-product":
+        review["tables"]["fx_rates"] = ["currency"]
+    elif change == "purpose-tag-read-neither-way":
+        for tag in columns["tags"]:
+            tag["masked"].remove(persona)
+    elif change == "row-grant-with-no-purpose":
+        review["personas"].remove(persona)
+    elif change == "purpose-without-the-entity":
+        review["tables"]["payments"].remove("entity_id")
+    elif change == "purpose-of-an-unknown-persona":
+        by_id["audit"]["personas"].append("nobody")
+    elif change == "two-purposes-of-one-id":
+        purposes["purposes"].append(copy.deepcopy(review))
+    elif change == "purpose-in-a-schema-the-engine-keeps":
+        review["id"] = "main"
+    return access, columns, aggregates, persona, purposes
 
 
 @pytest.mark.parametrize("change", list(REFUSALS))
 def test_the_compile_refuses_what_it_cannot_express(
     access: Doc, columns: Doc, aggregates: Doc, warehouse: Path, change: str
 ) -> None:
-    changed = refusal(change, access, columns, aggregates)
+    *changed, purposes = refusal(change, access, columns, aggregates)
     with pytest.raises(CompileError, match=REFUSALS[change]):
-        plan_of(*changed, warehouse)
+        plan_of(*changed, warehouse, purposes)
 
 
 def test_an_entity_scoped_table_without_an_entity_column_is_refused(
@@ -664,7 +705,7 @@ def test_an_entity_scoped_table_without_an_entity_column_is_refused(
     schema = source_schema(warehouse)
     schema["payments"] = [c for c in schema["payments"] if c[0] != "entity_id"]
     with pytest.raises(CompileError, match="entity_id"):
-        compile_persona(access, columns, aggregates, "accountant-chicago", schema)
+        compile_persona(access, columns, aggregates, PURPOSES, "accountant-chicago", schema)
 
 
 def test_an_all_entity_table_without_an_entity_column_is_refused(
@@ -675,7 +716,7 @@ def test_an_all_entity_table_without_an_entity_column_is_refused(
     schema = source_schema(warehouse)
     schema["group_totals"] = [c for c in schema["group_totals"] if c[0] != "entity_id"]
     with pytest.raises(CompileError, match="no entity_id to keep apart"):
-        compile_persona(access, columns, aggregates, "accountant-chicago", schema)
+        compile_persona(access, columns, aggregates, PURPOSES, "accountant-chicago", schema)
 
 
 # The products the models build no table of yet, acted out on invented tables.
@@ -718,16 +759,26 @@ def test_the_products_without_tables_yet_follow_their_grants_on_invented_tables(
             and g["access"] in {"read", "edit"}
         }
 
+    # Invented: one purpose per invented product, of all its columns, for its row readers.
+    whole = {"ledger": ["entity_id", "entry"], "metric_definitions": ["metric"], "audit_log": ["answer"]}
+    wider = copy.deepcopy(PURPOSES)
+    for product, table in invented.items():
+        readers = sorted(p["id"] for p in access["personas"] if reads(p["id"], product))
+        wider["purposes"].append(
+            {"id": f"invented-{product}", "for": "invented", "personas": readers,
+             "tables": {table: whole[table]}}
+        )
+
     for persona in (p["id"] for p in access["personas"]):
         directory = tmp_path / persona
         directory.mkdir()
-        db = open_persona(catalogue, columns, aggregates, persona, source, directory)
+        db = open_persona(catalogue, columns, aggregates, wider, persona, source, directory)
         try:
             held = {t for (t,) in db.execute("select table_name from duckdb_tables()").fetchall()}
             for product, table in invented.items():
                 assert (table in held) == bool(reads(persona, product)), (persona, table)
             if "ledger" in held:
-                rows = db.execute("select distinct entity_id from ledger").fetchall()
+                rows = db.execute("select distinct entity_id from invented_ledger.ledger").fetchall()
                 assert {e for (e,) in rows} == reads(persona, "ledger"), persona
         finally:
             db.close()
@@ -850,7 +901,7 @@ def test_two_amounts_at_two_rates_would_split_a_kept_span_over_the_landed_build(
     so at both rates they are equal and the actual-rate total less the constant-rate one would be
     Chicago's alone, which with the public rates gives Chicago's figure."""
     persona = "accountant-uk-transport"
-    db = open_persona(access, columns, aggregates, persona, landed_warehouse, tmp_path)
+    db = open_persona(access, columns, aggregates, PURPOSES, persona, landed_warehouse, tmp_path)
     try:
         held = {
             c
@@ -935,23 +986,37 @@ def test_every_persona_reads_what_its_rules_give_over_the_landed_build(
     for persona in (p["id"] for p in access["personas"]):
         directory = tmp_path / persona
         directory.mkdir()
-        db = open_persona(access, columns, aggregates, persona, landed_warehouse, directory)
+        db = open_persona(access, columns, aggregates, PURPOSES, persona, landed_warehouse, directory)
         try:
-            held = {t for (t,) in db.execute("select table_name from duckdb_tables()").fetchall()}
+            held = {
+                f"{schema}.{t}"
+                for schema, t in db.execute(
+                    "select schema_name, table_name from duckdb_tables()"
+                ).fetchall()
+            }
             entities = {
                 g["entity"]
                 for g in access["grants"]
                 if g["persona"] == persona and g["product"] == "payments" and g["access"] == "read"
             }
-            assert ("payments" in held) == bool(entities), persona
-            if entities:
-                seen = db.execute("select entity_id, count(*) from payments group by 1").fetchall()
+            lists = {
+                f"{schema_of(p['id'])}.payments": p["tables"]["payments"]
+                for p in PURPOSES["purposes"]
+                if persona in p["personas"] and "payments" in p["tables"]
+            }
+            assert bool(lists) == bool(entities) and "main.payments" not in held, persona
+            for table, listed in lists.items():
+                assert table in held, (persona, table)
+                seen = db.execute(f"select entity_id, count(*) from {table} group by 1").fetchall()  # noqa: S608
                 assert dict(seen) == {e: n for e, n in LANDED_PAYMENTS.items() if e in entities}
                 masked = persona not in columns["tags"][0]["clear"]
+                shown = [c for c in personal.split(", ") if c in listed]
+                if not shown:
+                    continue
                 for key, *values in db.execute(
-                    f"select payment_key, {personal} from payments"  # noqa: S608
+                    f"select payment_key, {', '.join(shown)} from {table}"  # noqa: S608
                 ).fetchall():
-                    want = stored[key]
+                    want = [v for c, v in zip(personal.split(", "), stored[key], strict=True) if c in shown]
                     if masked:
                         want = [None if v is None else sha256_rendered(v) for v in want]
                     assert values == want, (persona, key)

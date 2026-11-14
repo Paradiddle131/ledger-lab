@@ -5,11 +5,14 @@ connection reads: anything a connection can open, it reads whole. A persona's da
 holds only what the persona may see, materialised from the catalogues by the account that builds
 it, and everything else is simply absent:
 
+- the purposes: a product's rows are read only through the persona's purposes in
+  `access/purposes.yaml`, each a table `<purpose>.<table>` holding only the columns the purpose
+  lists, and the product's table itself is never written, so no query reaches a column no purpose
+  of the persona needs;
 - the row rule: of an entity-scoped product's tables, only the rows of the entities the persona's
   `read` or `edit` grants name (`access/personas.yaml`); of a group product, every row;
 - the column rules: a column tagged in `access/columns.yaml` holds the stored value for the tag's
-  clear readers, the tag's masking rule applied to the stored value for its masked readers, and
-  is left out for a persona that is neither, so no query can name it;
+  clear readers and the tag's masking rule applied to the stored value for its masked readers;
 - the minimum group: an `aggregate` grant gives the product's aggregate tables of
   `access/aggregates.yaml` and never its rows, each table holding only the groups of at least the
   minimum, so no filter or grain the persona writes can reach a smaller one;
@@ -25,7 +28,8 @@ value, as on BigQuery, where predicates read the masked column. The persona's co
 The compile is a pure function of the catalogues and the source tables' columns, so the same
 inputs give the same statements, and it refuses what it cannot express (an unknown access, a tag
 with no masking rule it knows, a column or table the source lacks, an aggregate over a tagged
-column) instead of leaving anything open. Persona, product and table ids are schema-checked
+column, a purpose for a persona with no row grant or with a tagged column it reads neither way, a
+row grant with no purpose) instead of leaving anything open. Persona, product and table ids are schema-checked
 slugs; every identifier and literal is quoted all the same.
 """
 
@@ -52,6 +56,10 @@ MASKING_RULES = frozenset({"nullify", "hash", "last-four"})
 # BigQuery's hash and last-four rules apply to strings only; nullify to any type.
 STRING_ONLY = frozenset({"hash", "last-four"})
 
+# Schema names a purpose cannot take in the persona's database: the aggregate tables' own, those
+# DuckDB keeps, and the catalog name the build attaches the source under.
+RESERVED_SCHEMAS = frozenset({"main", "temp", "information_schema", "pg_catalog", SOURCE})
+
 # A table's columns as the source holds them: name and DuckDB type, in table order.
 Schema = Mapping[str, Sequence[tuple[str, str]]]
 
@@ -70,11 +78,17 @@ class Column:
 
 @dataclass(frozen=True)
 class Rows:
-    """A product table copied with the persona's rows and columns."""
+    """A product table copied for one purpose, with the persona's rows and the purpose's columns,
+    stored as `<purpose>.<table>`."""
 
     table: str
     entities: frozenset[str] | None  # None: every row (a group product)
     columns: tuple[Column, ...]
+    purpose: str  # the schema it is stored in: the purpose's id with `_` for `-`
+
+    @property
+    def name(self) -> str:
+        return f"{self.purpose}.{self.table}"
 
 
 @dataclass(frozen=True)
@@ -146,6 +160,77 @@ def column_rules(columns: Mapping[str, Any], persona: str) -> dict[str, dict[str
     return rules
 
 
+def schema_of(purpose: str) -> str:
+    """The schema a purpose's tables are stored in: its id, a slug, with `_` for `-`."""
+    return purpose.replace("-", "_")
+
+
+def _purposes(
+    catalogue: Mapping[str, Any],
+    purposes: Mapping[str, Any],
+    persona: str,
+    reads: Mapping[str, frozenset[str] | None],
+    tables_of: Mapping[str, list[str]],
+    rules: Mapping[str, Mapping[str, str]],
+    schema: Schema,
+) -> list[Rows]:
+    """The persona's purposes' tables, each narrowed to the purpose's columns; refuses a purpose
+    the grants or the tags do not allow and a row grant no purpose serves."""
+    ids = [p["id"] for p in purposes["purposes"]]
+    if len(ids) != len(set(ids)):
+        raise CompileError(f"two purposes share an id: {sorted(ids)}")
+    known = {p["id"] for p in catalogue["personas"]}
+    product_of = {table: product for product, tables in tables_of.items() for table in tables}
+    aggregated = {
+        g["product"]
+        for g in catalogue["grants"]
+        if g["persona"] == persona and g["access"] == AGGREGATE
+    }
+    plan: list[Rows] = []
+    served: set[str] = set()
+    for purpose in purposes["purposes"]:
+        if unknown := sorted(set(purpose["personas"]) - known):
+            raise CompileError(f"purpose {purpose['id']}: no persona {', '.join(unknown)}")
+        if persona not in purpose["personas"]:
+            continue
+        where = schema_of(purpose["id"])
+        if where in RESERVED_SCHEMAS:
+            raise CompileError(f"purpose {purpose['id']}: {where} is a schema the engine keeps")
+        for table, listed in purpose["tables"].items():
+            product = product_of.get(table)
+            if product is None:
+                raise CompileError(f"purpose {purpose['id']}: {table} is no product's table")
+            if product not in reads:
+                how = "only in aggregate" if product in aggregated else "with no row grant"
+                raise CompileError(f"purpose {purpose['id']}: {persona} reads {product} {how}")
+            source = _columns_of(schema, table)
+            if missing := [c for c in listed if c not in source]:
+                raise CompileError(f"purpose {purpose['id']}: {table} has no {', '.join(missing)}")
+            entities = reads[product]
+            if entities is not None and ENTITY not in listed:
+                raise CompileError(f"purpose {purpose['id']}: {table} without its {ENTITY}")
+            tagged = rules.get(product, {})
+            kept: list[Column] = []
+            for name, kind in source.items():
+                if name not in listed:
+                    continue
+                rule = tagged.get(f"{table}.{name}", "clear")
+                if rule == "denied":
+                    raise CompileError(
+                        f"purpose {purpose['id']}: {persona} reads the tag on {table}.{name}"
+                        " neither in clear nor masked"
+                    )
+                if rule in STRING_ONLY and kind != "VARCHAR":
+                    raise CompileError(f"{table}.{name}: {rule} masks strings only")
+                kept.append(Column(name, kind, rule))
+            plan.append(Rows(table, entities, tuple(kept), where))
+            served.add(product)
+    for product in sorted(reads):
+        if tables_of[product] and product not in served:
+            raise CompileError(f"{persona} reads {product} by rows but holds no purpose of it")
+    return plan
+
+
 def _entities(catalogue: Mapping[str, Any], persona: str, product: str) -> frozenset[str] | None:
     scope = {p["id"]: p["scope"] for p in catalogue["data_products"]}[product]
     if scope != "entity":
@@ -167,10 +252,11 @@ def compile_persona(
     catalogue: Mapping[str, Any],
     columns: Mapping[str, Any],
     aggregates: Mapping[str, Any],
+    purposes: Mapping[str, Any],
     persona: str,
     schema: Schema,
 ) -> Plan:
-    """What the persona's database holds, from the three catalogues and the source's columns."""
+    """What the persona's database holds, from the four catalogues and the source's columns."""
     who = identity(catalogue, persona)
     mine = [g for g in catalogue["grants"] if g["persona"] == persona]
     for grant in mine:
@@ -205,25 +291,15 @@ def compile_persona(
             if name not in _columns_of(schema, table):
                 raise CompileError(f"{product}: the source table {table} has no {name}")
     plan: list[Rows | Aggregate] = []
+    aggregated = sorted({g["product"] for g in mine if g["access"] == AGGREGATE})
+    if both := [product for product in aggregated if product in who.reads]:
+        raise CompileError(f"{persona} reads {both[0]} both by rows and in aggregate")
     for product in sorted(who.reads):
-        entities = who.reads[product]
         for table in tables_of[product]:
-            source = _columns_of(schema, table)
-            if entities is not None and ENTITY not in source:
+            if who.reads[product] is not None and ENTITY not in _columns_of(schema, table):
                 raise CompileError(f"{product} is entity-scoped but {table} has no {ENTITY}")
-            tagged = rules.get(product, {})
-            kept = tuple(
-                Column(name, kind, rule)
-                for name, kind in source.items()
-                if (rule := tagged.get(f"{table}.{name}", "clear")) != "denied"
-            )
-            for column in kept:
-                if column.rule in STRING_ONLY and column.type != "VARCHAR":
-                    raise CompileError(f"{table}.{column.name}: {column.rule} masks strings only")
-            plan.append(Rows(table, entities, kept))
-    for product in sorted({g["product"] for g in mine if g["access"] == AGGREGATE}):
-        if product in who.reads:
-            raise CompileError(f"{persona} reads {product} both by rows and in aggregate")
+    plan += _purposes(catalogue, purposes, persona, who.reads, tables_of, rules, schema)
+    for product in aggregated:
         if not tables_of[product]:
             continue  # the models build no table of it yet: nothing to aggregate
         entry = aggregates["products"].get(product)
@@ -279,7 +355,7 @@ def compile_persona(
                     0 if entry["entity_rows"] else apart,
                 )
             )
-    names = [t.table if isinstance(t, Rows) else t.name for t in plan]
+    names = [t.name for t in plan]
     if len(names) != len(set(names)):
         raise CompileError(f"{persona}: two tables share a name: {sorted(names)}")
     return Plan(persona, tuple(plan))
@@ -337,13 +413,17 @@ def _kept(table: Aggregate) -> str:
 def statements(plan: Plan) -> list[str]:
     """The SQL that builds the persona's database, with the source attached as SOURCE."""
     sql: list[str] = []
+    schemas: set[str] = set()
     for table in plan.tables:
         if isinstance(table, Rows):
+            if table.purpose not in schemas:
+                schemas.add(table.purpose)
+                sql.append(f"create schema {quote(table.purpose)}")
             listed = ", ".join(f"{masked(c)} as {quote(c.name)}" for c in table.columns)
             source = f"{SOURCE}.main.{quote(table.table)}"
             sql.append(
-                f"create table {quote(table.table)} as select {listed}"  # noqa: S608
-                f" from {source}{_where(table.entities)}"
+                f"create table {quote(table.purpose)}.{quote(table.table)}"  # noqa: S608
+                f" as select {listed} from {source}{_where(table.entities)}"
             )
         else:
             of = quote(table.units_of)
@@ -400,10 +480,13 @@ def open_persona(
     catalogue: Mapping[str, Any],
     columns: Mapping[str, Any],
     aggregates: Mapping[str, Any],
+    purposes: Mapping[str, Any],
     persona: str,
     warehouse: Path,
     directory: Path,
 ) -> duckdb.DuckDBPyConnection:
     """Compile the persona's rules over `warehouse`, build its database and connect as it."""
-    plan = compile_persona(catalogue, columns, aggregates, persona, source_schema(warehouse))
+    plan = compile_persona(
+        catalogue, columns, aggregates, purposes, persona, source_schema(warehouse)
+    )
     return connect(materialise(plan, warehouse, directory))
