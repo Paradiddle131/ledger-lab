@@ -964,14 +964,19 @@ def with_filter(name: str, where: str) -> Change:
 
 
 def joined_model(parsed: Block) -> None:
-    """A semantic model invented for the test that joins the contract metrics' semantic model
-    through its `contract` entity, holding a dimension of its own and no measure."""
+    """Two semantic models invented for the test: one joins the contract metrics' semantic model
+    through its `contract` entity and carries a `bridge` entity, the other joins only through
+    `bridge` and holds a dimension, so it is reached only transitively."""
     (contracts,) = [m for m in parsed["semantic_models"] if m["name"] == "chicago_contracts"]
-    extra = copy.deepcopy(contracts)
-    extra["name"] = "contract_extras"
-    extra["measures"] = []
-    extra["dimensions"] = [{**contracts["dimensions"][0], "name": "probe_dim", "expr": "x"}]
-    parsed["semantic_models"].append(extra)
+    entity = contracts["entities"][0]
+    assert entity["name"] == "contract", "the contract entity moved: update the test"
+    bridge = {**entity, "name": "bridge", "type": "foreign", "expr": "x"}
+    near = {**copy.deepcopy(contracts), "name": "contract_bridge", "measures": [], "dimensions": []}
+    near["entities"] = [{**entity, "type": "foreign"}, bridge]
+    far = {**copy.deepcopy(contracts), "name": "contract_extras", "measures": []}
+    far["entities"] = [{**bridge, "type": "primary"}]
+    far["dimensions"] = [{**contracts["dimensions"][0], "name": "probe_dim", "expr": "x"}]
+    parsed["semantic_models"] += [near, far]
 
 
 def probe_dimension_changed(parsed: Block) -> None:
