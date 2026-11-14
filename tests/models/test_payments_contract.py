@@ -24,7 +24,7 @@ from datacontract.data_contract import DataContract
 from ingest.entities import Register
 from ingest.fetch import landing_path
 from ingest.individuals import identifier_hasher, is_organisation, person_hasher
-from ingest.uk_transport.spend import BODIES
+from ingest.uk_transport.spend import BODIES, PLACEHOLDERS
 from models.contracts import engine, gate
 from tests.models.dbt_build import PROJECT, Build, built, query
 
@@ -676,7 +676,7 @@ def test_the_real_landing_keeps_the_contract(tmp_path: Path) -> None:
         " and document_number like 'id:%'",
     )
     print("UK rows whose document number is a keyed hash:", keyed[0][0])
-    assert keyed == [(12_009,)]
+    assert keyed == [(11_354,)]
     split_payees_and_documents(build, landing)
 
 
@@ -710,13 +710,10 @@ join pairs on rows.entity_id = pairs.entity_id
     and rows.amount is not distinct from pairs.amount and rows.day is not distinct from pairs.day
 group by rows.entity_id
 """
-# A UK placeholder, `#` where the department gives no number, which the landing hashes too.
-UK_PLACEHOLDER = "#"
-
-
 def uk_shared_transactions(landing: Path) -> dict[str, int]:
-    """The UK transactions a clear row shows in clear and a hashed row carries as a keyed hash,
-    found by the landing's own identifier hasher, and the hashed placeholder's rows; counts only."""
+    """The UK numbers a row shows in clear that a hashed or redacted row carries as a keyed hash,
+    found by the landing's own identifier hasher, and the placeholders the landing keyed; counts
+    only."""
     as_id = identifier_hasher()
     rows = (
         duckdb.connect()
@@ -726,16 +723,15 @@ def uk_shared_transactions(landing: Path) -> dict[str, int]:
         )
         .fetchall()
     )
-    keyed = [(s, t) for s, t in rows if t and t.startswith("id:")]
-    shown = [t for _, t in rows if t and not t.startswith("id:") and t != UK_PLACEHOLDER]
-    hits = {as_id(t) for t in set(shown)} & {t for _, t in keyed}
-    placeholder = as_id(UK_PLACEHOLDER)
+    hidden = [t for s, t in rows if s.startswith("person:") or s == "REDACTED"]
+    keyed = {t for t in hidden if t.startswith("id:")}
+    shown = [t for _, t in rows if not t.startswith("id:") and t not in PLACEHOLDERS]
+    hits = {as_id(t) for t in set(shown)} & keyed
+    placeholders = {as_id(p) for p in PLACEHOLDERS}
     return {
         "shared numbers": len(hits),
         "clear rows showing one": sum(1 for t in shown if as_id(t) in hits),
-        "hashed rows carrying one": sum(1 for _, t in keyed if t in hits),
-        "hashed placeholder rows": sum(1 for _, t in keyed if t == placeholder),
-        "payees on the hashed placeholder": len({s for s, t in keyed if t == placeholder}),
+        "keyed placeholder rows": sum(1 for _, t in rows if t in placeholders),
     }
 
 
@@ -743,8 +739,8 @@ def split_payees_and_documents(build: Build, landing: Path) -> None:
     """The split columns on the real landing: as many person keys, organisation names and clear
     references per entity as the landed files' own counts give; every clear name an organisation
     by the landing's own classifier and register; no clear name whose person hash is a key; no
-    clear reference a hashed payee's row carries; and no UK reference, since the UK landing's
-    keyed numbers hide which clear numbers a hashed payee's line shares."""
+    clear reference a hashed payee's row carries; no clear UK number a hashed row carries, by the
+    landing's own hasher; and no UK reference, which the published contract's rule holds null."""
     files = {
         "chicago": str(landing / "chicago-payments"),
         "uk": str(landing / "uk-transport-spend-2025"),
@@ -757,13 +753,7 @@ def split_payees_and_documents(build: Build, landing: Path) -> None:
     }
     shared = uk_shared_transactions(landing)
     print("UK transactions shown in clear beside a hashed line:", shared)
-    assert shared == {
-        "shared numbers": 89,
-        "clear rows showing one": 135,
-        "hashed rows carrying one": 114,
-        "hashed placeholder rows": 729,
-        "payees on the hashed placeholder": 91,
-    }
+    assert shared == {"shared numbers": 0, "clear rows showing one": 0, "keyed placeholder rows": 0}
     split = {
         e: rest
         for e, *rest in query(

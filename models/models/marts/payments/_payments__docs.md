@@ -41,7 +41,7 @@ True when the payee's name is a keyed hash.
 {% enddocs %}
 
 {% docs payment_document_number %}
-The document the payment was made on: Chicago's voucher number, as served (`Multiple` for a payment covering several vouchers), null on a rolled-up row, which has none; the UK department's transaction number as landed, `#` where it gives none and a keyed hash (`id:`) on a hashed or redacted row, so it repeats.
+The document the payment was made on: Chicago's voucher number, as served (`Multiple` for a payment covering several vouchers), null on a rolled-up row, which has none; the UK department's transaction number as landed, `#` or `DIRECT DEBIT` where it gives none and a keyed hash (`id:`) on every row carrying a number a hashed or redacted row carries, so it repeats.
 It is the published column, kept as the contract promises it until a breaking change is next made deliberately; `document_reference` shows the part of it a clear column may show.
 {% enddocs %}
 
@@ -80,6 +80,6 @@ Every row has exactly one of this and `vendor_organisation_name`.
 
 {% docs payment_document_reference %}
 Chicago's voucher number in clear, exactly `document_number` on a row whose payee is in clear, unless the number is the placeholder `Multiple`, which names no voucher, or a hashed payee's row carries it too, since the City's own search finds the payee by it; null on every other row.
-Null on every UK row: the UK landing replaces a hashed row's transaction number by a keyed hash, so a clear number cannot be told apart from one that a hashed payee's line of the same transaction carries.
+Null on every UK row, as the published contract promises, though no clear UK transaction number is one a hashed or redacted row carries (the UK landing hashes such a number on every row): a masked reader sees the UK's numbers only through the masked `document_number`.
 Its absence is a signal and depends on the build: a clear payee's row with a voucher number but no reference, whose masked `document_number` is not the hash of `Multiple`, marks a voucher shared with a hashed payee, and a later landing can withdraw a reference an earlier one showed.
 {% enddocs %}
