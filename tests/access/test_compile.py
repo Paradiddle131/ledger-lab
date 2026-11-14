@@ -679,8 +679,9 @@ def test_no_persona_reads_the_landed_payments_file(
 
 # What the compiled personas read over the landed files today, counted independently below.
 LANDED_PAYMENTS = {"chicago": 475609, "uk-transport": 31103}
-# The groups each aggregate table keeps at the minimum, of the spans, years and periods there are.
-LANDED_KEPT = {"group_totals": 0, "group_totals_left_out": 0, "payments_by_period": 0}
+# The groups each aggregate table keeps at the minimum: every one of the 49 spans and 7 years and
+# rules (the smallest 207 and 115 payees), and 98 of the 108 entity periods.
+LANDED_KEPT = {"group_totals": 49, "group_totals_left_out": 7, "payments_by_period": 98}
 LANDED_SOURCES = (
     "chicago-contracts",
     "chicago-payments",
@@ -761,7 +762,6 @@ def test_every_persona_reads_what_its_rules_give_over_the_landed_build(
                     count, smallest = db.execute(
                         f"select count(*), min(payees) from {table}"  # noqa: S608
                     ).fetchone() or (0, 0)
-                    print(persona, table, count, smallest)
                     assert (count, smallest >= minimum) == (kept, True), (persona, table)
         finally:
             db.close()
