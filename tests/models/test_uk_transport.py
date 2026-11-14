@@ -17,6 +17,7 @@ from pathlib import Path
 import duckdb
 import httpx
 import pytest
+from conftest import landed_file
 
 from ingest import fetch
 from ingest.entities import REGISTER
@@ -323,7 +324,8 @@ def test_the_real_mart_holds_each_entity_once_and_no_uk_row_is_a_repeat(real: Bu
 def test_the_real_identical_rows_are_consecutive_under_one_number(real: Build) -> None:
     """The evidence on `is_repeat`: rows identical in every landed cell within their file, 121 rows
     in 56 groups, every group consecutive rows under one transaction number, 33 of the groups
-    hashed rows whose served descriptions the landing dropped; nothing ties them to a total."""
+    hashed rows whose served descriptions the landing dropped (13 of them, 27 rows, differ as
+    served); nothing ties them to a total."""
     path = Path(real.env["LEDGER_LAB_LANDING"]) / SET
     cells = ", ".join(c for c in COLUMNS if c not in ("source_file", "source_row"))
     groups = (
@@ -342,3 +344,38 @@ def test_the_real_identical_rows_are_consecutive_under_one_number(real: Build) -
     assert (len(groups), rows) == (56, 121)
     assert all(n == span for n, span, _ in groups), "every group is consecutive rows"
     assert Counter(kind for _, _, kind in groups) == {"number": 21, "#": 2, "hashed": 33}
+
+
+@pytest.mark.landed
+def test_every_sample_row_is_a_landed_row() -> None:
+    """Each committed row is a row of the landed set: exactly, supplier and transaction number
+    included, where the landing keeps the supplier in clear; on its file, paying body, date and
+    amount beside a hashed supplier and number where the landing hashes it."""
+    path = landed_file(SET)
+    landed_rows = (
+        duckdb.connect()
+        .execute(
+            "select source_file, entity, date, supplier, transaction_number, amount"
+            " from read_parquet(?)",
+            [str(path)],
+        )
+        .fetchall()
+    )
+    exact = set(landed_rows)
+    hashed = {
+        (f, body, day, amount)
+        for f, body, day, supplier, number, amount in landed_rows
+        if supplier.startswith("person:") and number.startswith("id:")
+    }
+    clear = {r[3] for r in landed_rows}
+    found: Counter[str] = Counter()
+    for f, body, day, supplier, number, served in sample_rows():
+        amount = served.removeprefix("£").replace(",", "")
+        if supplier in clear:
+            assert (f, body, day, supplier, number, amount) in exact, (f, day, supplier)
+            found["clear"] += 1
+        else:
+            assert (f, body, day, amount) in hashed, (f, day, supplier)
+            found["hashed"] += 1
+    print("sample rows held to landed rows:", dict(found))
+    assert found["clear"] > 0

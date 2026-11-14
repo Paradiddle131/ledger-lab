@@ -1,16 +1,20 @@
 # Real rows of the Department for Transport's spending over £25,000 for fiscal year 2025: one for
-# each UK supplier of the labelled vendor sample (`vendor_sample.yaml`), two rows of one file sharing
-# the placeholder `#`, one transaction number in two files, two consecutive rows identical in every
-# served cell, and four rows of three companies in clear only on the real register's word. Companies whose name the
-# classifier cannot read as one party and the vendor seeds' register does not vouch for
-# (`HASHED_COMPANIES` in `test_uk_transport.py`) the step hashes with the test key, as a real
-# landing hashes any supplier without evidence. Contains public sector
-# information licensed under the Open Government Licence v3.0. Every supplier is a company in clear
-# in the landed files; no person and no hash is committed here. Each row is its file name, paying
-# body, date, supplier, transaction number and amount as served; the expense type, expense area,
-# description and postal code are left out, since no model reads them. The UK sample seed
-# (`models/seeds/staging/uk_transport/uk_transport_spend_sample.csv`) is these rows as the landing
-# step lands them with a test key, and a test lands them again and holds the seed to it.
+# each UK supplier of the labelled vendor sample (`vendor_sample.yaml`), two rows of one file
+# sharing the placeholder `#`, one transaction number in two files, two consecutive rows identical
+# in every served cell, and four rows of three companies in clear only on the real register's word.
+# Contains public sector information licensed under the Open Government Licence v3.0.
+# Every supplier is a public company named here in clear, and every other cell is as served; no
+# person and no hash is committed here. Most suppliers land in clear in the landed files, but five
+# companies with a joined name (a `&`, a `+`, a bracket, `AND`) that the pinned register does not
+# vouch for land hashed there, as the landing hashes any supplier without evidence; a landed test
+# holds each row here to a landed row, the clear ones exactly and those five on their file, paying
+# body, date and amount beside a hashed supplier. The companies whose name the classifier cannot
+# read as one party and the vendor seeds' register does not vouch for (`HASHED_COMPANIES` in
+# `test_uk_transport.py`) the sample's own landing hashes with the test key. Each row is its file
+# name, paying body, date, supplier, transaction number and amount as served; the expense type,
+# expense area, description and postal code are left out, since no model reads them. The UK sample
+# seed (`models/seeds/staging/uk_transport/uk_transport_spend_sample.csv`) is these rows as the
+# landing step lands them with a test key, and a test lands them again and holds the seed to it.
 rows:
   - ["dft-spending-over-25000-april-2025.csv", "National Highways", "23/04/2025", "Colas Limited", "1021398", "£310,372.17"]
   - ["dft-spending-over-25000-april-2025.csv", "National Highways", "07/04/2025", "AECOM LIMITED", "1018588", "£146,403.72"]

@@ -113,10 +113,11 @@ models:
         description: >
           False on every row: nothing in the Department's files tells a payment served twice from
           two equal lines of one document. On the pinned files 121 rows fall in 56 groups identical
-          in every landed cell within their file (65 extra copies); every group is consecutive rows
-          under one transaction number (21 groups a clear number, 2 the placeholder `#`, 33 a keyed
-          hash, whose rows' descriptions and postcodes the landing drops, so they are identical only
-          as landed), and the files carry no award or total to tie them against. Each stays a
+          as landed within their file (65 extra copies); every group is consecutive rows under one
+          transaction number (21 groups a clear number, 2 the placeholder `#`, 33 a keyed hash).
+          Read against the served files, 43 groups are identical in every served cell, and 13 hashed
+          groups (27 rows) differ in the description the landing drops, so they are certainly
+          separate lines; the files carry no award or total to tie the 43 against. Each row stays a
           payment of its own.
 
 unit_tests:
