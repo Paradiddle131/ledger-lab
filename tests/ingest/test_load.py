@@ -78,10 +78,15 @@ class Bq:
 
 
 def bucket_holding(*names: str) -> MemoryFileSystem:
-    fs = MemoryFileSystem(skip_instance_cache=True)
-    fs.store.clear()
-    fs.pseudo_dirs.clear()
-    fs.pseudo_dirs.append("")
+    """A bucket of its own: fsspec's memory file system keeps one store for every instance, which
+    other tests read, so each stand-in is a class with a fresh store."""
+
+    class Own(MemoryFileSystem):
+        store: dict[str, Any] = {}
+        pseudo_dirs = [""]
+        cachable = False
+
+    fs = Own(skip_instance_cache=True)
     fs.mkdir(BUCKET)
     for name in names:
         fs.pipe_file(f"{BUCKET}/{name}", b"PAR1")
