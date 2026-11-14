@@ -68,11 +68,12 @@ Prerequisites: [uv](https://docs.astral.sh/uv/), GNU make, git, and a clone of t
 
 ```bash
 uv sync
-make check        # lint, types, tests, process-id and owner checks, secret scan, contract gate
+make check        # lint, types, tests, process-id and owner checks, secret scan, contract and metric-version gates
 make fresh-clone  # clone HEAD and prove it holds no secret, identifier or data
 ```
 
 The contract gate (`make contract`) matches every data contract (`*.odcs.yaml`, today [`models/contracts/payments.odcs.yaml`](models/contracts/payments.odcs.yaml)) with the one on `origin/main` as this clone holds it, by contract id, and fails on a change that breaks a consumer, or when `origin/main` is not fetched (`git fetch origin main`); it runs offline after `uv sync`.
+The metric-version gate (`make metric-versions`) reads the metrics `origin/main`'s own dbt project reads and fails when a metric's definition changed under the same version, a version went down or is missing, a metric has no owner, or a metric `origin/main` defines is gone or renamed; it runs offline too.
 `make sync` also puts the Data Contract CLI's DuckDB engine (the lock's `contract` group) in uv's cache; the contract tests and `make contract-test`, which runs `datacontract test` over a local dbt build, use it offline on DuckDB 1.5 over a copy of the build in that version's storage format, and the tests skip, saying so, when it is not cached.
 
 The dbt models build on DuckDB in the session by default, reading the landed files in place under `LEDGER_LAB_LANDING`; setting `LEDGER_LAB_GCP_PROJECT` (with `uv sync --group bigquery`) moves them to BigQuery:
@@ -85,7 +86,7 @@ Every model that reads a fetched source reads the file the fetch kit landed (`py
 The Dutch budget against outturn shows the figures as the file serves them: a zero the file may serve in place of a figure is flagged on its line (`has_doubtful_zero`), and the landed tests count the figures the file serves wrong.
 The group totals sum each entity's spend by fiscal period, or by year where the source gives only a year, in euros at actual and at constant rates, each row naming what its figure is (`basis`: Chicago's direct vouchers, contract payments and yearly roll-ups, the UK department's payments over £25,000, the Dutch government's cash-expenditure outturn), and count what they leave out, by rule, beside them (`group_totals_left_out`).
 
-The governed metrics are MetricFlow definitions in `semantics/metricflow/`, each with an owner (the persona who owns its glossary term), a glossary term and a role in its `meta`: a `headline` metric is one to read, an `input` only feeds one.
+The governed metrics are MetricFlow definitions in `semantics/metricflow/`, each with an owner (the persona who owns its glossary term), a glossary term, a role and a version in its `meta`: a `headline` metric is one to read, an `input` only feeds one, and the version, an integer from 1, goes up with every change that can move its number or what it says it measures, in its own definition, its inputs or the measures and semantic models it resolves to (the SQL of the dbt models beneath is outside it).
 [`semantics/finance_metrics.yaml`](semantics/finance_metrics.yaml) maps the five promised finance metrics to the headline metrics that answer them:
 spend against award, remaining commitment and what was paid over award (the City of Chicago's contracts the contract reconciliation holds to an award above 0, groupable by break class and filterable by end date; by `metric_time` they group contracts by approval cohort, the day of their first revision), the duplicate-payment rate by rows and by amount (Chicago's payments the publisher serves again), and constant-currency spend (the group totals at one day's rates, a figure only where the rows share one basis, so group it by `group_total__basis`; by year or coarser, never by month, since a whole year's figure has no month).
 Days to pay is not definable from the public files, which serve one date per payment; the file says why.
