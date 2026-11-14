@@ -1,13 +1,15 @@
 -- Fails on every span (a fiscal period, or a fiscal year for figures with a year and no day) whose
 -- group total in the mart, the sum of its rows across entities at actual and at constant rates,
 -- differs from the same sum worked out here straight from the entity marts, or whose count of
--- figures differs. This side translates each figure itself and never rounds it: a payment at the
--- latest ECB rates published on or up to four days before its day, a figure with a year and no
--- day at the mean of the rates published in its span to six places, and at constant rates at the
--- latest rates on or before the `group_totals` var's day; so a span may differ by at most half a
--- cent per figure. A span counts when the rates of the figure's currency and the reporting
--- currency were first published at most four days after its start and last at most four days
--- before its end.
+-- figures differs. This side translates each figure itself: a payment at the latest ECB rates
+-- published on or up to four days before its day, a figure with a year and no day at the mean of
+-- the rates published in its span to six places, and at constant rates at the latest rates on or
+-- before the `group_totals` var's day, each rounded to the cent. The sums must be equal, except
+-- by a cent for each figure whose unrounded translation lies within a millionth of a cent of a
+-- half cent, where this side's floating-point division may round the other way. An entity's
+-- span counts when the rates of its currency and the reporting currency were first published at
+-- most four days after its start and last at most four days before its end, and none of the
+-- entity's dated payments in it falls before the first publication or after the last.
 {%- set settings = var('group_totals') %}
 {%- set reporting = "'" ~ settings.reporting_currency ~ "'" %}
 {%- set constant_day = "cast('" ~ settings.constant_rates_on ~ "' as date)" %}
@@ -25,6 +27,7 @@ years as (
 
 figures as (
     select
+        payments.entity_id,
         payments.currency,
         payments.amount,
         payments.payment_date,
@@ -45,6 +48,7 @@ figures as (
     union all
 
     select
+        lines.entity_id,
         lines.currency,
         lines.outturn_eur,
         cast(null as date),
@@ -54,6 +58,27 @@ figures as (
     inner join years
         on lines.entity_id = years.entity_id and lines.fiscal_year = years.fiscal_year
     where lines.kind = 'U' and lines.outturn_eur is not null
+),
+
+bounds as (
+    select currency, min(published_on) as first_on, max(published_on) as last_on
+    from {{ ref('fx_published_rates') }}
+    group by currency
+),
+
+beyond_the_rates as (
+    select distinct figures.entity_id, figures.period_start, figures.period_end
+    from figures
+    left join bounds as from_bounds on figures.currency = from_bounds.currency
+    left join bounds as to_bounds on to_bounds.currency = {{ reporting }}
+    where
+        figures.payment_date is not null
+        and (
+            from_bounds.currency is null
+            or to_bounds.currency is null
+            or figures.payment_date not between from_bounds.first_on and from_bounds.last_on
+            or figures.payment_date not between to_bounds.first_on and to_bounds.last_on
+        )
 ),
 
 span_rates as (
@@ -91,7 +116,7 @@ day_rates as (
             and rates.published_on >= cast({{ dbt.dateadd('day', -4, 'days.rate_day') }} as date)
 ),
 
-translated as (
+unrounded as (
     select
         figures.period_start,
         figures.period_end,
@@ -114,6 +139,11 @@ translated as (
             figures.period_start = to_span.period_start
             and figures.period_end = to_span.period_end
             and to_span.currency = {{ reporting }}
+    left join beyond_the_rates
+        on
+            figures.entity_id = beyond_the_rates.entity_id
+            and figures.period_start = beyond_the_rates.period_start
+            and figures.period_end = beyond_the_rates.period_end
     left join day_rates as from_day
         on
             figures.payment_date = from_day.rate_day
@@ -135,10 +165,29 @@ translated as (
             and to_constant.currency = {{ reporting }}
             and to_constant.latest = 1
     where
-        from_span.first_published_on <= cast({{ dbt.dateadd('day', 4, 'figures.period_start') }} as date)
-        and to_span.first_published_on <= cast({{ dbt.dateadd('day', 4, 'figures.period_start') }} as date)
-        and from_span.last_published_on >= cast({{ dbt.dateadd('day', -4, 'figures.period_end') }} as date)
-        and to_span.last_published_on >= cast({{ dbt.dateadd('day', -4, 'figures.period_end') }} as date)
+        beyond_the_rates.entity_id is null
+        and from_span.first_published_on
+        <= cast({{ dbt.dateadd('day', 4, 'figures.period_start') }} as date)
+        and to_span.first_published_on
+        <= cast({{ dbt.dateadd('day', 4, 'figures.period_start') }} as date)
+        and from_span.last_published_on
+        >= cast({{ dbt.dateadd('day', -4, 'figures.period_end') }} as date)
+        and to_span.last_published_on
+        >= cast({{ dbt.dateadd('day', -4, 'figures.period_end') }} as date)
+),
+
+translated as (
+    select
+        period_start,
+        period_end,
+        {%- for side in ['at_actual_rates', 'at_constant_rates'] %}
+        cast(round({{ side }}, 2) as {{ dbt.type_numeric() }}) as {{ side }},
+        case
+            when abs(abs({{ side }} * 100 - floor({{ side }} * 100)) - 0.5) < 0.000001 then 1
+            else 0
+        end as {{ side }}_near_a_half{{ ',' if not loop.last }}
+        {%- endfor %}
+    from unrounded
 ),
 
 worked_out as (
@@ -148,7 +197,9 @@ worked_out as (
         count(*) as figures,
         count(at_actual_rates) as translated,
         sum(at_actual_rates) as at_actual_rates,
-        sum(at_constant_rates) as at_constant_rates
+        sum(at_actual_rates_near_a_half) as actual_near_a_half,
+        sum(at_constant_rates) as at_constant_rates,
+        sum(at_constant_rates_near_a_half) as constant_near_a_half
     from translated
     group by period_start, period_end
 ),
@@ -185,6 +236,6 @@ where
     or worked_out.at_actual_rates is null
     or worked_out.figures <> worked_out.translated
     or abs(group_totals.at_actual_rates - worked_out.at_actual_rates)
-    > 0.005 * worked_out.figures
+    > 0.01 * worked_out.actual_near_a_half
     or abs(group_totals.at_constant_rates - worked_out.at_constant_rates)
-    > 0.005 * worked_out.figures
+    > 0.01 * worked_out.constant_near_a_half

@@ -6,17 +6,18 @@
 --
 -- The rules, first match deciding: a payment the source serves again (`repeat`); a figure of a
 -- year the fiscal calendars do not cover (`outside-calendars`); a Dutch line of a year the file
--- serves no outturn for (`no-outturn`), since a budget never stands in for spend; a figure whose
--- span the ECB rates do not cover (`no-rate`), its first publication more than four days after
--- the span's start or its last more than four days before its end, the run of closed days the
--- rates carry over, so a period is left out whole, never in part.
+-- serves no outturn for (`no-outturn`), since a budget never stands in for spend; a figure of an
+-- entity's span the ECB rates do not cover (`no-rate`): their first publication in it more than
+-- four days after its start or their last more than four days before its end (the run of closed
+-- days the rates carry over), or one of the entity's dated figures in it before the first
+-- publication or after the last, so a span is left out whole, never in part.
 --
 -- At actual rates a payment with a day takes that day's rates (`translate_currency`), and a
--- payment inside a covered period on a day with no rate stops the query; a figure with a year and
--- no day takes, for each currency, the mean of the rates the ECB published on the span's days,
--- rounded to six decimal places, which is how the ECB averages its own rates over a year. At
--- constant rates every figure takes the rates of one named day. The reporting currency and that
--- day are the `group_totals` var's.
+-- payment inside a covered span on a day with no rate (a gap of more than four days between
+-- publications) stops the query; a figure with a year and no day takes, for each currency, the
+-- mean of the rates the ECB published on the span's days, rounded to six decimal places, which
+-- equals the ECB's own yearly average to six places. At constant rates every figure takes the
+-- rates of one named day. The reporting currency and that day are the `group_totals` var's.
 {%- set reporting = "'" ~ var('group_totals').reporting_currency ~ "'" %}
 {%- set constant_rates_on = var('group_totals').constant_rates_on %}
 
@@ -47,7 +48,8 @@ served as (
         case
             when entity_id = 'uk-transport' then 'payments-over-25k'
             when entity_id = 'chicago' and payment_date is null then 'payments-year-rollup'
-            when entity_id = 'chicago' then 'payments'
+            when entity_id = 'chicago' and contract_number is null then 'direct-vouchers'
+            when entity_id = 'chicago' then 'contract-payments'
         end as basis,
         fiscal_year,
         fiscal_period,
@@ -91,6 +93,38 @@ spanned as (
             served.entity_id = years.entity_id
             and served.fiscal_year = years.fiscal_year
             and served.fiscal_period is null
+),
+
+published as (
+    select
+        currency,
+        min(published_on) as first_published_on,
+        max(published_on) as last_published_on
+    from {{ ref('fx_published_rates') }}
+    group by currency
+),
+
+-- Each entity's spans with a dated figure, not a repeat, before the first publication of its
+-- currency or the reporting currency, or after the last.
+beyond_the_rates as (
+    select distinct
+        spanned.entity_id,
+        spanned.period_start,
+        spanned.period_end
+    from spanned
+    left join published as from_rates on spanned.currency = from_rates.currency
+    left join published as to_rates on to_rates.currency = {{ reporting }}
+    where
+        spanned.payment_date is not null
+        and not spanned.is_repeat
+        and (
+            from_rates.currency is null
+            or to_rates.currency is null
+            or spanned.payment_date < from_rates.first_published_on
+            or spanned.payment_date > from_rates.last_published_on
+            or spanned.payment_date < to_rates.first_published_on
+            or spanned.payment_date > to_rates.last_published_on
+        )
 ),
 
 spans as (
@@ -137,7 +171,11 @@ classified as (
             when spanned.is_repeat then 'repeat'
             when spanned.period_start is null then 'outside-calendars'
             when not spanned.has_figure then 'no-outturn'
-            when from_rates.currency is null or to_rates.currency is null then 'no-rate'
+            when
+                from_rates.currency is null
+                or to_rates.currency is null
+                or beyond_the_rates.entity_id is not null
+                then 'no-rate'
         end as left_out_by
     from spanned
     left join covered as from_rates
@@ -150,6 +188,11 @@ classified as (
             spanned.period_start = to_rates.period_start
             and spanned.period_end = to_rates.period_end
             and to_rates.currency = {{ reporting }}
+    left join beyond_the_rates
+        on
+            spanned.entity_id = beyond_the_rates.entity_id
+            and spanned.period_start = beyond_the_rates.period_start
+            and spanned.period_end = beyond_the_rates.period_end
 ),
 
 counted as (
