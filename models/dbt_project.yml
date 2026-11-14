@@ -40,3 +40,5 @@ models:
       +materialized: table
     marts:
       +materialized: table
+    reconciliations:
+      +materialized: table

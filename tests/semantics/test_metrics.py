@@ -7,8 +7,10 @@ this file's own arithmetic, and constant-currency spend from the group totals' o
 figures (`tests/models/test_group_totals.py`). The landed test pins each metric's real value.
 """
 
-import copy
 import csv
+import json
+import os
+import shutil
 import subprocess
 import sys
 from collections import Counter, defaultdict
@@ -21,12 +23,13 @@ import duckdb
 import pytest
 
 from ingest.fetch import landing_path
-from tests.models.dbt_build import PROJECT, Build, built
+from tests.models.dbt_build import DBT, PROJECT, Build, built, query
 from tests.models.test_group_totals import worked_out
-from tests.semantics.metric_cli import RUNNER, manifest, mf, mf_query
-from tests.semantics.offline_mf import REFUSED
+from tests.semantics.metric_cli import MF, manifest, mf, mf_env, mf_query
+from tests.semantics.no_network.sitecustomize import REFUSED
 
 SEEDS = PROJECT / "seeds" / "staging" / "chicago"
+SEMANTICS = PROJECT.parent / "semantics"
 # The metrics a consumer reads, and the inputs they are built from, which carry an owner and a
 # term like any other. Days to pay is not among them: every public file serves one date a payment.
 METRICS = {
@@ -58,9 +61,6 @@ CHICAGO_METRICS = [
     "chicago_payment_amount",
     "chicago_repeat_amount",
 ]
-# The landed files' cut-off: a contract ending on or after it is still running.
-CUT_OFF = "2026-10-31"
-RUNNING = f"{{{{ TimeDimension('contract__ends_on', 'day') }}}} >= '{CUT_OFF}'"
 
 
 def ownership_problems(
@@ -108,28 +108,66 @@ def test_every_metric_has_a_human_owner_and_a_glossary_term(
     assert ownership_problems(manifest(build)["metrics"], access, glossary) == []
 
 
+PLANTED = "      meta: {owner: metric-owner, term: spend-against-award}\n"
+
+
+def parsed_with(tmp_path: Path, meta: str | None) -> dict[str, Any]:
+    """The semantic manifest `dbt parse` writes for a copy of the project whose
+    `spend_against_award` carries `meta` in place of its own (none at all when `meta` is None)."""
+    copied = tmp_path / "project"
+    ignore = shutil.ignore_patterns("target", "logs", "dbt_packages")
+    shutil.copytree(PROJECT, copied / PROJECT.name, ignore=ignore)
+    shutil.copytree(SEMANTICS, copied / SEMANTICS.name, ignore=ignore)
+    contracts = copied / SEMANTICS.name / "contracts.yml"
+    source = contracts.read_text()
+    assert source.count(PLANTED) == 2, "spend_against_award's meta moved: update PLANTED"
+    planted = "    config:\n" + PLANTED
+    replacement = "" if meta is None else f"    config:\n      meta: {meta}\n"
+    contracts.write_text(source.replace(planted, replacement, 1))
+    env = {k: v for k, v in os.environ.items() if k != "LEDGER_LAB_GCP_PROJECT"}
+    env |= {
+        "LEDGER_LAB_DUCKDB_PATH": str(tmp_path / "unused.duckdb"),
+        "DBT_TARGET_PATH": str(tmp_path / "target"),
+        "DBT_LOG_PATH": str(tmp_path / "logs"),
+        "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
+    }
+    result = subprocess.run(
+        [str(DBT), "parse", "--project-dir", str(copied / PROJECT.name)]
+        + ["--profiles-dir", str(copied / PROJECT.name), "--target", "local"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return json.loads((tmp_path / "target" / "semantic_manifest.json").read_text())
+
+
 @pytest.mark.parametrize(
     ("meta", "expected"),
     [
-        ({"term": "award"}, ["no owner"]),
-        ({"owner": "proposer", "term": "award"}, ["owner proposer is not a human persona"]),
-        ({"owner": "someone-else", "term": "award"}, ["owner someone-else is no persona"]),
-        ({"owner": "metric-owner"}, ["no glossary term"]),
-        ({"owner": "metric-owner", "term": "made-up"}, ["term made-up is not in the glossary"]),
+        ("{term: award}", ["no owner"]),
+        ("{owner: proposer, term: award}", ["owner proposer is not a human persona"]),
+        ("{owner: someone-else, term: award}", ["owner someone-else is no persona"]),
+        ("{owner: metric-owner}", ["no glossary term"]),
+        ("{owner: metric-owner, term: made-up}", ["term made-up is not in the glossary"]),
         (None, ["no owner", "no glossary term"]),
     ],
 )
 def test_a_metric_without_a_human_owner_or_a_known_term_is_refused(
-    build: Build,
+    tmp_path: Path,
     access: dict[str, Any],
     glossary: dict[str, Any],
-    meta: dict[str, str] | None,
+    meta: str | None,
     expected: list[str],
 ) -> None:
-    metrics = copy.deepcopy(manifest(build)["metrics"])
-    metrics[0]["config"] = None if meta is None else {"meta": meta}
-    name = metrics[0]["name"]
-    assert ownership_problems(metrics, access, glossary) == [f"{name}: {e}" for e in expected]
+    """Each planted case is written into the metric's own YAML and read back through dbt's parse,
+    as `make check` reads the real definitions."""
+    metrics = parsed_with(tmp_path, meta)["metrics"]
+    assert ownership_problems(metrics, access, glossary) == [
+        f"spend_against_award: {e}" for e in expected
+    ]
 
 
 def text(value: object) -> str | None:
@@ -149,9 +187,7 @@ class Chicago:
     paid_against_fixed_award: Decimal
     unpaid_award: Decimal
     paid_over_award: Decimal
-    running_unpaid_award: Decimal
-    running_fixed_award: Decimal
-    running_paid: Decimal
+    fixed_contracts: int
 
     def values(self) -> dict[str, Decimal]:
         return {
@@ -169,32 +205,57 @@ class Chicago:
         }
 
 
+def held_to(revisions: list[tuple[str | None, Decimal]]) -> Decimal:
+    """A contract's award held to, from its revisions (approval day, amount), each once: the
+    award after revisions, or, where revisions that are not all 0 net to 0, the highest award in
+    force after any approval day."""
+    after = sum((amount for _, amount in revisions), Decimal(0))
+    if after != 0 or all(amount == 0 for _, amount in revisions):
+        return after
+    by_day: dict[str | None, Decimal] = defaultdict(Decimal)
+    for day, amount in revisions:
+        by_day[day] += amount
+    in_force, peak = Decimal(0), None
+    for day in sorted(by_day, key=lambda d: (d is None, d or "")):
+        in_force += by_day[day]
+        peak = in_force if peak is None else max(peak, in_force)
+    assert peak is not None
+    return peak
+
+
 def worked_out_chicago(
     payments: list[tuple[Any, ...]], contracts: list[tuple[Any, ...]]
 ) -> Chicago:
     """Payments as served (voucher, amount, check date, department, contract, vendor) and contract
-    rows (contract, revision, award, approval date, end date), as text."""
-    awards: dict[str, Decimal] = defaultdict(Decimal)
-    ends: dict[str, str] = {}
-    for contract, *_, end in contracts:
-        if end:
-            ends[contract] = max(ends.get(contract, end[:10]), end[:10])
+    rows (contract, revision, award, approval date), as text."""
+    revisions: dict[str, list[tuple[str | None, Decimal]]] = defaultdict(list)
     # A revision counts once, however many rows serve it.
-    for contract, _, award, _ in {(c, r, a, (d or "")[:10]) for c, r, a, d, _ in contracts}:
-        awards[contract] += Decimal(award) if award else Decimal(0)
+    for contract, _, award, day in {(c, r, a, text(d) and d[:10]) for c, r, a, d in contracts}:
+        revisions[contract].append((day, Decimal(award) if award else Decimal(0)))
+    awards = {contract: held_to(rows) for contract, rows in revisions.items()}
 
     rows = [tuple(text(cell) for cell in row) for row in payments]
     seen: Counter[tuple[str | None, ...]] = Counter()
 
-    def same_payment(row: tuple[str | None, ...]) -> tuple[object, ...]:
+    def same_payment(row: tuple[str | None, ...], *, any_name: bool) -> tuple[object, ...]:
         voucher, amount, day, _, contract, vendor = row
-        return (voucher, Decimal(amount or 0), day, contract, vendor)
+        return (voucher, Decimal(amount or 0), day, contract, None if any_name else vendor)
 
-    with_department = {same_payment(row) for row in rows if row[3] is not None}
+    with_department = {
+        same_payment(row, any_name=any_name)
+        for row in rows
+        if row[3] is not None
+        for any_name in (False, True)
+    }
     repeat = []
     for row in rows:
         seen[row] += 1
-        repeat.append(seen[row] > 1 or (row[3] is None and same_payment(row) in with_department))
+        # A copy, or a row without a department beside one with it, the vendor name the same or
+        # not.
+        repeat.append(
+            seen[row] > 1
+            or (row[3] is None and same_payment(row, any_name=True) in with_department)
+        )
     dated: dict[tuple[str | None, str | None, str], Decimal] = defaultdict(Decimal)
     for row, is_repeat in zip(rows, repeat, strict=True):
         _, amount, day, _, contract, vendor = row
@@ -210,7 +271,6 @@ def worked_out_chicago(
         if not is_repeat and contract in awards:
             paid[contract] += Decimal(amount or 0)
     fixed = {c: award for c, award in awards.items() if award > 0}
-    running = {c for c in fixed if ends.get(c, "") >= CUT_OFF}
     return Chicago(
         payment_rows=len(rows),
         repeat_rows=sum(repeat),
@@ -218,24 +278,18 @@ def worked_out_chicago(
         repeat_amount=sum(
             (Decimal(r[1] or 0) for r, flag in zip(rows, repeat, strict=True) if flag), Decimal(0)
         ),
+        fixed_contracts=len(fixed),
         fixed_award=sum(fixed.values(), Decimal(0)),
         paid_against_fixed_award=sum((paid[c] for c in fixed), Decimal(0)),
         unpaid_award=sum((max(a - paid[c], Decimal(0)) for c, a in fixed.items()), Decimal(0)),
         paid_over_award=sum((max(paid[c] - a, Decimal(0)) for c, a in fixed.items()), Decimal(0)),
-        running_unpaid_award=sum(
-            (max(fixed[c] - paid[c], Decimal(0)) for c in running), Decimal(0)
-        ),
-        running_fixed_award=sum((fixed[c] for c in running), Decimal(0)),
-        running_paid=sum((paid[c] for c in running), Decimal(0)),
     )
 
 
 PAYMENT_COLUMNS = (
     "voucher_number, amount, check_date, department_name, contract_number, vendor_name"
 )
-CONTRACT_COLUMNS = (
-    "purchase_order_contract_number, revision_number, award_amount, approval_date, end_date"
-)
+CONTRACT_COLUMNS = "purchase_order_contract_number, revision_number, award_amount, approval_date"
 
 
 def sample_chicago() -> Chicago:
@@ -261,12 +315,43 @@ def assert_the_chicago_metrics_are_worked_out(build: Build, expected: Chicago) -
     return row
 
 
+def assert_the_contract_metrics_agree_with_the_reconciliation(
+    build: Build, expected: Chicago
+) -> dict[str, tuple[Decimal, Decimal]]:
+    """The contract metrics read the reconciliation's own figures for the contracts it holds to an
+    award above 0: their count, and over that population its positive differences are
+    `paid_over_award`; by break class, the metrics add up to their totals. Returns each class's
+    paid over award and remaining commitment."""
+    ((contracts, over),) = query(
+        build,
+        "select count(*), coalesce(sum(case when difference > 0 then difference else 0 end), 0)"
+        " from chicago_contract_reconciliation where award_held_to > 0",
+    )
+    assert contracts == expected.fixed_contracts
+    assert over == expected.paid_over_award
+    rows = mf_query(build, ["paid_over_award", "remaining_commitment"], ["contract__break_class"])
+    by_class = {
+        r["contract__break_class"]: (
+            Decimal(r["paid_over_award"] or 0),
+            Decimal(r["remaining_commitment"] or 0),
+        )
+        for r in rows
+    }
+    assert sum(o for o, _ in by_class.values()) == expected.paid_over_award
+    assert sum(u for _, u in by_class.values()) == expected.unpaid_award
+    # A number only payments carry and a blanket have no award to be paid over or to remain.
+    for kind in ("contract_not_found", "no_fixed_award", "negative_award"):
+        assert by_class.get(kind, (0, 0)) == (0, 0), kind
+    return by_class
+
+
 def test_the_chicago_metrics_over_the_samples(build: Build) -> None:
     expected = sample_chicago()
     # The samples hold repeats, contracts paid under their award and payments on no contract.
     assert expected.repeat_rows > 0
     assert expected.unpaid_award > 0
     assert_the_chicago_metrics_are_worked_out(build, expected)
+    assert_the_contract_metrics_agree_with_the_reconciliation(build, expected)
 
 
 def amounts(rows: list[dict[str, str]], key: str, metric: str) -> dict[str, Decimal | None]:
@@ -308,41 +393,72 @@ def test_constant_currency_spend_over_the_samples(build: Build) -> None:
     assert {e: len(b) for e, b in bases.items()} == {"chicago": 2, "uk-transport": 1}
 
 
-def test_the_runner_refuses_a_network_call_before_it_is_made() -> None:
-    probe = (
-        "import runpy, socket, sys;"
-        f"hook = runpy.run_path({str(RUNNER)!r})['refuse_the_network'];"
-        "sys.addaudithook(hook); socket.create_connection(('pypi.org', 443), timeout=1)"
-    )
+def test_a_process_on_the_mf_path_refuses_a_network_call_before_it_is_made(
+    build: Build,
+) -> None:
     result = subprocess.run(
-        [sys.executable, "-c", probe], capture_output=True, text=True, check=False
+        [sys.executable, "-c", "import socket; socket.create_connection(('pypi.org', 443), 1)"],
+        env=mf_env(build),
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert result.returncode == REFUSED, result.stderr
     assert "refused a network call: socket.getaddrinfo" in result.stderr
 
 
+def test_mf_without_the_runner_is_stopped_at_its_update_check(build: Build) -> None:
+    """The plain `mf` command, with the update check on, is ended at its request to PyPI, so a
+    test that bypassed the runner would fail rather than reach the network."""
+    result = subprocess.run(
+        [str(MF), "validate-configs"],
+        env=mf_env(build),
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=build.cwd,
+    )
+    assert result.returncode == REFUSED, result.stdout + result.stderr
+    assert "refused a network call: socket.getaddrinfo ('pypi.org'" in result.stderr
+
+
 # Each metric's value over the landed files, as `mf query` gives it.
 LANDED = {
-    "spend_against_award": "0.590429",
-    "remaining_commitment": "70158984044.16",
-    "paid_over_award": "5616015460.98",
-    "fixed_award": "157586711909.40",
-    "paid_against_fixed_award": "93043743326.22",
-    "duplicate_payment_rate": "0.020740",
-    "duplicate_payment_amount_rate": "0.033467",
+    "spend_against_award": "0.570307",
+    "remaining_commitment": "71379226730.41",
+    "paid_over_award": "3454795094.89",
+    "fixed_award": "158076545794.10",
+    "paid_against_fixed_award": "90152114158.58",
+    "duplicate_payment_rate": "0.029106",
+    "duplicate_payment_amount_rate": "0.058861",
     "chicago_payment_rows": "475609",
-    "chicago_repeat_rows": "9864",
+    "chicago_repeat_rows": "13843",
     "chicago_payment_amount": "119497897723.29",
-    "chicago_repeat_amount": "3999229448.98",
+    "chicago_repeat_amount": "7033758721.22",
+}
+# Contracts held to an award above 0.
+LANDED_FIXED_CONTRACTS = 86_218
+# Paid over award and remaining commitment by the reconciliation's break class, where either is
+# above 0. The reconciliation's own `unexplained` dollars over the award are $1,800,918.54 more:
+# 24 contracts whose revisions net to 0 and whose award in force never rose above 0, which hold no
+# fixed award here.
+LANDED_BY_CLASS = {
+    "paid_before_fixed_award": ("355512087.25", "0.00"),
+    "paid_in_full": ("53.43", "70.40"),
+    "paid_under_two_names": ("720778722.70", "0.00"),
+    "reduced_after_payment": ("2327908.21", "0.00"),
+    "unexplained": ("2376176323.30", "0.00"),
+    "unpaid": ("0.00", "19780804494.40"),
+    "unspent": ("0.00", "51598422165.61"),
 }
 # Constant-currency spend in euros at the rates of 29 December 2023, by basis and by entity
 # (Chicago, split by basis, gives none).
 LANDED_BY_BASIS = {
     "cash-outturn": "1157995830000.0",
-    "contract-payments": "9478683548.67",
+    "contract-payments": "9117744901.34",
     "direct-vouchers": "14642299522.77",
     "payments-over-25k": "51450165212.22",
-    "payments-year-rollup": "9633768642.41",
+    "payments-year-rollup": "9200083450.73",
 }
 LANDED_BY_ENTITY = {
     "chicago": None,
@@ -383,11 +499,17 @@ def test_the_metrics_over_the_landed_files(tmp_path: Path) -> None:
     print("landed metrics:", got)
     assert got == LANDED
 
-    (running,) = mf_query(build, ["remaining_commitment", "spend_against_award"], where=RUNNING)
-    assert Decimal(running["remaining_commitment"]) == expected.running_unpaid_award
-    assert Decimal(running["remaining_commitment"]) == Decimal("28443738969.50")
-    ratio = expected.running_paid / expected.running_fixed_award
-    assert abs(Decimal(running["spend_against_award"]) - ratio) < Decimal("1e-12")
+    assert expected.fixed_contracts == LANDED_FIXED_CONTRACTS
+    by_class = assert_the_contract_metrics_agree_with_the_reconciliation(build, expected)
+    classes = {c: (f"{o:.2f}", f"{u:.2f}") for c, (o, u) in by_class.items() if o or u}
+    print("paid over award and remaining commitment by break class:", classes)
+    assert classes == LANDED_BY_CLASS
+    ((held_to_zero, excess),) = query(
+        build,
+        "select count(*), sum(difference) from chicago_contract_reconciliation"
+        " where break_class = 'unexplained' and award_held_to <= 0",
+    )
+    assert (held_to_zero, f"{excess:.2f}") == (24, "1800918.54")
 
     assert_constant_currency_spend_is_worked_out(build)
     by_basis = mf_query(build, ["constant_currency_spend"], ["group_total__basis"])

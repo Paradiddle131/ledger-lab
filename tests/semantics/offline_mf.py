@@ -1,30 +1,18 @@
-"""Run the MetricFlow command line (`mf`) with every network call refused.
+"""Run the MetricFlow command line (`mf`) with its update check off and every network call refused.
 
-The command asks PyPI for a newer release of itself on every run (the `update_checker` package)
-and offers no way to turn that off, so this runner replaces the check with none, then refuses
-any connection or name lookup a run would make: it exits at once with `REFUSED`, so no library
-can catch the refusal and carry on. A socket to a local file (a Unix socket) is allowed.
+The command asks PyPI for a newer release of itself on every run (the `update_checker` package
+sends one request to pypi.org for the package's JSON) and offers no way to turn that off, so this
+runner replaces the check with none. It runs isolated (`python -I`), which skips `PYTHONPATH`, so
+it installs the refusal of `no_network/sitecustomize.py` itself before anything else is imported.
 
-    python tests/semantics/offline_mf.py <mf arguments>
+    python -I tests/semantics/offline_mf.py <mf arguments>
 """
 
-import os
-import socket
+import runpy
 import sys
+from pathlib import Path
 
-REFUSED = 97
-NETWORK_EVENTS = frozenset(
-    {"socket.connect", "socket.getaddrinfo", "socket.gethostbyname", "socket.sendto"}
-)
-
-
-def refuse_the_network(event: str, args: tuple[object, ...]) -> None:
-    if event not in NETWORK_EVENTS:
-        return
-    if event == "socket.connect" and getattr(args[0], "family", None) == socket.AF_UNIX:
-        return
-    os.write(2, f"offline_mf: refused a network call: {event} {args[1:]!r}\n".encode())
-    os._exit(REFUSED)
+NO_NETWORK = Path(__file__).with_name("no_network")
 
 
 def no_newer_release(*_: object, **__: object) -> None:
@@ -32,7 +20,7 @@ def no_newer_release(*_: object, **__: object) -> None:
 
 
 def main() -> None:
-    sys.addaudithook(refuse_the_network)
+    runpy.run_path(str(NO_NETWORK / "sitecustomize.py"))
     import update_checker
 
     setattr(update_checker.UpdateChecker, "check", no_newer_release)  # noqa: B010

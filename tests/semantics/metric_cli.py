@@ -2,8 +2,10 @@
 
 `mf` reads the semantic manifest dbt writes at parse time from `<project>/target/`, whatever
 `DBT_TARGET_PATH` says, so each build gets a project folder of its own beside it: the project and
-profile files and that build's manifest. Every run goes through `offline_mf.py`, which refuses any
-network call, and reads the build's database through the build's environment.
+profile files and that build's manifest. Every run goes through `offline_mf.py`, which turns the
+command's update check off and refuses any network call, and reads the build's database through
+the build's environment; a run that bypassed the runner would still refuse the network, through
+`no_network/sitecustomize.py`.
 """
 
 import csv
@@ -17,6 +19,8 @@ from typing import Any
 from tests.models.dbt_build import PROJECT, Build
 
 RUNNER = Path(__file__).with_name("offline_mf.py")
+NO_NETWORK = Path(__file__).with_name("no_network")
+MF = Path(sys.executable).with_name("mf")
 
 
 def manifest(build: Build) -> dict[str, Any]:
@@ -34,17 +38,31 @@ def project(build: Build) -> Path:
     return folder
 
 
-def mf(build: Build, *args: str) -> subprocess.CompletedProcess[str]:
+def mf_env(build: Build) -> dict[str, str]:
+    """The build's environment for a MetricFlow run: its project folder, `no_network` on the
+    import path, so any Python process started with it refuses the network even without the
+    runner, and a temporary folder of its own, so no cached update check from an earlier run can
+    hide a request."""
     folder = project(build)
-    env = build.env | {"DBT_PROJECT_DIR": str(folder), "DBT_PROFILES_DIR": str(folder)}
+    temporary = folder / "tmp"
+    temporary.mkdir(exist_ok=True)
+    return build.env | {
+        "DBT_PROJECT_DIR": str(folder),
+        "DBT_PROFILES_DIR": str(folder),
+        "PYTHONPATH": str(NO_NETWORK),
+        "TMPDIR": str(temporary),
+    }
+
+
+def mf(build: Build, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         # Isolated (-I): the runner's own folder is not on the import path, so nothing here can
-        # stand in for a module of MetricFlow's.
+        # stand in for a module of MetricFlow's; the runner installs the refusal itself.
         [sys.executable, "-I", str(RUNNER), *args],
+        env=mf_env(build),
         capture_output=True,
         text=True,
         check=False,
-        env=env,
         cwd=build.cwd,
     )
 
