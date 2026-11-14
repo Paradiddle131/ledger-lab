@@ -7,7 +7,9 @@ models:
       stays and is flagged `is_repeat`, so a sum that leaves repeats out counts each payment once,
       and a row the source gives only a year (Chicago's rolled-up payments) stays, with no day. Each entity's intermediate model brings its rows in this column shape; the
       City of Chicago's detail (rolled-up rows, department) stays in `int_chicago__payments`, and
-      every landed version of a UK month in `int_uk_transport__payment_versions`.
+      every landed version of a UK month in `int_uk_transport__payment_versions`. The last three columns hold the
+      published `vendor_name` split by the hash each value carries and the document numbers a
+      clear column may show.
     columns:
       - name: payment_key
         description: "{{ doc('payment_key') }}"
@@ -60,3 +62,39 @@ models:
         description: "{{ doc('payment_is_repeat') }}"
         data_tests:
           - not_null
+      - name: vendor_organisation_name
+        description: "{{ doc('payment_vendor_organisation_name') }}"
+      - name: vendor_person_key
+        description: "{{ doc('payment_vendor_person_key') }}"
+      - name: document_reference
+        description: "{{ doc('payment_document_reference') }}"
+
+unit_tests:
+  - name: a_reference_is_withheld_beside_a_hashed_payee_and_on_placeholders_and_uk_rows
+    description: >
+      Invented rows, labelled as invented: a Chicago voucher number a hashed payee's row also
+      carries is no reference on either row, a voucher only clear payees carry is one, the
+      placeholder `Multiple` is none, and no UK row has one, its clear number included, since the UK
+      landing hashes a hashed row's number and the two cannot be compared.
+    model: payments
+    given:
+      - input: ref('int_chicago__payments')
+        rows:
+          - {payment_key: shared-clear, entity_id: chicago, vendor_name: EXAMPLE A LLC, vendor_is_hashed: false, document_number: PV1}
+          - {payment_key: shared-hashed, entity_id: chicago, vendor_name: "person:invented", vendor_is_hashed: true, document_number: PV1}
+          - {payment_key: own, entity_id: chicago, vendor_name: EXAMPLE A LLC, vendor_is_hashed: false, document_number: PV2}
+          - {payment_key: placeholder, entity_id: chicago, vendor_name: EXAMPLE A LLC, vendor_is_hashed: false, document_number: Multiple}
+          - {payment_key: rolled-up, entity_id: chicago, vendor_name: EXAMPLE A LLC, vendor_is_hashed: false}
+      - input: ref('int_uk_transport__payments')
+        rows:
+          - {payment_key: uk-clear, entity_id: uk-transport, vendor_name: EXAMPLE B LIMITED, vendor_is_hashed: false, document_number: T1}
+          - {payment_key: uk-hashed, entity_id: uk-transport, vendor_name: "person:invented", vendor_is_hashed: true, document_number: "id:invented"}
+    expect:
+      rows:
+        - {payment_key: shared-clear, vendor_organisation_name: EXAMPLE A LLC, vendor_person_key: null, document_reference: null}
+        - {payment_key: shared-hashed, vendor_organisation_name: null, vendor_person_key: "person:invented", document_reference: null}
+        - {payment_key: own, vendor_organisation_name: EXAMPLE A LLC, vendor_person_key: null, document_reference: PV2}
+        - {payment_key: placeholder, vendor_organisation_name: EXAMPLE A LLC, vendor_person_key: null, document_reference: null}
+        - {payment_key: rolled-up, vendor_organisation_name: EXAMPLE A LLC, vendor_person_key: null, document_reference: null}
+        - {payment_key: uk-clear, vendor_organisation_name: EXAMPLE B LIMITED, vendor_person_key: null, document_reference: null}
+        - {payment_key: uk-hashed, vendor_organisation_name: null, vendor_person_key: "person:invented", document_reference: null}

@@ -22,6 +22,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from access.review import Grant, conflicts
+from tests.access.test_columns import tagged_products
 from tests.platform.test_access_rules import (
     DATASET_ROLES,
     dataset_id,
@@ -90,11 +91,6 @@ def gaps(matrix: Doc, access: Doc, columns: Doc) -> list[str]:
     personas, rows = ids(access["personas"]), matrix["personas"]
     scope = {p["id"]: p["scope"] for p in access["data_products"]}
     entities, tags = ids(access["entities"]), ids(columns["tags"])
-    found += [
-        f"tagged products: {p} is not a data product"
-        for p in matrix["tagged_products"]
-        if p not in scope
-    ]
     found += [f"{p}: no row" for p in personas if p not in rows]
     found += [f"{p}: not a persona" for p in rows if p not in personas]
     for persona in [p for p in personas if p in rows]:
@@ -122,7 +118,8 @@ def contradictions(matrix: Doc, access: Doc, columns: Doc) -> list[str]:
     """Every cell the grants or the tag readers do not give, and every grant with no cell.
 
     A column cell is what the persona observes: denied exactly when it reads no rows of a product
-    that can carry a tagged column, and then its masked-reader role, if any, reaches no column.
+    with a tagged column in the column list, and then its masked-reader role, if any, reaches no
+    column.
     """
     granted: dict[Key, str] = {
         (g["persona"], g["product"], g.get("entity")): CELL[g["access"]] for g in access["grants"]
@@ -140,7 +137,7 @@ def contradictions(matrix: Doc, access: Doc, columns: Doc) -> list[str]:
             if cell is None:
                 continue
             place = f"{persona} {tag['id']}: the matrix says {cell}, but it reads"
-            reaches = bool(row_cells(row, matrix["tagged_products"]) & ROWS)
+            reaches = bool(row_cells(row, sorted(tagged_products(columns))) & ROWS)
             role = next((kind for kind in KINDS if persona in tag[kind]), None)
             if reaches and cell == "denied":
                 found.append(f"{place} a tagged product")
@@ -347,9 +344,11 @@ tags:
   - id: account
     clear: [payables-clerk, auditor]
     masked: [group-controller, approver, metric-owner, agent-operator]
+products:
+  payments: {columns: {payments.payee: account}}
+  ledger: {columns: {ledger.payee: account}}
 """
 FIXTURE_MATRIX = """
-tagged_products: [payments, ledger]
 personas:
   payables-clerk:
     products:
@@ -585,8 +584,8 @@ CONTRADICTIONS: dict[str, tuple[Mutation, list[str]]] = {
         lambda m, a, c: move_reader(c, "proposer", "masked"),
         ["proposer account: the matrix needs no role, the readers give masked"],
     ),
-    "a product dropped from the tagged products": (
-        lambda m, a, c: m.update(tagged_products=["ledger"]),
+    "a product whose tagged columns are dropped": (
+        lambda m, a, c: c["products"].pop("payments"),
         [
             f"{p} account: the matrix says {cell}, but it reads no tagged product"
             for p, cell in (
@@ -702,7 +701,6 @@ def test_a_catalogue_entry_without_cells_or_a_cell_outside_the_catalogues_is_rep
         matrix["personas"]["nobody"] = copy.deepcopy(matrix["personas"]["proposer"])
         reported = ["nobody: not a persona"]
     else:
-        matrix["tagged_products"].append("forecasts")
         row = matrix["personas"]["auditor"]
         row["products"]["totals"] = {"east": "clear"}
         row["products"]["payments"] = "clear"
@@ -710,7 +708,6 @@ def test_a_catalogue_entry_without_cells_or_a_cell_outside_the_catalogues_is_rep
         row["products"]["ledger"]["north"] = "denied"
         row["columns"]["invented-tag"] = "denied"
         reported = [
-            "tagged products: forecasts is not a data product",
             "auditor forecasts: not a data product",
             "auditor payments: an entity-scoped product takes one per entity",
             "auditor ledger north: not an entity",
@@ -749,9 +746,10 @@ def test_the_schema_refuses_a_cell_outside_its_kind() -> None:
         json.loads((MATRIX.parent / "visibility.schema.json").read_text())
     )
     row = {"products": {"payments": {"chicago": "clear"}}, "columns": {"individual-id": "masked"}}
-    matrix = {"tagged_products": ["payments"], "personas": {"auditor": row}}
+    matrix = {"personas": {"auditor": row}}
     assert validator.is_valid(matrix)
-    assert not validator.is_valid({"personas": matrix["personas"]})
+    assert not validator.is_valid({})
+    assert not validator.is_valid({**matrix, "tagged_products": ["payments"]})
     for bad in (
         {"products": {"payments": {"chicago": "masked"}}, "columns": row["columns"]},
         {"products": {"group-totals": "masked"}, "columns": row["columns"]},

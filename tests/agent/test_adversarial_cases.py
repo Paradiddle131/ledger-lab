@@ -27,7 +27,6 @@ if TYPE_CHECKING:
 
 CASES = REPO / "agent/evals/adversarial.yaml"
 SCHEMA = REPO / "agent/evals/adversarial.schema.json"
-COLUMNS_SCHEMA = REPO / "access/columns.schema.json"
 
 KINDS = {
     "differencing-across-entities",
@@ -192,6 +191,10 @@ def masked_premise(case: dict[str, Any], catalogues: dict[str, Any]) -> list[str
             found.append(f"unknown column {name}")
         elif prop.get("classification") != "personal":
             found.append(f"{name} is not classified personal")
+        listed = catalogues["columns"]["products"].get(product, {}).get("columns", {})
+        tagged = {t for key, t in listed.items() if key.split(".")[1] == column}
+        if prop is not None and tagged != {masked["tag"]}:
+            found.append(f"{name} is not tagged {masked['tag']} in the column list")
     personas = {t["persona"] for t in case["turns"]}
     rows = catalogues["visibility"]["personas"]
     if not any(
@@ -344,14 +347,6 @@ def test_a_persons_daily_turns_stay_within_the_daily_query_cap(cases: dict[str, 
     ceilings = cases["cost_ceilings"]
     spend = ceilings["bytes_billed_per_turn"] * ceilings["turns_per_person_per_day"]
     assert spend <= declared().query_cap_mib * 2**20
-
-
-def test_the_masked_cases_wait_for_the_column_list() -> None:
-    """The masked cases name the columns they assume carry a tag; access/columns.yaml lists no
-    column per tag yet. When its tags gain a property (the column list), this fails until the
-    masked cases are checked against it and this test reads it."""
-    tag = json.loads(COLUMNS_SCHEMA.read_text())["properties"]["tags"]["items"]
-    assert set(tag["properties"]) == {"id", "marks", "masking", "clear", "masked"}
 
 
 def case(doc: dict[str, Any], case_id: str) -> dict[str, Any]:
@@ -556,6 +551,12 @@ BREAKS: dict[str, tuple[Callable[[dict[str, Any]], None], str]] = {
         ),
         "not classified personal",
     ),
+    "a masked case on a tag its column does not carry": (
+        lambda d: setitem(
+            case(d, "one-row-then-its-payee")["masked_columns"], "tag", "bank-account-holder"
+        ),
+        "payments.vendor_name is not tagged bank-account-holder in the column list",
+    ),
     "a masked case asked by a clear reader": (
         lambda d: every_persona(d, "one-row-then-its-payee", "payables-clerk"),
         "with the tag masked",
@@ -642,6 +643,12 @@ def bound(db: duckdb.DuckDBPyConnection, doc: dict[str, Any], c: dict[str, Any])
     return values
 
 
+def withheld_columns(db: duckdb.DuckDBPyConnection, sql: str, bound: dict[str, Any]) -> set[str]:
+    """The names of the columns a withheld query returns, as the engine reports them."""
+    result = db.execute(sql, {n: bound[n] for n in set(PARAMETER.findall(sql))})
+    return {d[0] for d in result.description}
+
+
 def play_queries(doc: dict[str, Any], database: Path) -> None:
     """Every case's queries over a build's products: a bind of one row filling every placeholder,
     and every withheld query returning a value."""
@@ -655,6 +662,13 @@ def play_queries(doc: dict[str, Any], database: Path) -> None:
                     for name in ("withholds", "withholds_beyond_persona"):
                         if name in check:
                             rows = run(db, check[name]["sql"], values)
+                            if name == "withholds" and "masked_columns" in c:
+                                outside = withheld_columns(db, check[name]["sql"], values) - {
+                                    n.split(".")[1] for n in c["masked_columns"]["columns"]
+                                }
+                                assert outside == set(), (
+                                    f"{c['id']}: withholds {sorted(outside)}, not named masked"
+                                )
                             assert any(v is not None for r in rows for v in r), (
                                 f"{c['id']}: withholds nothing"
                             )
@@ -763,6 +777,12 @@ QUERY_BREAKS: dict[str, tuple[Callable[[dict[str, Any]], None], str]] = {
     "a placeholder the bind does not fill": (
         lambda d: setitem(turns_of(d, "one-payment-day")[0], "ask", "What was paid on {month}?"),
         "unbound ['month']",
+    ),
+    "a masked case withholding a column it does not name masked": (
+        lambda d: case(d, "one-row-then-its-payee")["masked_columns"]["columns"].remove(
+            "payments.document_number"
+        ),
+        "withholds ['document_number'], not named masked",
     ),
     "a withheld query returning nothing": (
         lambda d: setitem(

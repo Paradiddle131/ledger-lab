@@ -21,7 +21,10 @@ import pytest
 import yaml
 from datacontract.data_contract import DataContract
 
+from ingest.entities import Register
 from ingest.fetch import landing_path
+from ingest.individuals import identifier_hasher, is_organisation, person_hasher
+from ingest.uk_transport.spend import BODIES
 from models.contracts import engine, gate
 from tests.models.dbt_build import PROJECT, Build, built, query
 
@@ -30,9 +33,9 @@ MART_YAML = PROJECT / "models" / "marts" / "payments" / "_payments__models.yml"
 Contract = dict[str, Any]
 # The dbt side of the mart: the manifest, the model's YAML and the built columns with their types.
 DbtSide = tuple[dict[str, Any], dict[str, Any], list[tuple[str, str]]]
-# Presence and type of all 14 columns, 8 required, 1 unique, 2 accepted-values and 2 bound checks,
-# and the 4 quality rules.
-CHECKS = 2 * 14 + 8 + 1 + 2 + 2 + 4
+# Presence and type of all 17 columns, 8 required, 1 unique, 2 accepted-values and 2 bound checks,
+# and the 7 quality rules.
+CHECKS = 2 * 17 + 8 + 1 + 2 + 2 + 7
 
 
 def committed() -> Contract:
@@ -131,12 +134,22 @@ BREAKS = {
     "a hashed name flagged clear": (
         "update payments set vendor_is_hashed = false where payment_key ="
         " (select min(payment_key) from payments where vendor_is_hashed)",
-        {"hashed-exactly-when-the-name-is-a-hash"},
+        # The split columns follow the flag, so a wrong flag breaks them too.
+        {
+            "hashed-exactly-when-the-name-is-a-hash",
+            "payee-columns-split-the-published-name",
+            "document-reference-is-a-chicago-voucher-no-hashed-payee-shares",
+        },
     ),
     "a clear name flagged hashed": (
         "update payments set vendor_is_hashed = true where payment_key ="
         " (select min(payment_key) from payments where not vendor_is_hashed)",
-        {"hashed-exactly-when-the-name-is-a-hash"},
+        # The split columns follow the flag, so a wrong flag breaks them too.
+        {
+            "hashed-exactly-when-the-name-is-a-hash",
+            "payee-columns-split-the-published-name",
+            "document-reference-is-a-chicago-voucher-no-hashed-payee-shares",
+        },
     ),
     "a UK payment lost": (
         "delete from payments where payment_key ="
@@ -156,7 +169,37 @@ BREAKS = {
             "payments__currency__field_enum",
             "currency-is-the-entitys-own",
             "chicago-row-count-equals-its-model",
+            # A reference is shown only on Chicago rows: a row leaving Chicago keeps one wrongly.
+            "document-reference-is-a-chicago-voucher-no-hashed-payee-shares",
         },
+    ),
+    "a clear name copied into the person key": (
+        "update payments set vendor_person_key = vendor_name where payment_key ="
+        " (select min(payment_key) from payments where not vendor_is_hashed)",
+        {"one-of-organisation-name-and-person-key", "payee-columns-split-the-published-name"},
+    ),
+    "a person key that is not the published hash": (
+        "update payments set vendor_person_key = 'person:' || repeat('0', 64) where payment_key ="
+        " (select min(payment_key) from payments where vendor_is_hashed)",
+        {"payee-columns-split-the-published-name"},
+    ),
+    "a hashed payee's voucher number in the clear reference": (
+        "update payments set document_reference = document_number where payment_key ="
+        " (select min(payment_key) from payments"
+        " where vendor_is_hashed and entity_id = 'chicago' and document_number is not null)",
+        {"document-reference-is-a-chicago-voucher-no-hashed-payee-shares"},
+    ),
+    "a UK transaction number in the clear reference": (
+        "update payments set document_reference = document_number where payment_key ="
+        " (select min(payment_key) from payments where entity_id = 'uk-transport'"
+        " and not vendor_is_hashed and document_number not like 'id:%')",
+        {"document-reference-is-a-chicago-voucher-no-hashed-payee-shares"},
+    ),
+    "a placeholder in the clear reference": (
+        "update payments set document_reference = document_number where payment_key ="
+        " (select min(payment_key) from payments where document_number = 'Multiple'"
+        " and not vendor_is_hashed)",
+        {"document-reference-is-a-chicago-voucher-no-hashed-payee-shares"},
     ),
     "a missing amount": (
         "update payments set amount = null"
@@ -634,3 +677,133 @@ def test_the_real_landing_keeps_the_contract(tmp_path: Path) -> None:
     )
     print("UK rows whose document number is a keyed hash:", keyed[0][0])
     assert keyed == [(12_009,)]
+    split_payees_and_documents(build, landing)
+
+
+# The landed files' own counts: hashed and clear payees per entity, Chicago's voucher numbers a
+# clear column may show (a clear payee's, no placeholder, carried by no hashed payee's row), and
+# the hashed rows whose amount and served date no other payee shares, which the publisher's file
+# then names the payee by.
+LANDED_SPLIT = """
+with rows as (
+    select 'chicago' as entity_id, vendor_name as payee, voucher_number as number,
+        amount, check_date as day
+    from read_parquet($chicago)
+    union all
+    select 'uk-transport', supplier, transaction_number, amount, date
+    from read_parquet($uk)
+),
+pairs as (
+    select entity_id, amount, day, count(distinct payee) as payees
+    from rows group by all
+)
+select rows.entity_id,
+    count(*) filter (where payee like 'person:%'),
+    count(*) filter (where payee not like 'person:%'),
+    count(*) filter (where rows.entity_id = 'chicago' and payee not like 'person:%'
+        and number <> 'Multiple' and number not in (
+            select number from rows as h
+            where h.entity_id = 'chicago' and h.payee like 'person:%' and number is not null)),
+    count(*) filter (where payee like 'person:%' and payees = 1)
+from rows
+join pairs on rows.entity_id = pairs.entity_id
+    and rows.amount is not distinct from pairs.amount and rows.day is not distinct from pairs.day
+group by rows.entity_id
+"""
+# A UK placeholder, `#` where the department gives no number, which the landing hashes too.
+UK_PLACEHOLDER = "#"
+
+
+def uk_shared_transactions(landing: Path) -> dict[str, int]:
+    """The UK transactions a clear row shows in clear and a hashed row carries as a keyed hash,
+    found by the landing's own identifier hasher, and the hashed placeholder's rows; counts only."""
+    as_id = identifier_hasher()
+    rows = (
+        duckdb.connect()
+        .execute(
+            "select supplier, transaction_number from read_parquet($uk)",
+            {"uk": str(landing / "uk-transport-spend-2025")},
+        )
+        .fetchall()
+    )
+    keyed = [(s, t) for s, t in rows if t and t.startswith("id:")]
+    shown = [t for _, t in rows if t and not t.startswith("id:") and t != UK_PLACEHOLDER]
+    hits = {as_id(t) for t in set(shown)} & {t for _, t in keyed}
+    placeholder = as_id(UK_PLACEHOLDER)
+    return {
+        "shared numbers": len(hits),
+        "clear rows showing one": sum(1 for t in shown if as_id(t) in hits),
+        "hashed rows carrying one": sum(1 for _, t in keyed if t in hits),
+        "hashed placeholder rows": sum(1 for _, t in keyed if t == placeholder),
+        "payees on the hashed placeholder": len({s for s, t in keyed if t == placeholder}),
+    }
+
+
+def split_payees_and_documents(build: Build, landing: Path) -> None:
+    """The split columns on the real landing: as many person keys, organisation names and clear
+    references per entity as the landed files' own counts give; every clear name an organisation
+    by the landing's own classifier and register; no clear name whose person hash is a key; no
+    clear reference a hashed payee's row carries; and no UK reference, since the UK landing's
+    keyed numbers hide which clear numbers a hashed payee's line shares."""
+    files = {
+        "chicago": str(landing / "chicago-payments"),
+        "uk": str(landing / "uk-transport-spend-2025"),
+    }
+    served = {e: rest for e, *rest in duckdb.connect().execute(LANDED_SPLIT, files).fetchall()}
+    print("landed hashed, clear, clear-reference and amount-and-date-pinned rows:", served)
+    assert served == {
+        "chicago": [350_698, 124_911, 84_783, 247_360],
+        "uk-transport": [12_008, 19_095, 0, 11_845],
+    }
+    shared = uk_shared_transactions(landing)
+    print("UK transactions shown in clear beside a hashed line:", shared)
+    assert shared == {
+        "shared numbers": 89,
+        "clear rows showing one": 135,
+        "hashed rows carrying one": 114,
+        "hashed placeholder rows": 729,
+        "payees on the hashed placeholder": 91,
+    }
+    split = {
+        e: rest
+        for e, *rest in query(
+            build,
+            "select entity_id, count(vendor_person_key), count(vendor_organisation_name),"
+            " count(document_reference),"
+            " count(*) filter (where (vendor_person_key is null)"
+            " = (vendor_organisation_name is null))"
+            " from payments group by 1",
+        )
+    }
+    print("person keys, organisation names, references, rows with not one of name and key:", split)
+    assert split == {e: [*served[e][:3], 0] for e in served}
+    names: dict[str, set[str]] = {e: set() for e in split}
+    keys: dict[str, set[str]] = {e: set() for e in split}
+    for e, name, key in query(
+        build,
+        "select distinct entity_id, vendor_organisation_name, vendor_person_key from payments",
+    ):
+        (names if key is None else keys)[e].add(name if key is None else key)
+    register = Register.landed()
+    known = {
+        "chicago": register.vouched(names["chicago"]),
+        "uk-transport": {*BODIES, *register.vouched(names["uk-transport"])},
+    }
+    # Counts only, so a failure prints no name: the UK department's own placeholder names no one,
+    # and every other clear name is an organisation.
+    not_organisations = {
+        e: {n for n in names[e] if not is_organisation(n, known[e])} for e in names
+    }
+    assert "REDACTED" in not_organisations["uk-transport"]
+    not_organisations["uk-transport"].discard("REDACTED")
+    print("clear names, person keys by entity:", {e: (len(names[e]), len(keys[e])) for e in names})
+    assert {e: len(n) for e, n in not_organisations.items()} == {"chicago": 0, "uk-transport": 0}
+    as_person = person_hasher()
+    unhashed = {e: len({as_person(n) for n in names[e]} & keys[e]) for e in names}
+    assert unhashed == {"chicago": 0, "uk-transport": 0}
+    assert query(
+        build,
+        "select count(*) from payments as r where r.document_reference is not null and exists"
+        " (select 1 from payments as h where h.vendor_is_hashed and h.entity_id = r.entity_id"
+        " and h.document_number = r.document_reference)",
+    ) == [(0,)]
