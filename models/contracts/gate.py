@@ -10,7 +10,10 @@ with one in the working tree, wherever that one now sits, and a change is breaki
 - a quality rule `origin/main` holds is gone, under its id at the same place, or is changed in
   anything but its wording (`description`, `name`), since the CLI cannot grade a changed SQL query;
   a rule is tightened by adding a new one beside it;
-- a column `origin/main` classifies `personal` is classified otherwise, which lowers its handling;
+- a column `origin/main` classifies `personal` is classified otherwise, which lowers its handling,
+  or is gone beside an added column not classified `personal`;
+- a schema `origin/main` holds is gone or renamed, or its table is under another schema;
+- a column holds nested properties, which the gate does not read;
 - a contract `origin/main` holds is gone from the working tree, or no longer has its id;
 - a contract cannot be read.
 
@@ -26,15 +29,26 @@ finds equal the breaks listed: it fails on a break not listed, a listed break th
 an entry without a reason, or a list under a major version that did not go up, where the list is
 not read. The list is compared with `origin/main`'s contract, so once a new major version is on
 `origin/main` its list excuses nothing: the next break needs the next major version and a list of
-its own breaks. A lowered `personal` classification, a contract gone or with a new id, a contract
-unreadable and two contracts with one id stay breaking whatever the version: the classification
-decides how the column is masked, not what a consumer reads; and the others leave no contract to
-hold a version and a list, or two.
+its own breaks. These stay breaking whatever the version, and no list can excuse them:
+
+- a column `origin/main` classifies `personal` classified otherwise: the classification decides
+  how the column is masked, not what a consumer reads;
+- a column `origin/main` classifies `personal` gone in a change that adds any column not
+  classified `personal`: a rename cannot be told from a removal and an addition, so each added
+  column is the removed one's possible successor (the removal alone stays declarable);
+- a schema gone or renamed, or a schema's `physicalName` now under another schema: a table gone
+  is a new contract, and the CLI's one `Removed schema` line would excuse every break under it;
+- a column holding nested `properties` or `items`: the gate reads one level of columns, so a field
+  a level down could hide its classification;
+- a contract gone or with a new id, a contract unreadable (to YAML or to the CLI), and two
+  contracts with one id: none leaves one contract to hold a version and a list.
 
 The comparison reads `origin/main` from the local clone and runs the CLI in this environment, so
 it needs no network. A clone that does not hold `origin/main` cannot be compared, so the gate fails
-and says how to fetch it, rather than passing a change it never saw. While `origin/main` holds no
-contract there is nothing published to break, so the first contracts pass, and the gate says so.
+and says how to fetch it, rather than passing a change it never saw; so does a clone whose
+`origin/main` tree or contract files git cannot read (a partial clone whose remote is gone).
+While `origin/main` holds no contract there is nothing published to break, so the first contracts
+pass, and the gate says so.
 """
 
 import re
@@ -80,8 +94,17 @@ def published(repo: Path, base: str = BASE) -> dict[str, str]:
             f"{base} is not in this clone, so the contracts cannot be compared with it:"
             f" run `git fetch origin main` and try again"
         )
-    paths = git(repo, "ls-tree", "-r", "--name-only", base).stdout.splitlines()
-    return {p: git(repo, "show", f"{base}:{p}").stdout for p in paths if p.endswith(SUFFIX)}
+    tree = git(repo, "ls-tree", "-r", "--name-only", base)
+    if tree.returncode != 0:
+        raise GateError(f"{base}'s tree cannot be read: {tree.stderr.strip()}")
+    texts: dict[str, str] = {}
+    for path in tree.stdout.splitlines():
+        if path.endswith(SUFFIX):
+            shown = git(repo, "show", f"{base}:{path}")
+            if shown.returncode != 0:
+                raise GateError(f"{base}'s {path} cannot be read: {shown.stderr.strip()}")
+            texts[path] = shown.stdout
+    return texts
 
 
 def working(repo: Path) -> dict[str, str]:
@@ -142,7 +165,10 @@ def breaks(before: Contract, after: Contract) -> tuple[list[str], list[str]]:
             DataContract(data_contract_str=yaml.safe_dump(after), inline_references=False)
         )
     except Exception as e:  # the CLI raises its own and pydantic's errors on a bad contract
-        return [], [f"contract {after['id']} is unreadable: {str(e).splitlines()[0]}"]
+        return [], [
+            f"contract {after['id']} is unreadable, which no version can declare:"
+            f" {str(e).splitlines()[0]}"
+        ]
     found += [
         f"{entry.path}: {entry.message}"
         for entry in graded.entries
@@ -156,11 +182,47 @@ def breaks(before: Contract, after: Contract) -> tuple[list[str], list[str]]:
             k: v for k, v in new[key].items() if k not in WORDING
         }:
             found.append(f"quality rule {key} is changed beyond its wording")
-    refused = [
-        f"{col} is no longer classified personal, which no version can declare"
+    return found, refused(before, after)
+
+
+def refused(before: Contract, after: Contract) -> list[str]:
+    """What in `after` breaks a consumer of `before` whatever its version, each as one line."""
+    never = "which no version can declare"
+    found = [
+        f"{col} nests properties, which this gate does not read, {never}" for col in nested(after)
+    ]
+    old = {s["name"]: s.get("physicalName") or s["name"] for s in before.get("schema") or []}
+    new = {s["name"]: s.get("physicalName") or s["name"] for s in after.get("schema") or []}
+    found += [f"schema {name} is gone or renamed, {never}" for name in old if name not in new]
+    found += [
+        f"table {table} of schema {name} is now under schema {other}, {never}"
+        for name, table in old.items()
+        for other, moved in new.items()
+        if moved == table and other != name
+    ]
+    found += [
+        f"{col} is no longer classified personal, {never}"
         for col in sorted(personal(before) & columns(after) - personal(after))
     ]
-    return found, refused
+    gone = sorted(personal(before) - columns(after))
+    unclassified = sorted(columns(after) - columns(before) - personal(after))
+    found += [
+        f"{col}, classified personal, is gone while {added} is added without that classification,"
+        f" {never}: a rename cannot be told from a removal and an addition"
+        for col in gone
+        for added in unclassified
+    ]
+    return found
+
+
+def nested(contract: Contract) -> list[str]:
+    """Every column that holds properties of its own (an object's or an array's items)."""
+    return [
+        f"{schema['name']}.{p['name']}"
+        for schema in contract.get("schema") or []
+        for p in schema.get("properties") or []
+        if "properties" in p or "items" in p
+    ]
 
 
 def major(contract: Contract) -> int | None:
@@ -200,7 +262,9 @@ def declaration(contract: Contract) -> tuple[list[str], list[str]]:
     return listed, wrong
 
 
-def undeclared(before: Contract, after: Contract, found: list[str]) -> list[str]:
+def undeclared(
+    before: Contract, after: Contract, found: list[str], refused: list[str]
+) -> list[str]:
     """The breaks `found` that `after` does not declare under a new major version, and every
     listed break that did not happen or is wrongly listed."""
     old, new = major(before), major(after)
@@ -212,7 +276,9 @@ def undeclared(before: Contract, after: Contract, found: list[str]) -> list[str]
     listed, wrong = declaration(after)
     wrong += [f"{line} (not listed in {DECLARED})" for line in found if line not in listed]
     wrong += [
-        f"{DECLARED} lists a break that did not happen: {x}" for x in listed if x not in found
+        f"{DECLARED} lists a break that did not happen: {x}"
+        for x in listed
+        if x not in found and x not in refused
     ]
     return wrong
 
@@ -240,8 +306,8 @@ def compare(before: dict[str, str], after: dict[str, str], base: str = BASE) -> 
             found.append(f"contract {contract['id']} ({path} on {base}) is gone or has a new id")
             continue
         now = current[contract["id"]]
-        declarable, refused = breaks(contract, now)
-        lines = refused + undeclared(contract, now, declarable)
+        declarable, never = breaks(contract, now)
+        lines = never + undeclared(contract, now, declarable, never)
         found += [f"{contract['id']}: {line}" for line in lines]
     if not found:
         return True, f"contract: no change breaks a consumer of {base}'s contracts"

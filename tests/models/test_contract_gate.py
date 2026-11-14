@@ -404,7 +404,7 @@ def test_a_schema_rename_hides_no_break_and_in_place_each_needs_its_line(
     published_repo: Path,
 ) -> None:
     retyped = found(bigquery_types)
-    assert len(retyped) == 17
+    assert len(retyped) == 16
     ok, report = gate_on(
         published_repo, both(bigquery_types, declaring("2.0.0", listed(retyped[1:])))
     )
@@ -480,6 +480,7 @@ def partial_clone(tmp_path: Path, missing: str) -> Path:
     subprocess.run(
         [*GIT, "remote", "set-url", "origin", (tmp_path / "gone").as_uri()], cwd=clone, check=True
     )
+    subprocess.run([*GIT, "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=clone, check=True)
     return clone
 
 
