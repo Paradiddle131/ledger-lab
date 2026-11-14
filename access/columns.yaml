@@ -47,3 +47,28 @@ tags:
       - approver
       - metric-owner
       - agent-operator
+
+# The column list: per data product, the tag on each column its data contract (the `*.odcs.yaml`
+# whose id is the product's) classifies `personal`, keyed `<table>.<column>`. The contract's
+# classification is the one place that says a column is personal, and a test holds that the tagged
+# columns are exactly the contract's personal ones. A product with no contract yet lists only the
+# tags it awaits, and a tag that marks no column must be awaited. The models attach each tag to its
+# column when they create the table; `platform/gcp` reads only the tags above.
+#
+# Both payments columns mix clear and hashed values: `vendor_name` is an organisation's name in
+# clear or `person:` and a keyed hash; `document_number` is Chicago's voucher number in clear (on a
+# hashed payee's rows too, where the City's public search finds the payee by it) or the UK
+# department's transaction number, a keyed hash on hashed rows. A tag masks the whole column, so
+# `individual-id` hashes every row for its masked readers: they never read a person's keyed hash or
+# the voucher number beside it, and still join, group and count by the masked value, but read an
+# organisation's name or voucher number only as its hash too. Masking only the hashed rows needs a
+# rule that is none of the three built-in ones.
+products:
+  payments:
+    columns:
+      payments.vendor_name: individual-id
+      payments.document_number: individual-id
+  # No public file carries bank details: the bank tags await the vendor bank accounts the ERP
+  # holds, which the ledger is posted from, and the ledger has no contract yet.
+  ledger:
+    awaiting: [bank-account-number, bank-account-holder]
