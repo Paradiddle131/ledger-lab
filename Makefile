@@ -4,7 +4,7 @@
 LOADOUT ?= $(or $(shell sed -n 's/^The collection .* is cloned at `\([^`]*\)`.*/\1/p' $(HOME)/.claude/CLAUDE.md 2>/dev/null),../loadout)
 GUARDS := $(LOADOUT)/cloud/githooks
 
-.PHONY: check sync lint typecheck test ids portable scan contract contract-test stack-up stack-down stack-test cost-check fresh-clone tofu fences-validate
+.PHONY: check sync lint typecheck test ids portable scan contract contract-test stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
 
 check: lint typecheck test ids portable scan contract
 	@echo "make check: all passed"
@@ -79,6 +79,20 @@ stack-test: sync stack-up
 # call, while LEDGER_LAB_GCP_PROJECT is unset.
 cost-check:
 	@uv run --no-sync python platform/cost_check.py
+
+# The reconciliation of Chicago's payments to their contracts' awards over the landed files: every
+# class's count and dollars, and each break class's digest, must equal the reviewed baseline. Needs
+# the Chicago set landed under LEDGER_LAB_LANDING; kept out of `make check`, which proves the
+# mechanism on the committed cut.
+reconcile-landed: sync
+	uv run pytest -m landed tests/models/test_contract_reconciliation.py
+
+# Accept today's reconciliation over the landed files: writes its per-contract list of breaks beside
+# the landing (<landing>.reconciliation.csv, outside the repository), which a failing
+# `reconcile-landed` then names contracts against, and prints the table and digests to pin in a
+# reviewed change.
+reconcile-accept: sync
+	uv run python -m tests.models.reconciliation_state
 
 # Clone the committed HEAD and prove it holds no secret, identifier or data (also a test in `test`).
 fresh-clone: sync
