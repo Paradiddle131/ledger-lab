@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "The visibility matrix: what each persona must see and do",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["personas"],
+  "$defs": {
+    "slug": {"type": "string", "pattern": "^[a-z][a-z0-9-]*[a-z0-9]$"},
+    "product_cell": {"enum": ["clear", "aggregate", "edit", "draft", "post", "denied"]},
+    "column_cell": {"enum": ["clear", "masked", "denied"]},
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["products", "columns"],
+      "properties": {
+        "products": {
+          "description": "One cell per group-scoped product, one per entity of an entity-scoped one.",
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"$ref": "#/$defs/slug"},
+          "additionalProperties": {
+            "oneOf": [
+              {"$ref": "#/$defs/product_cell"},
+              {
+                "type": "object",
+                "minProperties": 1,
+                "propertyNames": {"$ref": "#/$defs/slug"},
+                "additionalProperties": {"$ref": "#/$defs/product_cell"}
+              }
+            ]
+          }
+        },
+        "columns": {
+          "description": "One cell per policy tag in access/columns.yaml.",
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"$ref": "#/$defs/slug"},
+          "additionalProperties": {"$ref": "#/$defs/column_cell"}
+        }
+      }
+    }
+  },
+  "properties": {
+    "personas": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"$ref": "#/$defs/slug"},
+      "additionalProperties": {"$ref": "#/$defs/row"}
+    }
+  }
+}
