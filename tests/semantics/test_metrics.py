@@ -467,7 +467,11 @@ def assert_constant_currency_spend_is_worked_out(build: Build) -> dict[str, set[
     assert {
         (r["group_total__basis"], r["metric_time__year"]): Decimal(r["constant_currency_spend"])
         for r in rows
+        if r["metric_time__year"]
     } == by_year
+    # A whole year's row has no period start, so the periods' inputs leave a group with no time
+    # for a basis of whole years: it carries no figure.
+    assert all(not r["constant_currency_spend"] for r in rows if not r["metric_time__year"])
     rows = mf_query(build, ["constant_currency_spend"], ["group_total__entity_id"])
     assert amounts(rows, "group_total__entity_id", "constant_currency_spend") == {
         e: (total if len(bases[e]) == 1 else None) for e, total in by_entity.items()

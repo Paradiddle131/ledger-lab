@@ -78,7 +78,8 @@ metrics:
       `group_total__basis` (or by an entity with a single basis); a query that would add unlike
       bases, such as the Dutch cash outturn and Chicago's payments, returns no figure. A whole
       fiscal year's figure (the Dutch outturn, Chicago's yearly roll-ups) has no month: by
-      `metric_time` the metric groups by year or coarser, and a query by month or day is refused;
+      `metric_time` the metric groups by year or coarser (a basis of whole years also shows a
+      row with no time and no figure), and a query by month or day is refused;
       by `group_total__period_start` a whole year's row has no month and stands apart. For months,
       group by `group_total__fiscal_year` and `group_total__fiscal_period` (no period on a whole
       year's row); `group_total__span` tells the two kinds of row apart.
