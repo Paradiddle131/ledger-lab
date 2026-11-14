@@ -150,8 +150,8 @@ uv run python -m access.review <path>       # or writes it to <path>
 
 The report is derived, so it is never committed; `tests/access/test_review.py` generates it and checks its content.
 
-On the local engine, `access/compile.py` builds one DuckDB file per persona from a dbt build: only its entities' rows, each tagged column clear, masked or left out as `access/columns.yaml` says, and for an aggregate grant only the aggregate tables of `access/aggregates.yaml`, whose groups hold at least the minimum group of distinct payees, and whose figures across all entities hold two entities whose rows the persona does not read.
-`tests/access/test_visibility.py` acts out every cell of `access/visibility.yaml` as each persona against what the engine returns.
+On the local engine, `access/compile.py` builds one DuckDB file per persona from a dbt build: only its entities' rows, each tagged column clear, masked or left out as `access/columns.yaml` says, and for an aggregate grant only the aggregate tables of `access/aggregates.yaml`, whose groups hold at least the minimum group of distinct payees, and whose figures across all entities, in euros at constant rates only, hold two entities whose share the persona cannot work out.
+`tests/access/test_visibility.py` acts out every cell of `access/visibility.yaml` as each persona against what the engine returns: on the landed build 37 of the 120 cells, and the other 83 only on labelled invented tables in a copy of the build, since their products have no table yet (the ledger, metric definitions and audit log), their columns do not exist yet (the bank tags), their entity has no payment rows (the Dutch government) or their aggregate keeps no group for the persona (the group totals of Chicago's accountant and the approver).
 The `as_persona` test fixture connects to it read-only, with no other file, extension or setting within reach, and deletes it when the test ends; the files hold derived data and are never committed.
 
 ## Licence
