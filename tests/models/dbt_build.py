@@ -61,7 +61,11 @@ def built(tmp_path: Path, source_rows: str, landing: Path | None = None) -> Buil
     result = dbt(env, tmp_path, "build", "--vars", json.dumps({"source_rows": source_rows}))
     assert result.returncode == 0, result.stdout + result.stderr
     run = json.loads((tmp_path / "target" / "run_results.json").read_text())
-    results = {r["unique_id"].split(".")[2]: r["status"] for r in run["results"]}
+    # A node's name is its id's third part; a unit test's is its fourth, after its model's.
+    results = {
+        r["unique_id"].split(".")[3 if r["unique_id"].startswith("unit_test.") else 2]: r["status"]
+        for r in run["results"]
+    }
     return Build(result.stdout, database, results, env, tmp_path)
 
 

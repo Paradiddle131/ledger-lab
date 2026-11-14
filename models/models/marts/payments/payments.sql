@@ -2,6 +2,7 @@
 -- model in one column shape. An entity joins by adding its model to `entities`.
 {%- set entities = [
     'int_chicago__payments',
+    'int_uk_transport__payments',
 ] %}
 {%- set columns = [
     'payment_key',

@@ -67,6 +67,8 @@ SEEDS = {
     "models/seeds/intermediate/vendors/vendor_legal_entities_sample.csv",
     "models/seeds/intermediate/vendors/vendor_payments_sample.csv",
     "models/seeds/intermediate/vendors/vendor_suppliers_sample.csv",
+    "models/seeds/staging/uk_transport/uk_transport_spend_files.csv",
+    "models/seeds/staging/uk_transport/uk_transport_spend_sample.csv",
 }
 ALLOWED_EXCEPTIONS = {f"!/{seed}" for seed in SEEDS}
 

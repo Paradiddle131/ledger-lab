@@ -1,0 +1,91 @@
+models:
+  - name: stg_uk_transport__spend
+    description: >
+      One row per landed row of the Department for Transport's spending over £25,000
+      (`uk-transport-spend-2025`, fiscal year 2025, April 2025 to March 2026), typed: the payment
+      date from its served `dd/mm/yyyy`, the amount as a decimal from the publisher's digits.
+      Contains public sector information licensed under the Open Government Licence v3.0.
+    data_tests:
+      - unique:
+          arguments:
+            column_name: "source_file || '|' || cast(source_row as string)"
+    columns:
+      - name: source_file
+        description: The name of the monthly file the row was served in, as GOV.UK serves it.
+        data_tests:
+          - not_null
+      - name: source_row
+        description: The row's position in that file, from 1, headers aside.
+        data_tests:
+          - not_null
+      - name: payment_date
+        description: The served date; null only if it is no `dd/mm/yyyy` day, which a test fails.
+        data_tests:
+          - not_null:
+              name: every_landed_date_casts
+      - name: amount
+        description: >
+          The amount in pounds, cast from the publisher's digits to dbt's `type_numeric` (never a
+          float), sign as served; null only if the digits do not cast, which a test fails.
+        data_tests:
+          - not_null:
+              name: every_landed_amount_casts
+      - name: supplier
+        description: >
+          As landed: a clear name, `person:` and a keyed hash for a supplier who may be a person,
+          or the Department's own `REDACTED`.
+        data_tests:
+          - not_null
+      - name: transaction_number
+        description: >
+          As landed: the Department's number, `#` where it gives none, and `id:` and a keyed hash
+          on a hashed or redacted row.
+        data_tests:
+          - not_null
+
+seeds:
+  - name: uk_transport_spend_files
+    description: >
+      When GOV.UK published each landed UK spend file, in UTC: its publication page's first
+      publication for every pinned file, none of which has been replaced. A revised month is a
+      second file for that month published later, so this time is what orders a month's files; a
+      landed file with no row here fails the build. Read from the pages, which a pages test
+      compares with this seed.
+    config:
+      column_types:
+        source_file: string
+        published_at: timestamp
+    columns:
+      - name: source_file
+        description: The file's name as served and landed.
+        data_tests:
+          - unique
+          - not_null
+      - name: published_at
+        description: The time the page published the file, in UTC.
+        data_tests:
+          - not_null
+
+  - name: uk_transport_spend_sample
+    description: >
+      Real rows of the Department's spend for the builds inside `make check`, read when the
+      `source_rows` var is `sample`: the rows in `tests/models/uk_transport_sample.yaml` (companies
+      only; expense type, area, description and postal code left out, since no model reads them)
+      as the landing's step lands them with a test hash key, so its hashed suppliers (companies the
+      test register does not vouch for) carry that key's hashes, never the real one's; a test
+      lands the rows again and holds this file to it. Contains public sector information licensed
+      under the Open Government Licence v3.0.
+    config:
+      column_types:
+        source_file: string
+        source_row: bigint
+        department_family: string
+        entity: string
+        date: string
+        expense_type: string
+        expense_area: string
+        supplier: string
+        transaction_number: string
+        item_text: string
+        amount: string
+        postal_code: string

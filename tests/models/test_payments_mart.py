@@ -241,7 +241,9 @@ def test_a_payment_served_again_is_kept_and_flagged(build: Build) -> None:
     expected = repeats_of_the_cut()
     assert kinds == {k: n for k, n in expected.items() if n}
     assert kinds.keys() == {"exact", "without_department"}
-    assert query(build, "select count(*) from payments") == [(len(CUT["payments"]),)]
+    assert query(build, "select count(*) from payments where entity_id = 'chicago'") == [
+        (len(CUT["payments"]),)
+    ]
     paid = query(
         build,
         "select sum(amount) from payments where contract_number = '76213' and not is_repeat",
@@ -283,7 +285,11 @@ def test_a_payment_joins_its_contract_or_none(build: Build) -> None:
         number = None if p["contract_number"] == "DV" else p["contract_number"]
         expected[(number, awards.get(number or ""), Decimal(p["amount"]))] += 1
     found = Counter(
-        query(build, "select contract_number, award_after_revisions, amount from payments")
+        query(
+            build,
+            "select contract_number, award_after_revisions, amount from payments"
+            " where entity_id = 'chicago'",
+        )
     )
     assert found == expected
     kinds = Counter(
@@ -327,7 +333,7 @@ def test_a_hashed_payee_is_the_landing_hash_and_never_in_clear(build: Build) -> 
     rows = query(
         build,
         "select vendor_name, vendor_is_hashed, contract_number from payments"
-        " where vendor_is_hashed",
+        " where vendor_is_hashed and entity_id = 'chicago'",
     )
     assert served
     assert Counter(v for v, _, _ in rows) == served

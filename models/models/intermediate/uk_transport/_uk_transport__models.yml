@@ -1,0 +1,170 @@
+models:
+  - name: int_uk_transport__payment_versions
+    description: >
+      Every landed row of every landed UK spend file, with the month its file publishes and when
+      GOV.UK published the file, and whether the file is that month's latest. The Department marks
+      no figure as provisional: it revises a month by replacing its file with a later one and a
+      change note on the publication page, so a month's first file is provisional only once a later
+      one exists. The month a file publishes is the key a later file supersedes, and the later
+      publication wins; every version stays here, superseded rows with `is_current` false, and
+      `int_uk_transport__payments` takes the current ones. No month of the landed year (fiscal
+      2025) has been revised, so every landed row is current; a unit test proves the superseding.
+    columns:
+      - name: source_file
+        description: The monthly file the row was served in, as landed.
+      - name: source_row
+        description: The row's position in that file, from 1.
+      - name: file_month
+        description: >
+          The first day of the calendar month the file publishes: its rows' payment month, one per
+          file (the landing refuses a file spanning two months, and a test holds it here).
+      - name: published_at
+        description: >
+          When GOV.UK published the file, in UTC, from `uk_transport_spend_files`; a landed file
+          the seed does not list fails the build here.
+        data_tests:
+          - not_null
+      - name: is_current
+        description: >
+          True when no file for the same month was published later; false on a superseded file's
+          rows, which payments leave out.
+      - name: payment_date
+        description: The payment date as served.
+      - name: amount
+        description: The amount in pounds as a decimal, sign as served.
+      - name: supplier
+        description: As landed, a possible person's a keyed hash.
+      - name: transaction_number
+        description: As landed, keyed-hashed on a hashed or redacted row.
+
+  - name: int_uk_transport__payments
+    description: >
+      The Department for Transport's payments in the shape every entity's payments share, one row
+      per row of each month's latest file: no month of the landed year (fiscal 2025) has been
+      revised, so every landed row of that year is one. Amounts stay in pounds;
+      translation is the currency macro's job. Contains public sector information licensed under
+      the Open Government Licence v3.0.
+    columns:
+      - name: payment_key
+        description: >
+          `uk-transport:`, the file name and the row's position in it: unique across entities by
+          its prefix and stable across landings, since a pinned file is the same bytes every time.
+          The transaction number cannot be the key: it repeats within and across files, is `#` on
+          payment runs, and is hashed on hashed rows. A revised month's file brings new keys.
+        data_tests:
+          - unique
+          - not_null
+      - name: entity_id
+        description: "`uk-transport`, the entity id of the calendars and the access mapping."
+      - name: currency
+        description: "`GBP`: the Department pays in pounds."
+      - name: payment_date
+        description: >
+          The served date, which fixes the period. Every landed row's date falls in the month its
+          file publishes (the landing refuses a file spanning two months), so the payment date and
+          the publishing file give the same period; the payment date is the fact the period
+          describes, and a revised month is keyed by its file's month instead.
+        data_tests:
+          - not_null
+          - dates_in_fiscal_calendar
+      - name: fiscal_year
+        description: >
+          The UK fiscal year of the payment date, labelled by the year it opens in; the landed set
+          is fiscal 2025, April 2025 to March 2026.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [2025]
+                quote: false
+      - name: fiscal_period
+        description: The fiscal period of the payment date, 1 for April to 12 for March.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+                quote: false
+      - name: amount
+        description: The amount in pounds, a decimal from the publisher's digits, sign as served.
+        data_tests:
+          - not_null
+      - name: vendor_name
+        description: >
+          The supplier as landed: a clear name, `person:` and a keyed hash for a supplier who may
+          be a person, or the Department's own `REDACTED`, which names no one.
+        data_tests:
+          - not_null
+      - name: vendor_is_hashed
+        description: True when the name is a keyed hash (`person:`); false on a clear or redacted name.
+      - name: document_number
+        description: >
+          The Department's transaction number as landed: `#` where it gives none, and `id:` and a
+          keyed hash on a hashed or redacted row, so it repeats and is no key.
+        data_tests:
+          - not_null
+      - name: contract_number
+        description: "Null: the Department's files carry no contract number."
+      - name: award_after_revisions
+        description: "Null: the Department's files carry no award."
+      - name: source_table
+        description: "`uk-transport-spend-2025`, the landed set the row comes from."
+      - name: is_repeat
+        description: >
+          False on every row: nothing in the Department's files tells a payment served twice from
+          two equal lines of one document. On the pinned files 121 rows fall in 56 groups identical
+          as landed within their file (65 extra copies); every group is consecutive rows under one
+          transaction number (21 groups a clear number, 2 the placeholder `#`, 33 a keyed hash).
+          Read against the served files, 43 groups are identical in every served cell, and 13 hashed
+          groups (27 rows) differ in the description the landing drops, so they are certainly
+          separate lines; the files carry no award or total to tie the 43 against. Each row stays a
+          payment of its own.
+
+unit_tests:
+  - name: a_revised_month_supersedes_its_first_file_and_both_are_kept
+    description: >
+      Test inputs, not data: a June file of two rows, a later June file revising one of them and
+      leaving the other out, and a July file. Every row of the three stays; the first June file's
+      are superseded and the revised file and July are current.
+    model: int_uk_transport__payment_versions
+    given:
+      - input: ref('stg_uk_transport__spend')
+        rows:
+          - {source_file: test-june-first.csv, source_row: 1, payment_date: 2025-06-10, amount: 100.00, supplier: Test Supplier Ltd, transaction_number: T1}
+          - {source_file: test-june-first.csv, source_row: 2, payment_date: 2025-06-20, amount: 200.00, supplier: Test Supplier Ltd, transaction_number: T2}
+          - {source_file: test-june-revised.csv, source_row: 1, payment_date: 2025-06-10, amount: 150.00, supplier: Test Supplier Ltd, transaction_number: T1}
+          - {source_file: test-july.csv, source_row: 1, payment_date: 2025-07-05, amount: 300.00, supplier: Test Supplier Ltd, transaction_number: T3}
+      - input: ref('uk_transport_spend_files')
+        rows:
+          - {source_file: test-june-first.csv, published_at: "2025-10-30 09:15:00"}
+          - {source_file: test-june-revised.csv, published_at: "2026-01-15 10:00:00"}
+          - {source_file: test-july.csv, published_at: "2025-10-30 09:15:00"}
+    expect:
+      rows:
+        - {source_file: test-june-first.csv, source_row: 1, file_month: 2025-06-01, is_current: false, amount: 100.00}
+        - {source_file: test-june-first.csv, source_row: 2, file_month: 2025-06-01, is_current: false, amount: 200.00}
+        - {source_file: test-june-revised.csv, source_row: 1, file_month: 2025-06-01, is_current: true, amount: 150.00}
+        - {source_file: test-july.csv, source_row: 1, file_month: 2025-07-01, is_current: true, amount: 300.00}
+
+  - name: payments_carry_only_the_latest_file_of_each_month
+    description: >
+      Test inputs, not data: the versions of the test above. Payments hold the revised June figure
+      in place of the first one, nothing of the first June file, and July, on their UK periods.
+    model: int_uk_transport__payments
+    given:
+      - input: ref('int_uk_transport__payment_versions')
+        rows:
+          - {source_file: test-june-first.csv, source_row: 1, is_current: false, payment_date: 2025-06-10, amount: 100.00, supplier: Test Supplier Ltd, transaction_number: T1}
+          - {source_file: test-june-first.csv, source_row: 2, is_current: false, payment_date: 2025-06-20, amount: 200.00, supplier: Test Supplier Ltd, transaction_number: T2}
+          - {source_file: test-june-revised.csv, source_row: 1, is_current: true, payment_date: 2025-06-10, amount: 150.00, supplier: Test Supplier Ltd, transaction_number: T1}
+          - {source_file: test-july.csv, source_row: 1, is_current: true, payment_date: 2025-07-05, amount: 300.00, supplier: Test Supplier Ltd, transaction_number: T3}
+      - input: ref('fiscal_calendar')
+        rows:
+          - {entity_id: uk-transport, calendar_date: 2025-06-10, fiscal_year: 2025, fiscal_period: 3}
+          - {entity_id: uk-transport, calendar_date: 2025-06-20, fiscal_year: 2025, fiscal_period: 3}
+          - {entity_id: uk-transport, calendar_date: 2025-07-05, fiscal_year: 2025, fiscal_period: 4}
+          - {entity_id: chicago, calendar_date: 2025-06-10, fiscal_year: 2025, fiscal_period: 6}
+    expect:
+      rows:
+        - {payment_key: "uk-transport:test-june-revised.csv:1", payment_date: 2025-06-10, fiscal_year: 2025, fiscal_period: 3, amount: 150.00, document_number: T1, vendor_is_hashed: false}
+        - {payment_key: "uk-transport:test-july.csv:1", payment_date: 2025-07-05, fiscal_year: 2025, fiscal_period: 4, amount: 300.00, document_number: T3, vendor_is_hashed: false}

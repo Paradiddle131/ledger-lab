@@ -19,6 +19,10 @@ landing/
 # Real rows of Chicago's contracts and payments, companies only, landed with a test key (the owner accepted the City's terms).
 !/models/seeds/staging/chicago/chicago_contracts_sample.csv
 !/models/seeds/staging/chicago/chicago_payments_sample.csv
+# When GOV.UK published each pinned UK spend file: what orders a revised month's files.
+!/models/seeds/staging/uk_transport/uk_transport_spend_files.csv
+# Real rows of the UK spend, companies only, landed with a test key (Open Government Licence v3.0).
+!/models/seeds/staging/uk_transport/uk_transport_spend_sample.csv
 *.tsv
 *.xlsx
 *.xls

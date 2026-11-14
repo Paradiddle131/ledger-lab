@@ -22,7 +22,15 @@ from test_fx_translation import environment
 
 from tests.models.dbt_build import dbt
 
-SELECTION = ["--select", "+budget_against_outturn+", "fiscal_calendar"]
+# Only the tests whose every parent is selected: a test of another model that also reads the
+# calendar (`dates_in_fiscal_calendar`) would fail on a model this build leaves out.
+SELECTION = [
+    "--select",
+    "+budget_against_outturn+",
+    "fiscal_calendar",
+    "--indirect-selection",
+    "cautious",
+]
 RULES = [
     "the_current_budget_is_the_latest_served_figure",
     "a_moment_is_served_on_every_line_or_none",
