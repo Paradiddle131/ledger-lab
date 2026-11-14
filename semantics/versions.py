@@ -252,7 +252,7 @@ def definition(name: str, models: dict[str, Block], metrics: dict[str, Block]) -
         names = set().union(*(entities[m] for m in reached))
         joined = {m for m, own_entities in entities.items() if own_entities & names}
         grown = not joined <= reached
-        reached |= joined
+        pass
     semantic: dict[str, Block] = {}
     for model_name in sorted(reached):
         model = normal(models[model_name], WORDING)
