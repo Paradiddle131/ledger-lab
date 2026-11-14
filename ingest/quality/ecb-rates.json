@@ -1,0 +1,31 @@
+{
+  "name": "ecb-rates",
+  "meta": {
+    "pinned": {
+      "rows": 1958,
+      "rates_of_currency": 979,
+      "weekdays_without_rate": 42
+    },
+    "names": []
+  },
+  "expectations": [
+    {"type": "expect_table_columns_to_match_ordered_list", "kwargs": {"column_list": ["date", "currency", "rate", "rate_value", "day_number", "rates_of_currency", "days_after_previous_rate", "weekdays_without_rate_before"]}, "notes": "Schema: every landed column in order, then the query's own; a landed column more or less breaks it."},
+    {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "date", "type_": "str"}, "notes": "Schema: the landing keeps the publisher's text."},
+    {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "currency", "type_": "str"}, "notes": "Schema: the landing keeps the publisher's text."},
+    {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "rate", "type_": "str"}, "notes": "Schema: the landing keeps the publisher's text."},
+    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "date"}, "notes": "Key: a rate's day."},
+    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "currency"}, "notes": "Key: a rate's currency."},
+    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "rate"}, "notes": "A closed day has no row, never a blank rate."},
+    {"type": "expect_compound_columns_to_be_unique", "kwargs": {"column_list": ["date", "currency"]}, "notes": "Key: one rate a day for each currency."},
+    {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "date", "regex": "^\\d{4}-\\d{2}-\\d{2}$"}, "notes": "The day as the ECB writes it."},
+    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "day_number"}, "notes": "Every day is a real calendar day."},
+    {"type": "expect_column_values_to_be_between", "kwargs": {"column": "day_number", "min_value": 20230101, "max_value": 20261031}, "notes": "Range: the pinned query's period, 2023-01-01 to 2026-10-31."},
+    {"type": "expect_column_distinct_values_to_equal_set", "kwargs": {"column": "currency", "value_set": ["GBP", "USD"]}, "notes": "The two currencies the pin asks for, both present."},
+    {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "rate", "regex": "^\\d+\\.\\d+$"}, "notes": "A rate is digits with a decimal point, never in exponent form."},
+    {"type": "expect_column_values_to_be_between", "kwargs": {"column": "rate_value", "min_value": 0.5, "max_value": 2.0}, "notes": "Range: a plausibility bound, not the measured extremes (0.82428 to 0.89338 for the pound, 1.0198 to 1.1974 for the dollar), since a rate moves every day; a rate ten times off breaks it."},
+    {"type": "expect_table_row_count_to_equal", "kwargs": {"value": {"$PARAMETER": "rows"}}, "notes": "Pinned: every rate the pin serves."},
+    {"type": "expect_column_values_to_be_between", "kwargs": {"column": "rates_of_currency", "min_value": {"$PARAMETER": "rates_of_currency"}, "max_value": {"$PARAMETER": "rates_of_currency"}}, "notes": "Pinned: each currency has a rate on the same number of days."},
+    {"type": "expect_column_values_to_be_between", "kwargs": {"column": "days_after_previous_rate", "min_value": 1, "max_value": 5}, "notes": "Mess, closed days absent: at most four closed days in a row (Good Friday to Easter Monday), the longest gap the translation carries a rate over."},
+    {"type": "expect_column_sum_to_be_between", "kwargs": {"column": "weekdays_without_rate_before", "min_value": {"$PARAMETER": "weekdays_without_rate"}, "max_value": {"$PARAMETER": "weekdays_without_rate"}}, "notes": "Pinned mess, closed days absent: weekdays the settlement system is closed have no row (21 for each currency); which days they are is the landed test's TARGET calendar check."}
+  ]
+}
