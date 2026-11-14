@@ -2,7 +2,9 @@
 -- every cash-expenditure line of the Dutch budget against outturn, each with the span it counts
 -- in (its fiscal period, or its fiscal year when it has no day), its basis, the rule that leaves
 -- it out of the totals (null when it counts) and, when it counts, its amount in the reporting
--- currency at actual and at constant rates.
+-- currency at actual and at constant rates. A payment carries its payee as the payments mart
+-- publishes it (an organisation's name or a person's keyed hash), so the marts can count the
+-- payees a row sums; a budget line has none.
 --
 -- The rules, first match deciding: a payment the source serves again (`repeat`); a figure of a
 -- year the fiscal calendars do not cover (`outside-calendars`); a Dutch line of a year the file
@@ -57,7 +59,8 @@ served as (
         currency,
         amount,
         is_repeat,
-        true as has_figure
+        true as has_figure,
+        vendor_name as payee
     from {{ ref('payments') }}
 
     union all
@@ -72,7 +75,8 @@ served as (
         currency,
         outturn_eur as amount,
         false as is_repeat,
-        outturn_eur is not null as has_figure
+        outturn_eur is not null as has_figure,
+        cast(null as {{ dbt.type_string() }}) as payee
     from {{ ref('budget_against_outturn') }}
     where kind = 'U'
 ),
@@ -246,6 +250,7 @@ select
     classified.currency,
     classified.amount,
     classified.left_out_by,
+    classified.payee,
     {{ reporting }} as reporting_currency,
     at_actual_rates.amount_at_actual_rates,
     at_constant_rates.translated_amount as amount_at_constant_rates,
