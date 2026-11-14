@@ -49,5 +49,15 @@ def test_an_implemented_control_has_its_proving_test(controls: dict[str, Any]) -
             exists = name in defined_tests(path)
             if control["status"] == "implemented":
                 assert exists, f"{control['id']}: {test} does not exist"
-            else:
+                assert "awaits" not in control, f"{control['id']}: implemented, yet awaits"
+            elif "awaits" not in control:
                 assert not exists, f"{control['id']}: its test exists; mark it implemented"
+
+
+def test_a_control_awaits_something_only_while_its_test_exists(controls: dict[str, Any]) -> None:
+    for control in controls["controls"]:
+        if "awaits" in control:
+            assert any(
+                name in defined_tests(path)
+                for path, name in (t.split("::") for t in control["proven_by"])
+            ), f"{control['id']}: awaits, yet no proving test exists"

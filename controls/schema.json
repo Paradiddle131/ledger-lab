@@ -29,7 +29,12 @@
             "uniqueItems": true,
             "items": {"type": "string", "pattern": "^tests/[a-z0-9_/]+\\.py::test_[a-z0-9_]+$"}
           },
-          "status": {"enum": ["not-implemented", "implemented"]}
+          "status": {"enum": ["not-implemented", "implemented"]},
+          "awaits": {
+            "description": "For a not-implemented control whose proving tests exist: what they do not prove yet.",
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     }
