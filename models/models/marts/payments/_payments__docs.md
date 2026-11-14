@@ -56,8 +56,9 @@ An award of 0 is no fixed award, not a break: the City describes a blanket contr
 
 {% docs payment_is_repeat %}
 True on a row that repeats another served row of the same entity, so a sum that leaves repeats out counts each payment once; false on the first row of each group and wherever an entity has no rule for repeats.
-For Chicago a row is a repeat when it is a copy after the first of rows identical in every landed column, when it has no department beside an otherwise identical row that has one (the row with the department is the first), or when it is a rolled-up year whose amount equals to the cent the year's other dated payments of its vendor and contract (the dated rows are the first); `int_chicago__payments` names each repeat's kind.
+For Chicago a row is a repeat when it is a copy after the first of rows identical in every landed column, when it has no department beside an otherwise identical row that has one (the row with the department is the first), when it has no department beside a row that has one and is the same but for the vendor name, the City serving one payment under two names of its vendor (the row with the department is the first), or when it is a rolled-up year whose amount equals to the cent the year's other dated payments of its vendor and contract (the dated rows are the first); `int_chicago__payments` names each repeat's kind.
 That they are the same payment served again rests on paid totals, not on the City saying so: with repeats left out, more contracts are paid exactly their award after revisions than with them.
+Two rows the same but for the vendor name, neither with a department, are not flagged: nothing beside the name pairs them, and a wrong flag would drop a real payment from every total.
 For the UK department no row is flagged: its rows identical as landed are consecutive rows under one transaction number, and nothing in the files tells those identical in every served cell from two equal lines of one document, while hashed ones that differ in the description the landing drops are certainly separate lines (`int_uk_transport__payments` gives the evidence).
 {% enddocs %}
 

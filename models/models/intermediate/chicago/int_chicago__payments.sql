@@ -8,16 +8,21 @@
 -- cover has neither.
 -- Every served row stays, and a row that repeats another is flagged, in this order: a copy after
 -- the first of rows identical in every column (`exact`); a row without a department beside one
--- that has a department and is otherwise the same (`without_department`); a rolled-up row whose
--- amount equals to the cent the unflagged dated payments of its vendor, contract and year
--- (`rolled_up_itemised`). The first row of each group is the one left unflagged.
+-- that has a department and is otherwise the same (`without_department`); a row without a
+-- department beside one that has a department and is the same but for the vendor name, the City
+-- serving one payment under two names of its vendor (`without_department_other_name`); a
+-- rolled-up row whose amount equals to the cent the unflagged dated payments of its vendor,
+-- contract and year (`rolled_up_itemised`). The first row of each group is the one left unflagged.
 with payments as (
     select
         *,
         count(department_name) over (
             partition by
                 voucher_number, amount, payment_date, rolled_up_year, contract_number, vendor_name
-        ) as rows_with_department
+        ) as rows_with_department,
+        count(department_name) over (
+            partition by voucher_number, amount, payment_date, rolled_up_year, contract_number
+        ) as rows_with_department_any_name
     from {{ ref('stg_chicago__payments') }}
 ),
 
@@ -27,6 +32,8 @@ same_payment as (
         case
             when copy_number > 1 then 'exact'
             when department_name is null and rows_with_department > 0 then 'without_department'
+            when department_name is null and rows_with_department_any_name > 0
+                then 'without_department_other_name'
         end as same_payment_kind
     from payments
 ),
