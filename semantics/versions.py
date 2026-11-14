@@ -29,8 +29,9 @@ that is left out too, and each string is compared without the whitespace at its 
 definition, a comment, key order, quoting or line folding is no change.
 
 A definition that could differ for a consumer while both trees read the same is refused: dbt Jinja
-in a semantic model, metric or saved query entry, or in the entry of a model a semantic model reads
-or a time spine is (only the filters MetricFlow renders itself may hold Jinja), and any Jinja in
+in a semantic model or metric entry, or in the entry of a model a semantic model reads or a time
+spine is (but a filter, which MetricFlow renders itself, and a model's or column's description,
+wording no definition holds), and any Jinja in
 the project file. dbt renders that Jinja with the environment (`env_var`), command-line variables,
 the clock and the run, none of which is in the tree. A file or symbolic link reaching outside the
 tree is refused too.
@@ -91,8 +92,8 @@ WORDING = {"description", "label"}
 PLACE = {"metadata"}
 # The meta keys a metric's version does not name: the version itself, and who is accountable.
 UNVERSIONED_META = {"version", "owner"}
-# The schema-file keys whose entries make the semantic layer.
-SEMANTIC_KEYS = ("semantic_models", "metrics", "saved_queries")
+# The schema-file keys whose entries define metrics and what they read.
+SEMANTIC_KEYS = ("semantic_models", "metrics")
 JINJA = ("{{", "{%", "{#")
 # Pinned by the gate for both parses: nothing else of the caller's environment reaches dbt.
 DUCKDB_FILE = "ledger_lab.duckdb"
@@ -239,9 +240,9 @@ def parse(tree: Path, work: Path) -> Block:
 
 
 def jinja_at(entry: object, model: bool) -> Iterator[str]:
-    """Every place in a raw YAML entry where a string holds Jinja dbt renders, but a filter
-    (`filter`, or a saved query's `where`), which MetricFlow renders itself, and, in a model's
-    entry (`model`), a description outside its metrics, which is wording no definition holds."""
+    """Every place in a raw YAML entry where a string holds Jinja dbt renders, but a `filter`,
+    which MetricFlow renders itself, and, in a model's entry (`model`), a description outside its
+    metrics, which is wording no definition holds."""
     pending: list[tuple[tuple[str | int, ...], object]] = [((), entry)]
     while pending:
         path, value = pending.pop()
@@ -250,7 +251,7 @@ def jinja_at(entry: object, model: bool) -> Iterator[str]:
         elif isinstance(value, list):
             pending += [((*path, n), v) for n, v in enumerate(value)]
         elif isinstance(value, str) and any(mark in value for mark in JINJA):
-            if "filter" in path[-2:] or "where" in path[-2:]:
+            if "filter" in path[-2:]:
                 continue
             if model and path[-1:] == ("description",) and "metrics" not in path:
                 continue

@@ -328,6 +328,54 @@ def test_a_metric_read_in_a_filter_is_part_of_the_definition(tmp_path: Path) -> 
     assert lines(report) == still("remaining_commitment"), report
 
 
+PAYMENTS_MODEL = "models/models/marts/payments/_payments__models.yml"
+
+
+def v2_metric(files: dict[str, str]) -> None:
+    """A semantic model and a metric written on the payments model itself (dbt's newer spec,
+    `semantic_model:` and `metrics:` on a model's entry), invented for the test."""
+    content = yaml.safe_load(files[PAYMENTS_MODEL])
+    (model,) = [m for m in content["models"] if m["name"] == "payments"]
+    model["semantic_model"] = {"name": "payments_on_the_model"}
+    model["agg_time_dimension"] = "payment_date"
+    for column in model["columns"]:
+        if column["name"] == "payment_key":
+            column["entity"] = {"type": "primary", "name": "payment_on_the_model"}
+        if column["name"] == "payment_date":
+            column["dimension"] = {"type": "time"}
+            column["granularity"] = "day"
+    meta = {"owner": "payables-clerk", "term": "award", "role": "input", "version": 1}
+    model["metrics"] = [
+        {
+            "name": "amount_on_the_model",
+            "label": "Amount",
+            "description": "Not for direct use: invented for a test.",
+            "type": "simple",
+            "agg": "sum",
+            "expr": "amount",
+            "config": {"meta": meta},
+        }
+    ]
+    files[PAYMENTS_MODEL] = yaml.safe_dump(content, sort_keys=False)
+
+
+def v2_dimension_added(files: dict[str, str]) -> None:
+    content = yaml.safe_load(files[PAYMENTS_MODEL])
+    (model,) = [m for m in content["models"] if m["name"] == "payments"]
+    (column,) = [c for c in model["columns"] if c["name"] == "currency"]
+    column["dimension"] = {"type": "categorical"}
+    files[PAYMENTS_MODEL] = yaml.safe_dump(content, sort_keys=False)
+
+
+def test_a_metric_on_a_model_entry_is_compared_too(tmp_path: Path) -> None:
+    """dbt's newer spec, a semantic model and metrics on a model's own entry, reaches the
+    comparison through dbt's manifest like any other: a dimension added there changes the metric."""
+    main = changed_from(REAL, v2_metric)
+    ok, report = versions.check(working(tmp_path, v2_dimension_added, main))
+    assert not ok, report
+    assert lines(report) == still("amount_on_the_model"), report
+
+
 REFUSED: dict[str, tuple[Edit, list[str]]] = {
     "dbt Jinja in a definition": (
         both(
@@ -346,6 +394,16 @@ REFUSED: dict[str, tuple[Edit, list[str]]] = {
                 setting("description", "Paid by {{ run_started_at.year }}."),
                 PAYMENTS,
             ),
+            replaced(
+                CALENDARS,
+                "      standard_granularity_column: date_day\n",
+                "      standard_granularity_column: \"{{ 'date_day' }}\"\n",
+            ),
+            replaced(
+                "models/models/marts/payments/_payments__models.yml",
+                "  - name: payments\n",
+                "  - name: payments\n    config: {meta: {read: \"{{ env_var('ANY', '') }}\"}}\n",
+            ),
         ),
         [
             "semantics/metricflow/contracts.yml: semantic_models chicago_contracts holds dbt Jinja"
@@ -354,6 +412,10 @@ REFUSED: dict[str, tuple[Edit, list[str]]] = {
             " label",
             "semantics/metricflow/payments.yml: metrics chicago_payment_rows holds dbt Jinja at"
             " description",
+            "models/calendars/calendars.yml: models metric_time_spine holds dbt Jinja at"
+            " time_spine.standard_granularity_column",
+            "models/marts/payments/_payments__models.yml: models payments holds dbt Jinja at"
+            " config.meta.read",
         ],
     ),
     "Jinja in the project file": (
