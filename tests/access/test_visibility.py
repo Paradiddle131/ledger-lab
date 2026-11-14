@@ -46,15 +46,17 @@ from gcp_project import lab_project_or_none
 from access.compile import (
     ENTITY,
     SOURCE,
+    Rows,
     compile_persona,
     connect,
     literal,
+    masked,
     materialise,
     quote,
     source_schema,
 )
-from tests.access.test_compile import sha256_rendered
-from tests.conftest import load_access
+from tests.access.test_compile import LANDED_SOURCES, sha256_rendered
+from tests.conftest import landed_file, load_access
 
 Doc = dict[str, Any]
 Row = tuple[Any, ...]
@@ -109,6 +111,10 @@ class Engine(Protocol):
 
     def invented(self) -> "Engine":
         """The same engine over a copy of its build holding the invented tables below."""
+        ...
+
+    def rebuilt(self, catalogues: Catalogues) -> "Engine":
+        """The same engine and build with the personas' rules made from other catalogues."""
         ...
 
 
@@ -192,12 +198,18 @@ class LocalEngine:
         self.children.append(child)
         return child
 
+    def rebuilt(self, catalogues: Catalogues) -> "LocalEngine":
+        directory = self.directory / f"rebuilt-{len(self.children)}"
+        child = LocalEngine(self.warehouse, catalogues, directory, self.mutate)
+        self.children.append(child)
+        return child
+
     def close(self) -> None:
         """Close every connection and delete every database built, derived data with hashed names
         in it."""
         for child in self.children:
             child.close()
-            shutil.rmtree(child.directory)
+            shutil.rmtree(child.directory, ignore_errors=True)
         for db in self.opened:
             db.close()
         self.opened.clear()
@@ -553,6 +565,20 @@ def observe_product(
             place.fail(f"observed {len(small)} groups in {name} below the minimum group")
 
 
+def row_key(sight: Sight, table: str) -> list[str]:
+    """The columns that tell the table's rows apart for a tagged value: the first untagged column
+    unique in the source, else every untagged column, so a tag's cell reads its own column."""
+    tagged = tagged_columns(sight.catalogues.columns).get(table, {})
+    plain = [c for c in sight.built[table] if c not in tagged]
+    for column in plain:
+        ((rows, distinct),) = sight.source.rows(
+            select(f"count(*), count(distinct {quote(column)})", table)
+        )
+        if rows == distinct:
+            return [column]
+    return plain
+
+
 def strings_held(sight: Sight) -> dict[str, set[Any]]:
     """Every distinct string value the persona can read, per `<table>.<column>`."""
     return {
@@ -613,10 +639,8 @@ def observe_tags(sight: Sight) -> list[Seen]:
                 if table not in sight.held or column not in sight.held[table]:
                     place.fail(f"observed no column {table}.{column}")
                     continue
-                plain = [c for c in sight.built[table] if c not in tagged[table]]
-                pairs = select(
-                    f"{sight.me.row_hash(plain)}, {quote(column)}", table, of_entities(entities)
-                )
+                key = sight.me.row_hash(row_key(sight, table))
+                pairs = select(f"{key}, {quote(column)}", table, of_entities(entities))
                 stored = sight.source.rows(pairs)
                 place.support += sum(1 for _, v in stored if v is not None)
                 rule = "stored value" if cell == "clear" else f"{rules[tag]} masking"
@@ -698,8 +722,380 @@ def engine(
     local.close()
 
 
+def kinds(tally: Mapping[str, Counter[str]]) -> dict[str, int]:
+    return dict(sorted(sum(tally.values(), Counter()).items()))
+
+
+# The cells proven over the samples, by kind, across the personas: on the build, and on invented
+# tables only. 120 cells; a change to the samples, the catalogues or an observation moves them.
+SAMPLE_PROVEN = {
+    "aggregate": 6,
+    "aggregate invented": 1,
+    "clear": 11,
+    "clear invented": 14,
+    "denied": 13,
+    "denied invented": 42,
+    "draft invented": 1,
+    "edit invented": 1,
+    "post invented": 1,
+    "tag clear": 2,
+    "tag clear invented": 4,
+    "tag denied": 3,
+    "tag denied invented": 6,
+    "tag masked": 4,
+    "tag masked invented": 11,
+}
+
+
 def test_every_persona_sees_its_matrix(engine: Engine, visibility: Doc) -> None:
     failures, tally = verdict(act_out(engine, visibility, PERSONAS))
     assert failures == []
     assert set(tally) == set(PERSONAS)
+    assert kinds(tally) == SAMPLE_PROVEN
+
+
+# The harness fails for every kind of cell: each change below breaks one persona's compiled
+# database the way a faulty compiler would, on the samples' build, and the matrix goes red on
+# exactly the cells it touches.
+MUTATIONS = [
+    "leak-another-entitys-rows",
+    "change-a-value-in-a-clear-row",
+    "store-a-clear-value-in-a-masked-column",
+    "give-an-aggregate-reader-a-row-table",
+    "replace-an-aggregate-with-its-rows",
+    "drop-the-minimum",
+    "drop-the-entities-apart",
+    "add-a-tagged-column-to-a-denied-reader",
+    "add-a-tagged-value-under-another-name",
+    "hold-an-unlisted-table",
+]
+WAREHOUSE = f"{SOURCE}.main"
+
+
+def regroup(spec: Doc, entry: Doc, having: str) -> str:
+    """The aggregate table rebuilt from the source at its grain, with the given condition."""
+    grain, sums, units, kind, of = spec_columns(spec, entry)
+    keys = ", ".join(quote(c) for c in grain)
+    count = f"count(distinct {quote(of)})" if kind == "count_distinct" else f"max({quote(of)})"
+    summed = "".join(f", sum({quote(s)}) as {quote(s)}" for s in sums)
+    return (
+        f"create or replace table {quote(spec['name'])} as select {keys}{summed},"  # noqa: S608
+        f" {count} as {quote(units)} from {WAREHOUSE}.{quote(spec['from'])}"
+        f" group by {keys} {having}"
+    )
+
+
+def mutation(
+    name: str, cat: Catalogues, warehouse: Path, matrix: Doc
+) -> tuple[str, list[str], set[str]]:
+    """The persona a change breaks, the statements that break its database and the cells they
+    touch."""
+    tagged = tagged_columns(cat.columns)["payments"]
+    plain = ", ".join(quote(c) for c, _ in source_schema(warehouse)["payments"] if c not in tagged)
+    minimum = cat.aggregates["minimum_group"]
+    (by_period,) = cat.aggregates["products"]["payments"]["tables"]
+    payments, totals = (
+        cat.aggregates["products"]["payments"],
+        cat.aggregates["products"]["group-totals"],
+    )
+    stored = f"(select max(vendor_person_key) from {WAREHOUSE}.payments)"  # noqa: S608
+    if name == "leak-another-entitys-rows":
+        persona = "accountant-chicago"
+        plan = compile_persona(
+            cat.access, cat.columns, cat.aggregates, persona, source_schema(warehouse)
+        )
+        (rows,) = [t for t in plan.tables if isinstance(t, Rows) and t.table == "payments"]
+        listed = ", ".join(masked(c) for c in rows.columns)
+        return (
+            persona,
+            [
+                f"insert into payments select {listed} from {WAREHOUSE}.payments"  # noqa: S608
+                " where entity_id = 'uk-transport'"
+            ],
+            {"payments uk-transport"},
+        )
+    if name == "change-a-value-in-a-clear-row":
+        return (
+            "accountant-chicago",
+            [
+                "update payments set amount = amount + 1"
+                " where payment_key = (select min(payment_key) from payments)"
+            ],
+            {"payments chicago"},
+        )
+    if name == "store-a-clear-value-in-a-masked-column":
+        return (
+            "accountant-chicago",
+            [
+                f"update payments set vendor_person_key = w.vendor_person_key"  # noqa: S608
+                f" from {WAREHOUSE}.payments as w where w.payment_key = payments.payment_key"
+            ],
+            {"tag individual-id"},
+        )
+    if name == "give-an-aggregate-reader-a-row-table":
+        return (
+            "metric-owner",
+            [f"create table payments as select {plain} from {WAREHOUSE}.payments"],  # noqa: S608
+            {f"payments {e}" for e in matrix["personas"]["metric-owner"]["products"]["payments"]},
+        )
+    if name == "replace-an-aggregate-with-its-rows":
+        return (
+            "accountant-nl-government",
+            [f"create or replace table group_totals as select * from {WAREHOUSE}.group_totals"],  # noqa: S608
+            {"group-totals"},
+        )
+    if name == "drop-the-minimum":
+        grain = [*by_period["group_by"], *by_period["entity_group_by"]]
+        keys = ", ".join(quote(c) for c in grain)
+        small = (
+            duckdb.connect(str(warehouse), read_only=True)
+            .execute(
+                f"select distinct entity_id from (select {keys} from payments group by {keys}"  # noqa: S608
+                f" having count(distinct vendor_name) < {minimum})"
+            )
+            .fetchall()
+        )
+        return (
+            "metric-owner",
+            [regroup(by_period, payments, "")],
+            {f"payments {e}" for (e,) in small},
+        )
+    if name == "drop-the-entities-apart":
+        left_out = totals["tables"][1]
+        return (
+            "accountant-uk-transport",
+            [regroup(left_out, totals, f"having max(payees) >= {minimum}")],
+            {"group-totals"},
+        )
+    if name == "add-a-tagged-column-to-a-denied-reader":
+        return (
+            "metric-owner",
+            [
+                "alter table group_totals add column vendor_person_key varchar",
+                f"update group_totals set vendor_person_key = {stored}",  # noqa: S608
+            ],
+            {"tag individual-id"},
+        )
+    if name == "add-a-tagged-value-under-another-name":
+        return (
+            "metric-owner",
+            [
+                "alter table group_totals add column note varchar",
+                f"update group_totals set note = {stored}",  # noqa: S608
+            ],
+            {"tag individual-id"},
+        )
+    assert name == "hold-an-unlisted-table"
+    return (
+        "accountant-chicago",
+        [f"create table totals_copy as select * from {WAREHOUSE}.group_totals"],  # noqa: S608
+        {"tables"},
+    )
+
+
+@pytest.mark.parametrize("name", MUTATIONS)
+def test_the_matrix_goes_red_on_exactly_the_cells_a_broken_database_touches(
+    name: str,
+    access: Doc,
+    columns: Doc,
+    aggregates: Doc,
+    visibility: Doc,
+    warehouse: Path,
+    tmp_path: Path,
+) -> None:
+    cat = Catalogues(access, columns, aggregates)
+    persona, statements, places = mutation(name, cat, warehouse, visibility)
+    assert places, "the samples hold something for the change to touch"
+    whole = LocalEngine(warehouse, cat, tmp_path / "whole")
+    broken = LocalEngine(warehouse, cat, tmp_path / "broken", {persona: statements})
+    try:
+        assert [f for s in observe(whole, visibility, persona) for f in s.failures] == []
+        seen = observe(broken, visibility, persona)
+    finally:
+        whole.close()
+        broken.close()
+    assert {s.place for s in seen if s.failures} == places
+    messages = [f for s in seen for f in s.failures]
+    cells = {s.place: s.cell for s in seen}
+    for message in messages:
+        place = next(p for p in places if message.startswith(f"{persona} {p}: "))
+        assert f": expected {cells[place]}, observed " in message
+    with duckdb.connect(str(warehouse), read_only=True) as db:
+        values = {
+            v
+            for (column,) in db.execute(
+                "select column_name from duckdb_columns()"
+                " where table_name = 'payments' and data_type = 'VARCHAR'"
+            ).fetchall()
+            for (v,) in db.execute(f"select distinct {quote(column)} from payments").fetchall()  # noqa: S608
+            if v and len(v) >= 8
+        }
+    # The catalogue's entity ids are words of the matrix, not data.
+    values -= {e["id"] for e in access["entities"]}
+    assert not [v for v in values for m in messages if v in m], "a message holds a data value"
+
+
+# The small cell and the differencing pair.
+
+
+def sql_value(value: Any) -> str:
+    """A grain value as a SQL literal: dates, numbers, flags and catalogue words, never a payee."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return literal(value)
+    return f"date '{value.isoformat()}'"
+
+
+def aggregate_cells(row: Doc, aggregates: Doc) -> Iterator[tuple[Doc, Doc, set[str] | None]]:
+    """Each aggregate table the persona reads, with its product's entry and the entities in scope
+    (None for a group product)."""
+    for product, entry in aggregates["products"].items():
+        cells = row["products"][product]
+        if isinstance(cells, str):
+            scope = None if cells == "aggregate" else set()
+        else:
+            scope = {e for e, c in cells.items() if c == "aggregate"}
+        if scope != set():
+            for spec in entry["tables"]:
+                yield spec, entry, scope
+
+
+def test_a_small_cell_query_returns_nothing(
+    engine: Engine, visibility: Doc, aggregates: Doc
+) -> None:
+    """Each aggregate reader asks its aggregate tables for every group of the source of fewer
+    payees than the minimum, by its grain, and is given none."""
+    asked: Counter[str] = Counter()
+    minimum = aggregates["minimum_group"]
+    for persona in PERSONAS:
+        row = visibility["personas"][persona]
+        me = None
+        for spec, entry, scope in aggregate_cells(row, aggregates):
+            grain = spec_columns(spec, entry)[0]
+            groups = groups_of(engine.source(), spec, entry, scope)
+            for key, group in groups.items():
+                if (group.count() or 0) >= minimum:
+                    continue
+                me = me or engine.persona(persona)
+                match = " and ".join(
+                    f"{quote(c)} is not distinct from {sql_value(v)}"
+                    for c, v in zip(grain, key, strict=True)
+                )
+                assert me.rows(select("count(*)", spec["name"], f" where {match}")) == [(0,)]
+                asked[persona] += 1
+    assert set(asked) == {
+        p
+        for p in PERSONAS
+        if any(True for _ in aggregate_cells(visibility["personas"][p], aggregates))
+    }
+
+
+def test_two_aggregates_whose_difference_isolates_one_entity_are_suppressed(
+    engine: Engine, visibility: Doc, aggregates: Doc
+) -> None:
+    """A reader of one entity's rows given a figure across all entities can take away its own
+    entity's share, which it reads in clear: where one other entity brings the rest, the
+    difference is that entity's figure. With the entities apart at one, each such figure is given
+    and the difference is exactly the other entity's; at the catalogue's two, none is given. The
+    samples' groups are small, so both lines run at a minimum group of two."""
+    cat = engine.catalogues
+    lower = {**cat.aggregates, "minimum_group": 2}
+    strict = engine.rebuilt(Catalogues(cat.access, cat.columns, lower))
+    loose = engine.rebuilt(Catalogues(cat.access, cat.columns, {**lower, "minimum_entities": 1}))
+    assert aggregates["minimum_entities"] == 2
+    isolated = 0
+    for persona in PERSONAS:
+        row = visibility["personas"][persona]
+        known = known_entities(row)
+        for spec, entry, scope in aggregate_cells(row, aggregates):
+            if entry["entity_rows"] or scope is not None or not known:
+                continue
+            grain, sums, units, *_ = spec_columns(spec, entry)
+            pairs = {}
+            for key, group in groups_of(engine.source(), spec, entry, None).items():
+                others = [e for e in group.units if e not in known]
+                own = [e for e in group.units if e in known]
+                if len(others) == 1 and own and (group.count(others) or 0) >= 2:
+                    pairs[key] = (group, others[0], own)
+            shown = ", ".join(quote(c) for c in [*grain, *sums])
+            given = {
+                tuple(r[: len(grain)]): list(r[len(grain) :])
+                for r in loose.persona(persona).rows(select(shown, spec["name"]))
+            }
+            for key, (group, other, own) in pairs.items():
+                difference = [
+                    None if a is None else a - (b or 0)
+                    for a, b in zip(given[key], group.total(own), strict=True)
+                ]
+                assert difference == group.sums[other], (persona, spec["name"])
+                isolated += 1
+            held = {tuple(r) for r in strict.persona(persona).rows(select(shown, spec["name"]))}
+            assert not {k for k in pairs} & {h[: len(grain)] for h in held}, persona
+    assert isolated, "the samples hold a figure of one entity and the reader's own"
+
+
+def test_a_reader_of_an_entitys_payments_counts_its_share_of_each_group_total(
+    engine: Engine, visibility: Doc
+) -> None:
+    """What makes the difference real: a reader of one entity's payments counts, from its own
+    rows, the figures that entity brings to each group-totals period."""
+    source = engine.source()
+    compared = 0
+    for persona in PERSONAS:
+        own = read_entities(visibility["personas"][persona], "payments") or set()
+        cells = visibility["personas"][persona]["products"]["group-totals"]
+        if len(own) != 1 or cells != "aggregate":
+            continue
+        (entity,) = own
+        mine = engine.persona(persona).rows(
+            "select fiscal_year, fiscal_period, count(*) from payments where not is_repeat"
+            " group by all"
+        )
+        brought = source.rows(
+            select(
+                "fiscal_year, fiscal_period, sum(figures)",
+                "group_totals",
+                f"{of_entities({entity})} group by all",
+            )
+        )
+        counted = {tuple(r[:2]): r[2] for r in mine}
+        for year, period, figures in brought:
+            assert counted.get((year, period)) == figures, persona
+            compared += 1
+    assert compared
+
+
+# Over the whole landed build.
+
+
+@pytest.fixture(scope="module")
+def landed_warehouse(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    from ingest.fetch import landing_path
+    from tests.models.dbt_build import built
+
+    for name in LANDED_SOURCES:
+        landed_file(name)
+    return built(tmp_path_factory.mktemp("dbt-landed"), "landed", landing_path().resolve()).database
+
+
+@pytest.mark.landed
+def test_every_persona_sees_its_matrix_over_the_landed_build(
+    access: Doc,
+    columns: Doc,
+    aggregates: Doc,
+    visibility: Doc,
+    landed_warehouse: Path,
+    tmp_path: Path,
+) -> None:
+    engine = LocalEngine(landed_warehouse, Catalogues(access, columns, aggregates), tmp_path)
+    try:
+        failures, tally = verdict(act_out(engine, visibility, PERSONAS))
+    finally:
+        engine.close()
+    assert failures == []
     print({p: dict(sorted(t.items())) for p, t in tally.items()})
