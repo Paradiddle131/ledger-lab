@@ -18,12 +18,26 @@ Not breaking: an optional column added, a nullable column made required, an acce
 removed, a bound tightened, a description changed, a column newly classified `personal`, a new rule
 or a new contract.
 
+A deliberate break passes only under a new major version that lists it. When a contract's
+`version` has a major number above the one on `origin/main`, its ODCS `customProperties` entry
+`breakingChanges` lists each break of the first two kinds above as `change` (the break exactly as
+this gate reports it, without the contract id) and `reason`, and the gate passes when the breaks it
+finds equal the breaks listed: it fails on a break not listed, a listed break that did not happen,
+an entry without a reason, or a list under a major version that did not go up, where the list is
+not read. The list is compared with `origin/main`'s contract, so once a new major version is on
+`origin/main` its list excuses nothing: the next break needs the next major version and a list of
+its own breaks. A lowered `personal` classification, a contract gone or with a new id, a contract
+unreadable and two contracts with one id stay breaking whatever the version: the classification
+decides how the column is masked, not what a consumer reads; and the others leave no contract to
+hold a version and a list, or two.
+
 The comparison reads `origin/main` from the local clone and runs the CLI in this environment, so
 it needs no network. A clone that does not hold `origin/main` cannot be compared, so the gate fails
 and says how to fetch it, rather than passing a change it never saw. While `origin/main` holds no
 contract there is nothing published to break, so the first contracts pass, and the gate says so.
 """
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -39,6 +53,9 @@ BASE = "origin/main"
 SUFFIX = ".odcs.yaml"
 # What a quality rule may change without breaking a consumer: its wording.
 WORDING = {"description", "name"}
+# The contract's own custom property that lists the breaks of a new major version.
+DECLARED = "breakingChanges"
+SEMVER = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 Contract = dict[str, Any]
 
 
@@ -115,8 +132,9 @@ def columns(contract: Contract) -> set[str]:
     }
 
 
-def breaks(before: Contract, after: Contract) -> list[str]:
-    """What in `after` breaks a consumer of `before`, each as one line."""
+def breaks(before: Contract, after: Contract) -> tuple[list[str], list[str]]:
+    """What in `after` breaks a consumer of `before`, each as one line: what a new major version
+    may declare, and what no version may."""
     found: list[str] = []
     try:
         result = DataContract(data_contract_str=yaml.safe_dump(before), inline_references=False)
@@ -124,7 +142,7 @@ def breaks(before: Contract, after: Contract) -> list[str]:
             DataContract(data_contract_str=yaml.safe_dump(after), inline_references=False)
         )
     except Exception as e:  # the CLI raises its own and pydantic's errors on a bad contract
-        return [f"contract {after['id']} is unreadable: {str(e).splitlines()[0]}"]
+        return [], [f"contract {after['id']} is unreadable: {str(e).splitlines()[0]}"]
     found += [
         f"{entry.path}: {entry.message}"
         for entry in graded.entries
@@ -138,9 +156,65 @@ def breaks(before: Contract, after: Contract) -> list[str]:
             k: v for k, v in new[key].items() if k not in WORDING
         }:
             found.append(f"quality rule {key} is changed beyond its wording")
-    for col in sorted(personal(before) & columns(after) - personal(after)):
-        found.append(f"{col} is no longer classified personal")
-    return found
+    refused = [
+        f"{col} is no longer classified personal, which no version can declare"
+        for col in sorted(personal(before) & columns(after) - personal(after))
+    ]
+    return found, refused
+
+
+def major(contract: Contract) -> int | None:
+    """The major number of the contract's `version`, or None when it is not MAJOR.MINOR.PATCH."""
+    match = SEMVER.fullmatch(str(contract.get("version")))
+    return int(match.group(1)) if match else None
+
+
+def declaration(contract: Contract) -> tuple[list[str], list[str]]:
+    """The breaks the contract's `breakingChanges` lists, and what is wrong with the list."""
+    props = contract.get("customProperties") or []
+    if not isinstance(props, list):
+        return [], ["customProperties must be a list"]
+    entries = [p for p in props if isinstance(p, dict) and p.get("property") == DECLARED]
+    if len(entries) > 1:
+        return [], [f"customProperties holds {DECLARED} more than once"]
+    if not entries:
+        return [], []
+    value = entries[0].get("value")
+    if not isinstance(value, list):
+        return [], [f"{DECLARED} must be a list of breaks, each a change and a reason"]
+    listed: list[str] = []
+    wrong: list[str] = []
+    for n, item in enumerate(value):
+        if not isinstance(item, dict) or set(item) - {"change", "reason"}:
+            wrong.append(f"{DECLARED} entry {n + 1} must hold a change and a reason, nothing else")
+            continue
+        change, reason = item.get("change"), item.get("reason")
+        if not isinstance(change, str) or not change.strip():
+            wrong.append(f"{DECLARED} entry {n + 1} names no change")
+            continue
+        if not isinstance(reason, str) or not reason.strip():
+            wrong.append(f"{DECLARED} lists a break without a reason: {change}")
+        if change in listed:
+            wrong.append(f"{DECLARED} lists a break twice: {change}")
+        listed.append(change)
+    return listed, wrong
+
+
+def undeclared(before: Contract, after: Contract, found: list[str]) -> list[str]:
+    """The breaks `found` that `after` does not declare under a new major version, and every
+    listed break that did not happen or is wrongly listed."""
+    old, new = major(before), major(after)
+    if old is None or new is None or new <= old:
+        if not found:
+            return []
+        version = f"version {after.get('version')!r} is not a major version above"
+        return [*found, f"{version} {before.get('version')!r}, so no break can be declared"]
+    listed, wrong = declaration(after)
+    wrong += [f"{line} (not listed in {DECLARED})" for line in found if line not in listed]
+    wrong += [
+        f"{DECLARED} lists a break that did not happen: {x}" for x in listed if x not in found
+    ]
+    return wrong
 
 
 def compare(before: dict[str, str], after: dict[str, str], base: str = BASE) -> tuple[bool, str]:
@@ -149,12 +223,15 @@ def compare(before: dict[str, str], after: dict[str, str], base: str = BASE) -> 
         return True, f"contract: {base} holds no contract, so nothing published can break"
     found: list[str] = []
     current: dict[str, Contract] = {}
+    where: dict[str, str] = {}
     for path, text in after.items():
         contract = parsed(path, text)
         if isinstance(contract, str):
             found.append(contract)
+        elif contract["id"] in current:
+            found.append(f"contract {contract['id']} is in both {where[contract['id']]} and {path}")
         else:
-            current[contract["id"]] = contract
+            current[contract["id"]], where[contract["id"]] = contract, path
     for path, text in before.items():
         contract = parsed(path, text)
         if isinstance(contract, str):
@@ -162,7 +239,10 @@ def compare(before: dict[str, str], after: dict[str, str], base: str = BASE) -> 
         if contract["id"] not in current:
             found.append(f"contract {contract['id']} ({path} on {base}) is gone or has a new id")
             continue
-        found += [f"{contract['id']}: {line}" for line in breaks(contract, current[contract["id"]])]
+        now = current[contract["id"]]
+        declarable, refused = breaks(contract, now)
+        lines = refused + undeclared(contract, now, declarable)
+        found += [f"{contract['id']}: {line}" for line in lines]
     if not found:
         return True, f"contract: no change breaks a consumer of {base}'s contracts"
     lines = "\n".join(f"- {line}" for line in found)

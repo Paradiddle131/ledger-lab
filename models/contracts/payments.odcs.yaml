@@ -1,7 +1,8 @@
 # The payments data product's contract, in the Open Data Contract Standard: the mart's columns in
 # order, their types, nullability and accepted values, what each means, and the rules its rows keep.
 # `make contract` fails on a change that breaks a consumer of the contract on origin/main
-# (models/contracts/gate.py). `make contract-test` runs `datacontract test` over the local dbt
+# (models/contracts/gate.py), unless a new major `version` lists each of its breaks, as the gate
+# reports it and with a reason, under the `breakingChanges` custom property. `make contract-test` runs `datacontract test` over the local dbt
 # build, through a copy in the CLI's older DuckDB format (the `local` server's file); the tests run
 # it over the sample and the landed builds. The descriptions are the dbt docs' text
 # (models/models/marts/payments/), held equal by a test.

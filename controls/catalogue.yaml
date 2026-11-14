@@ -107,11 +107,17 @@ controls:
   - id: breaking-contract-change-stopped
     layer: Change management
     owner: group-controller
-    asserts: make check fails when a data contract in the working tree breaks a consumer of the one on origin/main, matched by contract id wherever the file sits (a column removed or renamed, a type changed, a column made nullable, a key or uniqueness dropped, an accepted value added, a bound loosened, a quality rule removed, renamed or changed beyond its wording, a personal classification removed, the contract retired, renamed or unreadable), and when origin/main is not in the clone to compare with; while origin/main holds no contract the first one passes.
+    asserts: A breaking change needs a new major version and a stated reason. make check fails when a data contract in the working tree breaks a consumer of the one on origin/main, matched by contract id wherever the file sits (a column removed or renamed, a type changed, a column made nullable, a key or uniqueness dropped, an accepted value added, a bound loosened, a quality rule removed, renamed or changed beyond its wording), unless the contract's version has a major number above origin/main's and its breakingChanges custom property lists exactly the breaks found, each with a reason; it fails on a break not listed, a listed break that did not happen, a break listed without a reason or twice, and a list under a major version that did not go up, and since the list is compared with origin/main's contract, a list already merged excuses no later break. Whatever the version, it fails when a personal classification is removed or lowered, a contract is retired, renamed, unreadable or held twice under one id, and when origin/main is not in the clone to compare with; while origin/main holds no contract the first one passes.
     proven_by:
       - tests/models/test_payments_contract.py::test_a_breaking_change_fails_the_gate
       - tests/models/test_payments_contract.py::test_the_gate_matches_contracts_by_id_wherever_they_are
       - tests/models/test_payments_contract.py::test_a_clone_without_main_fails_and_says_how_to_fetch_it
+      - tests/models/test_contract_gate.py::test_a_new_major_version_listing_exactly_its_breaks_passes
+      - tests/models/test_contract_gate.py::test_a_break_fails_unless_a_new_major_version_lists_exactly_it_with_a_reason
+      - tests/models/test_contract_gate.py::test_a_break_under_the_same_major_version_fails_as_before
+      - tests/models/test_contract_gate.py::test_a_merged_major_versions_list_excuses_no_later_break
+      - tests/models/test_contract_gate.py::test_no_version_declares_a_lowered_classification_or_a_contract_gone_or_doubled
+      - tests/models/test_contract_gate.py::test_no_version_declares_an_unreadable_contract
     status: implemented
   - id: unowned-metric-cannot-ship
     layer: Accountability
