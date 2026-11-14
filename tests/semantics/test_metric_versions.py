@@ -26,7 +26,7 @@ from tests.models.dbt_build import Build
 from tests.semantics.metric_cli import manifest
 
 FOLDER = "semantics/metricflow"
-PROJECT_FILE = versions.PROJECT_FILE
+PROJECT_FILE = "models/dbt_project.yml"
 GATE_FILES = ["semantics/versions.py", "semantics/offline/refusal.py"]
 
 
