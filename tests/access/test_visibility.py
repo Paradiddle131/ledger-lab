@@ -748,7 +748,7 @@ def observe_tags(sight: Sight) -> list[Seen]:
                     continue  # the persona reads no rows of this product
                 for name, listed in cat.purpose_tables(sight.persona, table).items():
                     if column not in listed:
-                        continue  # the purpose withholds it: the product cell holds it absent
+                        continue  # the purpose leaves it out: the product cell holds it absent
                     reached = True
                     if name not in sight.held or column not in sight.held[name]:
                         place.fail(f"observed no column {name}.{column}")
@@ -893,7 +893,7 @@ MUTATIONS = [
     "an-empty-table-of-a-denied-product",
     "leave-the-base-table-in",
     "hold-another-purposes-table",
-    "add-a-withheld-column",
+    "add-an-omitted-column",
 ]
 WAREHOUSE = f"{SOURCE}.main"
 
@@ -1019,14 +1019,16 @@ def mutation(
             ],
             {"tag individual-id", "group-totals"},
         )
-    if name == "add-a-withheld-column":
+    if name == "add-an-omitted-column":
         (close,) = cat.purpose_tables("group-controller", "payments")
         return (
             "group-controller",
             [
                 f"alter table {close} add column contract_number varchar",
-                f"update {close} as m set contract_number = w.contract_number"  # noqa: S608
-                f" from {WAREHOUSE}.payments as w where w.payment_key = m.payment_key",
+                # Group close keeps no row key, so every row takes one contract number of the
+                # source's.
+                f"update {close} set contract_number ="  # noqa: S608
+                f" (select max(contract_number) from {WAREHOUSE}.payments)",
             ],
             {
                 f"payments {e}"

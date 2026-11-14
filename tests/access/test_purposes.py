@@ -2,22 +2,24 @@
 
 `access/purposes.yaml` names, per kind of work, the columns of each product table it needs and the
 personas that do it; the compiler stores each purpose's columns as `<purpose>.<table>` in the
-persona's database and never the table itself. Here each persona's connection is asked every
-purpose's columns of every table: the query succeeds exactly for the purposes the persona holds,
-asking a column none of its purposes lists fails, and no table of a product's name answers under
-another purpose, under a schema that is no purpose, or as the source holds it, by its own name,
-other than as the persona's aggregate table of that name. The same check is run on databases a
-broken compiler would build, and goes red. The absent columns are worked out here from the
-source's columns, and the metric definition's columns from the metrics' semantic model, apart
-from the catalogue. A column absent is not a fact withheld: what the kept columns still tell is
-pinned here too.
+persona's database and never the table itself. Here every table and view of each persona's
+database is held against what its purposes and aggregate grants give it: each purpose table holds
+exactly the purpose's columns, each aggregate table exactly the aggregate's columns, one row per
+group and no group under the minimum, and nothing else is there. The same check is run on
+databases a broken compiler would build, and goes red. The absent columns are worked out here
+from the source's columns, and the metric definition's columns from the metrics' semantic model,
+apart from the catalogue. A column left out of a purpose can still be worked out from the columns
+it keeps; the derivations known are stated beside the purposes, and the one tested here is the
+group controller's reading of whether a payee is a person.
 """
 
 import copy
 import dataclasses
 import json
 import re
+from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -27,11 +29,14 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from access.compile import (
+    SOURCE,
+    Aggregate,
     Column,
     Plan,
     Rows,
     compile_persona,
     connect,
+    literal,
     materialise,
     quote,
     schema_of,
@@ -48,7 +53,7 @@ REFUSED = (duckdb.CatalogException, duckdb.BinderException)
 
 def product_columns(access: Doc, warehouse: Path) -> dict[str, list[str]]:
     """Each product table with its columns as the source holds them: what a reader of the product
-    read before purposes, and what a base-table query asks."""
+    read before purposes."""
     schema = source_schema(warehouse)
     return {
         table: [c for c, _ in schema[table]]
@@ -57,23 +62,42 @@ def product_columns(access: Doc, warehouse: Path) -> dict[str, list[str]]:
     }
 
 
-def aggregate_columns(access: Doc, aggregates: Doc, persona: str) -> dict[str, set[str]]:
-    """The persona's aggregate tables, each with the columns its aggregate grant shows: the only
-    tables of `main` it holds, worked out from the aggregates catalogue apart from the compiler."""
+@dataclass(frozen=True)
+class Shape:
+    """An aggregate table as its grant shows it: its columns, the ones it groups by, the column
+    counting each group's payees and the fewest a group may hold."""
+
+    columns: frozenset[str]
+    keys: tuple[str, ...]
+    units: str
+    minimum: int
+
+
+def aggregate_columns(
+    access: Doc, aggregates: Doc, persona: str, base: dict[str, list[str]]
+) -> dict[str, Shape]:
+    """The persona's aggregate tables, each as its aggregate grant shows it: the only tables of
+    `main` it holds, worked out from the aggregates catalogue apart from the compiler."""
     granted = {
         g["product"]
         for g in access["grants"]
         if g["persona"] == persona and g["access"] == "aggregate"
     }
-    shown: dict[str, set[str]] = {}
+    shown: dict[str, Shape] = {}
     for product, entry in aggregates["products"].items():
         if product not in granted:
             continue
         for view in entry["tables"]:
-            columns = [*view["group_by"], *view["sum"], view["units"]["name"]]
+            if view["from"] not in base:
+                continue  # the models build no table of it yet
+            keys, sums = list(view["group_by"]), list(view["sum"])
             if entry["entity_rows"]:
-                columns += [*view["entity_group_by"], *view.get("entity_sum", [])]
-            shown[view["name"]] = set(columns)
+                keys += view["entity_group_by"]
+                sums += view.get("entity_sum", [])
+            units = view["units"]["name"]
+            shown[view["name"]] = Shape(
+                frozenset([*keys, *sums, units]), tuple(keys), units, aggregates["minimum_group"]
+            )
     return shown
 
 
@@ -90,58 +114,81 @@ def answers(db: duckdb.DuckDBPyConnection, sql: str) -> bool:
     return True
 
 
-def held(db: duckdb.DuckDBPyConnection) -> list[tuple[str, str]]:
-    """Every table and view of the persona's own catalog, as (schema, name), lowercased as DuckDB
-    compares names."""
+def held(db: duckdb.DuckDBPyConnection) -> dict[tuple[str, str], set[str]]:
+    """Every table and view of the persona's own catalog, as (schema, name) lowercased as DuckDB
+    compares names, with its columns."""
     rows = db.execute(
-        "select lower(schema_name), lower(table_name) from duckdb_tables()"
-        " where database_name = current_database()"
-        " union all select lower(schema_name), lower(view_name) from duckdb_views()"
-        " where database_name = current_database() and not internal"
+        "select lower(t.schema_name), lower(t.table_name), lower(c.column_name)"
+        " from (select schema_name, table_name from duckdb_tables()"
+        "  where database_name = current_database()"
+        "  union all select schema_name, view_name from duckdb_views()"
+        "  where database_name = current_database() and not internal) as t"
+        " left join duckdb_columns() as c on c.database_name = current_database()"
+        "  and c.schema_name = t.schema_name and c.table_name = t.table_name"
     ).fetchall()
-    return sorted(rows)
+    found: dict[tuple[str, str], set[str]] = {}
+    for schema, table, column in rows:
+        found.setdefault((schema, table), set()).update([column] if column else [])
+    return found
+
+
+def aggregate_faults(db: duckdb.DuckDBPyConnection, where: str, shape: Shape) -> list[str]:
+    """How a table in `main` departs from the aggregate it stands for: other columns, a group
+    held twice, or a group under the minimum."""
+    keys = ", ".join(quote(k) for k in shape.keys)
+    (rows,) = db.execute(f"select count(*) from {where}").fetchone() or (0,)  # noqa: S608
+    distinct = f"select count(*) from (select distinct {keys} from {where})"  # noqa: S608
+    (groups,) = db.execute(distinct).fetchone() or (0,)
+    units = quote(shape.units)
+    (small,) = db.execute(
+        f"select count(*) from {where} where {units} is null or {units} < {shape.minimum}"  # noqa: S608
+    ).fetchone() or (0,)
+    faults = []
+    if groups != rows:
+        faults.append("a group held twice")
+    if small:
+        faults.append("a group under the minimum")
+    return faults
 
 
 def breaches(
     db: duckdb.DuckDBPyConnection,
     persona: str,
     purposes: Doc,
-    base: dict[str, list[str]],
-    aggregated: dict[str, set[str]],
+    aggregated: dict[str, Shape],
 ) -> list[str]:
-    """Every way the persona's connection departs from its purposes, in names only: a purpose's
-    table it holds and cannot read, a column of it the purpose does not list, any table of a
-    product's name under a purpose that does not give it the table, under a schema that is no
-    purpose, or in `main` other than as its aggregate table of that name with that table's
-    columns."""
+    """Every way the persona's database departs from its purposes and aggregate grants, in names
+    only: a purpose table it lacks or cannot read, one holding a column the purpose does not list
+    or lacking one it lists, an aggregate table with other columns, a group twice or a group under
+    the minimum, and any table or view, in any schema, that is neither."""
     found: list[str] = []
-    for purpose in purposes["purposes"]:
-        holds = persona in purpose["personas"]
-        for table in base:
-            where = name(purpose["id"], table)
-            listed = purpose["tables"].get(table) if holds else None
-            if listed is None:
-                if answers(db, f"select * from {where} limit 0"):  # noqa: S608
-                    whose = "which it does not hold" if not holds else "which does not list it"
-                    found.append(f"{persona} reads {where}, of {purpose['id']}, {whose}")
-                continue
-            read = answers(db, f"select {', '.join(quote(c) for c in listed)} from {where}")  # noqa: S608
-            if not read:
-                found.append(f"{persona} cannot read {where}, which {purpose['id']} gives it")
-            for column in base[table]:
-                if column not in listed and answers(db, f"select {quote(column)} from {where}"):  # noqa: S608
-                    found.append(f"{persona} reads {column} in {where}, which its purpose omits")
-    for table in base:
-        where = f"{quote(persona)}.main.{quote(table)}"
-        if not answers(db, f"select * from {where} limit 0"):  # noqa: S608
+    tables = held(db)
+    expected: dict[tuple[str, str], tuple[str, list[str]]] = {
+        (schema_of(p["id"]).lower(), table): (p["id"], listed)
+        for p in purposes["purposes"]
+        if persona in p["personas"]
+        for table, listed in p["tables"].items()
+    }
+    for (schema, table), (purpose, listed) in expected.items():
+        where = f"{quote(schema)}.{quote(table)}"
+        got = tables.get((schema, table))
+        if got is None or not answers(db, f"select {', '.join(map(quote, listed))} from {where}"):  # noqa: S608
+            found.append(f"{persona} cannot read {schema}.{table}, which {purpose} gives it")
+        elif extra := sorted(got - set(listed)):
+            found.append(
+                f"{persona} reads {', '.join(extra)} in {schema}.{table}, which {purpose} omits"
+            )
+    for table, shape in aggregated.items():
+        where = f"main.{quote(table)}"
+        got = tables.get(("main", table))
+        if got is None:
+            found.append(f"{persona} cannot read main.{table}, which its aggregate grant gives it")
             continue
-        got = {c for (c,) in db.execute(f"select column_name from (describe {where})").fetchall()}  # noqa: S608
-        if aggregated.get(table) != got:
-            found.append(f"{persona} reads the product table {table} as {where}")
-    purpose_schemas = {schema_of(p["id"]).lower() for p in purposes["purposes"]}
-    for schema, table in held(db):
-        if table in base and schema != "main" and schema not in purpose_schemas:
-            found.append(f"{persona} reads {schema}.{table}, under a schema that is no purpose")
+        faults = aggregate_faults(db, where, shape) if got == shape.columns else ["other columns"]
+        if faults:
+            found.append(f"{persona} holds main.{table} as no aggregate: {', '.join(faults)}")
+    for schema, table in sorted(set(tables) - set(expected) - {("main", t) for t in aggregated}):
+        found.append(f"{persona} holds {schema}.{table}, which no purpose or aggregate gives it")
     return found
 
 
@@ -155,12 +202,12 @@ def test_each_persona_reads_its_purposes_and_nothing_else(
 ) -> None:
     base = product_columns(access, warehouse)
     assert base, "the models build tables of some product"
-    shown = aggregate_columns(access, aggregates, persona)
-    assert breaches(as_persona(persona), persona, purposes, base, shown) == []
+    shown = aggregate_columns(access, aggregates, persona, base)
+    assert breaches(as_persona(persona), persona, purposes, shown) == []
 
 
-# A broken compiler: each change below is made to the plan the compiler gives, built as the
-# compiler builds it, and the check above must find it.
+# A broken compiler: each change below is made to the plan the compiler gives, or to the database
+# it builds, and the check above must find it.
 
 
 def payments_of(plan: Plan) -> Rows:
@@ -173,39 +220,90 @@ def only(rows: Rows, *names: str) -> Rows:
     return dataclasses.replace(rows, columns=tuple(c for c in rows.columns if c.name in names))
 
 
-def broken(name: str, plans: Callable[[str], Plan]) -> tuple[str, Plan, str]:
+def swap_aggregate(plan: Plan, table: str, columns: tuple[Column, ...]) -> Plan:
+    """The plan with the aggregate table of that name replaced by the source's rows, ungrouped."""
+    (agg,) = [t for t in plan.tables if isinstance(t, Aggregate) and t.name == table]
+    raw = Rows(agg.source, None, columns, "main")
+    return Plan(plan.persona, tuple(raw if t is agg else t for t in plan.tables))
+
+
+# Changes made to the built database, with the source attached as the build attaches it.
+ALTERED = {
+    "copy-a-product-table-under-another-name": (
+        "group-controller",
+        [f"create table main.ledger as select * from {SOURCE}.main.payments"],  # noqa: S608
+        "main.ledger, which no purpose",
+    ),
+    "copy-a-product-table-under-another-schema": (
+        "group-controller",
+        [
+            "create schema spare",
+            f"create table spare.ledger as select * from {SOURCE}.main.payments",  # noqa: S608
+        ],
+        "spare.ledger, which no purpose",
+    ),
+    "add-a-view": (
+        "group-controller",
+        ["create view main.close as select * from group_close.payments"],
+        "main.close, which no purpose",
+    ),
+    "add-a-column-under-a-new-name": (
+        "group-controller",
+        [
+            "alter table group_close.payments add column payee varchar",
+            "update group_close.payments set payee = 'invented'",
+        ],
+        "reads payee in",
+    ),
+}
+
+
+def broken(
+    name: str, plans: Callable[[str], Plan], kinds: dict[str, dict[str, str]]
+) -> tuple[str, Plan, str]:
     """The persona whose plan a change breaks, the broken plan, and the breach it must show."""
+    if name in ALTERED:
+        persona, _, breach = ALTERED[name]
+        return persona, plans(persona), breach
     if name == "leave-the-base-table-in":
         plan = plans("accountant-chicago")
         whole = dataclasses.replace(payments_of(plan), purpose="main")
-        return plan.persona, Plan(plan.persona, (*plan.tables, whole)), "the product table"
+        return plan.persona, Plan(plan.persona, (*plan.tables, whole)), "main.payments, which no"
     if name == "leave-a-narrowed-base-table-in":
         plan = plans("group-controller")
         narrow = dataclasses.replace(only(payments_of(plan), "amount"), purpose="main")
-        return plan.persona, Plan(plan.persona, (*plan.tables, narrow)), "the product table"
+        return plan.persona, Plan(plan.persona, (*plan.tables, narrow)), "main.payments, which no"
     if name == "give-another-purposes-table":
         plan = plans("accountant-chicago")
         other = dataclasses.replace(
             payments_of(plans("group-controller")), entities=frozenset({"chicago"})
         )
-        return plan.persona, Plan(plan.persona, (*plan.tables, other)), "which it does not hold"
+        return (
+            plan.persona,
+            Plan(plan.persona, (*plan.tables, other)),
+            "group_close.payments, which no",
+        )
     if name == "give-one-column-of-another-purposes-table":
         plan = plans("group-controller")
         # Audit's payments, holding only the document number: none of group close's columns.
-        other = dataclasses.replace(only(payments_of(plan), "amount"), purpose="audit")
+        other = dataclasses.replace(payments_of(plan), purpose="audit")
         other = dataclasses.replace(other, columns=(Column("document_number", "VARCHAR", "clear"),))
-        return plan.persona, Plan(plan.persona, (*plan.tables, other)), "which it does not hold"
+        return plan.persona, Plan(plan.persona, (*plan.tables, other)), "audit.payments, which no"
     if name == "give-a-table-its-purpose-does-not-list":
         plan = plans("metric-owner")
         (totals,) = [t for t in plan.tables if isinstance(t, Rows)]
         extra = Rows(
             "group_totals_left_out", None, (Column("figures", "BIGINT", "clear"),), totals.purpose
         )
-        return plan.persona, Plan(plan.persona, (*plan.tables, extra)), "which does not list it"
+        return (
+            plan.persona,
+            Plan(plan.persona, (*plan.tables, extra)),
+            "group_totals_left_out, which no",
+        )
     if name == "store-under-a-schema-that-is-no-purpose":
         plan = plans("group-controller")
         spare = dataclasses.replace(only(payments_of(plan), "amount"), purpose="spare")
-        return plan.persona, Plan(plan.persona, (*plan.tables, spare)), "no purpose"
+        return plan.persona, Plan(plan.persona, (*plan.tables, spare)), "spare.payments, which no"
     if name == "add-an-omitted-column":
         plan = plans("group-controller")
         rows = payments_of(plan)
@@ -213,7 +311,28 @@ def broken(name: str, plans: Callable[[str], Plan]) -> tuple[str, Plan, str]:
             rows, columns=(*rows.columns, Column("contract_number", "VARCHAR", "clear"))
         )
         tables = tuple(wider if t is rows else t for t in plan.tables)
-        return plan.persona, Plan(plan.persona, tables), "which its purpose omits"
+        return plan.persona, Plan(plan.persona, tables), "reads contract_number in"
+    if name == "store-an-aggregate-table-with-other-columns":
+        # The accountant's group totals in aggregate, stored as the product's rows by that name.
+        totals = kinds["group_totals"]
+        columns = tuple(Column(c, k, "clear") for c, k in totals.items())
+        plan = swap_aggregate(plans("accountant-chicago"), "group_totals", columns)
+        return plan.persona, plan, "main.group_totals as no aggregate: other columns"
+    if name == "store-an-aggregate-table-ungrouped":
+        # The aggregate's own columns, but the source's rows, one payment span each.
+        totals = kinds["group_totals"]
+        shown = (
+            "period_start",
+            "period_end",
+            "reporting_currency",
+            "constant_rates_on",
+            "figures",
+            "amount_at_constant_rates",
+            "payees",
+        )
+        columns = tuple(Column(c, totals[c], "clear") for c in shown)
+        plan = swap_aggregate(plans("accountant-chicago"), "group_totals", columns)
+        return plan.persona, plan, "a group under the minimum"
     assert name == "drop-a-listed-column"
     plan = plans("accountant-chicago")
     rows = payments_of(plan)
@@ -235,6 +354,9 @@ def broken(name: str, plans: Callable[[str], Plan]) -> tuple[str, Plan, str]:
         "store-under-a-schema-that-is-no-purpose",
         "add-an-omitted-column",
         "drop-a-listed-column",
+        "store-an-aggregate-table-with-other-columns",
+        "store-an-aggregate-table-ungrouped",
+        *ALTERED,
     ],
 )
 def test_the_check_goes_red_on_a_database_a_broken_compiler_builds(
@@ -251,35 +373,34 @@ def test_the_check_goes_red_on_a_database_a_broken_compiler_builds(
     def plans(persona: str) -> Plan:
         return compile_persona(access, columns, aggregates, purposes, persona, schema)
 
-    persona, plan, breach = broken(change, plans)
-    db = connect(materialise(plan, warehouse, tmp_path))
+    kinds = {table: dict(cols) for table, cols in schema.items()}
+    persona, plan, breach = broken(change, plans, kinds)
+    path = materialise(plan, warehouse, tmp_path)
+    if change in ALTERED:
+        with duckdb.connect(str(path)) as build:
+            build.execute(f"attach {literal(str(warehouse))} as {SOURCE} (read_only)")
+            for statement in ALTERED[change][1]:
+                build.execute(statement)
+            build.execute(f"detach {SOURCE}")
+    db = connect(path)
     try:
-        shown = aggregate_columns(access, aggregates, persona)
-        found = breaches(db, persona, purposes, product_columns(access, warehouse), shown)
+        base = product_columns(access, warehouse)
+        found = breaches(
+            db, persona, purposes, aggregate_columns(access, aggregates, persona, base)
+        )
     finally:
         db.close()
     assert len(found) == 1 and breach in found[0], found
 
 
-def test_an_aggregate_table_of_a_product_tables_name_is_no_breach_with_its_own_columns(
-    as_persona: AsPersona, access: Doc, aggregates: Doc
-) -> None:
-    """The accountants hold the group totals in aggregate as `main.group_totals`: the breach check
-    passes that table only because its columns are the aggregate's, so the case is pinned."""
-    shown = aggregate_columns(access, aggregates, "accountant-chicago")
-    assert {"group_totals", "group_totals_left_out"} <= set(shown)
-    db = as_persona("accountant-chicago")
-    got = db.execute("select column_name from (describe main.group_totals)").fetchall()
-    assert {c for (c,) in got} == shown["group_totals"]
-
-
 # The columns the purposes leave out of each persona's purpose tables, worked out from the source's
 # columns: before purposes, a persona with a row grant on a product read every column of every
-# table of it. These are columns absent, not facts withheld: what a kept column still tells of an
-# absent one is pinned in the tests after this one.
+# table of it. A column absent can still be worked out from the columns kept: the one derivation
+# tested here follows.
 ABSENT_COLUMNS = {
     "group-controller": {
         "payments": [
+            "payment_key",
             "vendor_name",
             "vendor_is_hashed",
             "document_number",
@@ -348,24 +469,26 @@ def test_the_group_controller_reads_whether_a_payee_is_a_person_from_the_organis
 ) -> None:
     """Group close leaves `vendor_is_hashed` out but keeps the organisation paid, which the models
     leave empty exactly for a person: so whether each payment went to a person stays readable to
-    the group controller. A change that closes this must change this test."""
+    the group controller. With no row key kept, the payments are compared as a multiset of entity,
+    date, amount and that flag. A change that closes this must change this test."""
     controller = as_persona("group-controller")
-    with pytest.raises(duckdb.BinderException):
-        controller.execute("select vendor_is_hashed from group_close.payments")
-    kept = dict(
+    for absent in ("vendor_is_hashed", "payment_key"):
+        with pytest.raises(duckdb.BinderException):
+            controller.execute(f"select {absent} from group_close.payments")  # noqa: S608
+    shape = "select entity_id, payment_date, amount, {} from {}"
+    kept = Counter(
         controller.execute(
-            "select payment_key, vendor_organisation_name is null from group_close.payments"
+            shape.format("vendor_organisation_name is null", "group_close.payments")
         ).fetchall()
     )
     with duckdb.connect(str(warehouse), read_only=True) as source:
-        truth = dict(
-            source.execute("select payment_key, vendor_is_hashed from payments").fetchall()
-        )
-    assert any(truth.values()) and not all(truth.values()), "the sample pays persons and others"
+        truth = Counter(source.execute(shape.format("vendor_is_hashed", "payments")).fetchall())
+    flags = {row[-1] for row in truth}
+    assert flags == {True, False}, "the sample pays persons and others"
     assert kept == truth
 
 
-def test_a_purpose_that_withholds_nothing_serves_a_duty_that_reads_every_column(
+def test_a_purpose_that_lists_every_column_serves_a_duty_that_reads_every_column(
     access: Doc, purposes: Doc, warehouse: Path
 ) -> None:
     """Two purposes give every column of their tables; the duties of their personas are the
@@ -456,7 +579,7 @@ LANDED_READ = {
     "accountant-uk-transport": {"payment_review.payments": (17, UK)},
     "accountant-nl-government": {"payment_review.payments": (17, {})},
     "group-controller": {
-        "group_close.payments": (10, {**CHICAGO, **UK}),
+        "group_close.payments": (9, {**CHICAGO, **UK}),
         "group_close.group_totals": (15, SPANS),
         "group_close.group_totals_left_out": (8, LEFT_OUT),
     },
@@ -490,8 +613,8 @@ def test_each_persona_reads_its_purposes_over_the_landed_build(
         plan = compile_persona(access, columns, aggregates, purposes, persona, schema)
         db = connect(materialise(plan, landed_warehouse, directory))
         try:
-            shown = aggregate_columns(access, aggregates, persona)
-            found += breaches(db, persona, purposes, base, shown)
+            shown = aggregate_columns(access, aggregates, persona, base)
+            found += breaches(db, persona, purposes, shown)
             for rows in (t for t in plan.tables if isinstance(t, Rows)):
                 where = name(rows.purpose, rows.table)
                 by = "entity_id" if "entity_id" in {c.name for c in rows.columns} else "'all'"

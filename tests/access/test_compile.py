@@ -625,6 +625,8 @@ REFUSALS = {
     "purpose-named-as-the-persona": "the persona's catalog name",
     "purpose-id-that-is-no-slug": "an id is lowercase words joined by",
     "two-tables-of-one-name": "two tables share a name",
+    "a-kept-schema-refuses-a-persona-not-holding-it": "a schema the engine keeps",
+    "an-id-that-is-no-slug-refuses-a-persona-not-holding-it": "an id is lowercase words joined by",
 }
 
 
@@ -699,6 +701,13 @@ def refusal(
         persona = "auditor"
         by_id["audit"]["id"] = persona
     elif change == "purpose-id-that-is-no-slug":
+        review["id"] = "payment_review"
+    elif change == "a-kept-schema-refuses-a-persona-not-holding-it":
+        # The auditor holds only audit: a bad id anywhere refuses every persona's compile.
+        persona = "auditor"
+        review["id"] = "main"
+    elif change == "an-id-that-is-no-slug-refuses-a-persona-not-holding-it":
+        persona = "auditor"
         review["id"] = "payment_review"
     elif change == "two-tables-of-one-name":
         # Two aggregate tables of one name, each valid alone, so only the shared name is refused.
