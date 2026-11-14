@@ -31,9 +31,14 @@
           },
           "status": {"enum": ["not-implemented", "implemented"]},
           "awaits": {
-            "description": "For a not-implemented control whose proving tests exist: what they do not prove yet.",
-            "type": "string",
-            "minLength": 1
+            "description": "For a not-implemented control whose proving tests exist: the parameter of each of them that still skips, and what they prove without it.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["parameter", "until_then"],
+            "properties": {
+              "parameter": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+              "until_then": {"type": "string", "minLength": 1}
+            }
           }
         }
       }

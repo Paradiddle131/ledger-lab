@@ -1,6 +1,8 @@
 """The controls catalogue: shape, owners, layers, and no control claimed before its test exists."""
 
 import ast
+import subprocess
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -54,10 +56,29 @@ def test_an_implemented_control_has_its_proving_test(controls: dict[str, Any]) -
                 assert not exists, f"{control['id']}: its test exists; mark it implemented"
 
 
-def test_a_control_awaits_something_only_while_its_test_exists(controls: dict[str, Any]) -> None:
+def test_a_control_awaits_something_only_while_its_tests_exist(controls: dict[str, Any]) -> None:
     for control in controls["controls"]:
         if "awaits" in control:
-            assert any(
+            assert all(
                 name in defined_tests(path)
                 for path, name in (t.split("::") for t in control["proven_by"])
-            ), f"{control['id']}: awaits, yet no proving test exists"
+            ), f"{control['id']}: awaits, yet a proving test does not exist"
+
+
+def test_a_control_awaits_a_parameter_its_tests_still_skip(controls: dict[str, Any]) -> None:
+    """Each proving test of a control that awaits a parameter runs with it and skips, so the
+    control cannot go on awaiting once that proof runs."""
+    awaiting = [c for c in controls["controls"] if "awaits" in c]
+    assert awaiting, "no control awaits a parameter, so this test proves nothing"
+    nodes = [f"{t}[{c['awaits']['parameter']}]" for c in awaiting for t in c["proven_by"]]
+    done = subprocess.run(
+        [sys.executable, "-m", "pytest", "-rA", "-p", "no:cacheprovider", *nodes],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stdout[-2000:]
+    outcomes = [line.split()[0] for line in done.stdout.splitlines() if line.endswith(tuple(nodes))]
+    outcomes += [line.split()[0] for line in done.stdout.splitlines() if line.startswith("SKIPPED")]
+    assert outcomes == ["SKIPPED"] * len(nodes), done.stdout[-2000:]

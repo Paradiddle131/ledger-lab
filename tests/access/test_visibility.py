@@ -737,17 +737,18 @@ def engine(
     access: Doc,
     columns: Doc,
     aggregates: Doc,
-    warehouse: Path,
     tmp_path: Path,
 ) -> Iterator[Engine]:
     """The engine a persona's connection is opened on: the local engine over the dbt build of
-    the samples, or BigQuery in the lab's own project, skipped until it is written."""
+    the samples, or BigQuery in the lab's own project, skipped until it is written, before any
+    build, so the controls test can see it skip quickly."""
     if request.param == "bigquery":
         if lab_project_or_none() is None:
             pytest.skip("LEDGER_LAB_GCP_PROJECT is unset: the lab has no BigQuery to act in")
         # Named, not run: opening a persona on BigQuery and reading the source there are written
         # with the warehouse's own rules, which this engine acts on; nothing here calls GCP.
         pytest.skip("the BigQuery engine is not written yet: it comes with the warehouse's rules")
+    warehouse: Path = request.getfixturevalue("warehouse")
     local = LocalEngine(warehouse, Catalogues(access, columns, aggregates), tmp_path)
     yield local
     local.close()
