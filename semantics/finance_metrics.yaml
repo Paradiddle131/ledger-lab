@@ -1,0 +1,30 @@
+# The finance metrics the platform promises, each with the MetricFlow metrics that answer it
+# (`semantics/metricflow/`, each marked `role: headline` in its meta) or, where the public data
+# cannot answer it, why not. Consumers read this file to know what exists and what does not.
+# Shape: semantics/finance_metrics.schema.json.
+
+finance_metrics:
+  - id: spend-against-award
+    name: Spend against award
+    term: spend-against-award
+    metrics: [spend_against_award]
+  - id: remaining-commitment
+    name: Remaining commitment
+    term: remaining-commitment
+    metrics: [remaining_commitment, paid_over_award]
+  - id: days-to-pay
+    name: Days to pay
+    term: days-to-pay
+    not_definable: >-
+      Every public file serves one date per payment: Chicago's payments only the check date and
+      the UK spend only the payment date, so no file holds the invoice or voucher date the days
+      are counted from, and MetricFlow defines a metric only over a model that exists; the ERP's
+      postings, which will hold both, are not built yet.
+  - id: duplicate-payment-rate
+    name: Duplicate-payment rate
+    term: duplicate-payment-rate
+    metrics: [duplicate_payment_rate, duplicate_payment_amount_rate]
+  - id: constant-currency-spend
+    name: Constant-currency spend
+    term: constant-currency
+    metrics: [constant_currency_spend]

@@ -60,6 +60,10 @@ models:
         description: The day the first of them was approved.
       - name: last_approved_on
         description: The day the latest of them was approved.
+      - name: last_ends_on
+        description: >
+          The latest end date any row of the contract serves, as served (some lie centuries
+          ahead); null when no row serves one.
 
   - name: int_chicago__payments
     description: >

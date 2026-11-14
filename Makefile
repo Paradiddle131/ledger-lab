@@ -83,9 +83,10 @@ cost-check:
 # The reconciliation of Chicago's payments to their contracts' awards over the landed files: every
 # class's count and dollars, and each break class's digest, must equal the reviewed baseline. Needs
 # the Chicago set landed under LEDGER_LAB_LANDING; kept out of `make check`, which proves the
-# mechanism on the committed cut.
+# mechanism on the committed cut. The governed metrics, which read the reconciliation, run over the
+# same landed build here too, each against its pinned value (the full landing, every source).
 reconcile-landed: sync
-	uv run pytest -m landed tests/models/test_contract_reconciliation.py
+	uv run pytest -m landed tests/models/test_contract_reconciliation.py tests/semantics/test_metrics.py
 
 # Accept today's reconciliation over the landed files: writes its per-contract list of breaks beside
 # the landing (<landing>.reconciliation.csv, outside the repository), which a failing

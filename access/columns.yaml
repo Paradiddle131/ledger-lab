@@ -36,7 +36,7 @@ tags:
       - metric-owner
       - agent-operator
   - id: individual-id
-    marks: The keyed hash that stands for a vendor or payee who may be a person, and their vendor id.
+    marks: A keyed hash that stands for a vendor or payee who may be a person, their vendor id or a document they were paid on, alone in its column or among clear values.
     masking: hash
     clear: [payables-clerk, auditor]
     masked:
@@ -47,3 +47,30 @@ tags:
       - approver
       - metric-owner
       - agent-operator
+
+# The column list: per data product, the tag on each column its data contract (the `*.odcs.yaml`
+# whose id is the product's) classifies `personal`, keyed `<table>.<column>`. The contract's
+# classification is the one place that says a column is personal, and a test holds that the tagged
+# columns are exactly the contract's personal ones. A product with no contract yet lists only the
+# tags it awaits, and a tag that marks no column must be awaited. The models attach each tag to its
+# column when they create the table; `platform/gcp` reads only the tags above.
+#
+# A tag masks a whole column, and none of the three built-in rules masks only some rows, so the
+# payments mart splits its published payee: `vendor_person_key` holds the keyed hash and takes
+# `individual-id`, `vendor_organisation_name` holds the clear names and takes no tag, and
+# `document_reference`, untagged, shows the Chicago voucher numbers no hashed payee shares. The
+# published `vendor_name` and `document_number` stay, as the contract promises, and keep the tag.
+# What the masking does, and no more: it keeps a person's keyed hash from the masked readers. It
+# does not stop a reader who holds the publisher's file from finding a hashed payee, by a voucher
+# number (the masked value is an unsalted hash of a public number, reversed by hashing the file)
+# or by amount and date (ARCHITECTURE.md gives the counts).
+products:
+  payments:
+    columns:
+      payments.vendor_name: individual-id
+      payments.document_number: individual-id
+      payments.vendor_person_key: individual-id
+  # No public file carries bank details: the bank tags await the vendor bank accounts the ERP
+  # holds, which the ledger is posted from, and the ledger has no contract yet.
+  ledger:
+    awaiting: [bank-account-number, bank-account-holder]

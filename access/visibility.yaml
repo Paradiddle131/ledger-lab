@@ -11,17 +11,15 @@
 # never posts it); post (posts an approved entry); denied (none of these). Draft and post act
 # through the approval workflow and read nothing.
 # Column cells, what the persona observes in the columns a tag marks: clear (the value), masked
-# (the tag's masking rule applied), denied (it reads no rows of a product that can carry one).
+# (the tag's masking rule applied), denied (it reads no rows of a product with a tagged column in
+# the column list in access/columns.yaml). A cell is stated per tag but reached per product, so a
+# reader of payments states the bank tags too, which mark no column until the ERP's tables exist.
 # A persona that reads the warehouse but no such product still holds a masked-reader role on every
 # tag, so no query it may run fails on a tagged column; its cells are denied all the same.
 #
 # Two duty rules the cells cannot express:
 # - an approver never approves an entry they prompted, which is a property of each entry;
 # - the audit log the agent operator reads holds the agents' answers, which can quote their data.
-
-# The products that can carry a tagged column: payments and the ledger hold payee and bank fields;
-# the group products hold sums, metric definitions and the agents' records.
-tagged_products: [payments, ledger]
 
 personas:
   # Books and reconciles one entity: its payments in clear, no other entity's rows, the group only
