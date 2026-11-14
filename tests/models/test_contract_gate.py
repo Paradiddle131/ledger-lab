@@ -414,6 +414,16 @@ REFUSED_BY_VERSION: dict[str, tuple[Change, str, list[str]]] = {
         f"{SWAPPED} describes a column {IN} classifies personal and is classified nothing",
         ["2.0.0"],
     ),
+    "a column renamed and retyped over its published physical column": (
+        both(
+            rename("amount", "amount_v2"),
+            setting("amount_v2", "physicalName", "amount"),
+            setting("amount_v2", "physicalType", "FLOAT64"),
+        ),
+        "payments's payments.amount_v2 (payments.amount) describes a column origin/main describes"
+        " as payments's payments.amount",
+        ["2.0.0"],
+    ),
     "a property aliasing the personal column": (
         add("payee_label", physicalName="vendor_name"),
         "schema payments has two properties over column vendor_name",
