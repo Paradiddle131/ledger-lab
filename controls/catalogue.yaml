@@ -23,7 +23,7 @@ controls:
   - id: no-persona-holds-conflicting-duties
     layer: Identity and delegation
     owner: group-controller
-    asserts: No persona's grants in access/personas.yaml hold both sides of a conflicting pair in access/review.yaml that the grants can state, on one entity or on a group product; today that is entering an entry (draft) and approving it (post) on one ledger. Three pairs are reported as not checkable, never as passing, since no grant states one of their duties (creating and paying a vendor, making and deploying a change, administering access and running transactions). The agent account, which can act as every persona, holds entering and approving through the proposer and the approver; the access review shows it and the check does not refuse it.
+    asserts: "No persona's grants in access/personas.yaml hold both sides of a conflicting pair of duties in access/review.yaml that the grants can state, within the pair's scope; today that is entering an entry (draft) and approving an entry (post), on any ledgers. Three pairs are reported as not checkable, never as passing, since no grant states one of their duties (creating and paying a vendor, making and deploying a change, administering access and running transactions). The agent account, which can act as every persona, holds entering and approving through the proposer and the approver; the access review shows it and the check does not refuse it."
     proven_by:
       - tests/access/test_review.py::test_a_planted_conflict_fails_the_duty_check
       - tests/access/test_review.py::test_no_persona_holds_a_conflicting_pair

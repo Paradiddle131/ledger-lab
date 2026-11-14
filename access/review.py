@@ -1,5 +1,6 @@
 """The access review: every identity that can touch the lab's data or its controls, with its kind,
-owner, grants, tag reads, the personas it can act as and any conflicting pair of duties it holds.
+owner, catalogue grants, the roles the declared configuration gives it, its tag reads, the
+identities it can act as and any conflicting pair of duties it holds.
 
 `python -m access.review [path]` writes the report as Markdown, by default to
 `build/access-review.md`, which git ignores: the report is derived, so it is generated, never
@@ -9,23 +10,28 @@ tag readers (`access/columns.yaml`), the accounts, owners and conflicting pairs
 the same bytes. Identities are named by their catalogue ids, never by an account address, so the
 report holds no project, account or key.
 
-Conflicts are checked on what each identity holds itself; for an account that can act as
-personas the report also shows what the union of their grants would hold, which no check refuses.
+The review fails closed: it refuses to write a report when the configuration holds a resource
+whose type it does not know, a grant it cannot read member by member (an authoritative policy, a
+dataset access block), a principal it cannot attribute to a reviewed identity (anyone on the
+internet, a person's account, an outside principal, an address held in a local), or a service
+account it does not list. Conflicts are checked on each persona's catalogue grants; an identity
+that can act as others is shown holding what their grants together hold, which nothing refuses.
 """
 
+import importlib.util
 import json
+import re
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
-import hcl2
 import yaml
 from jsonschema import Draft202012Validator
 
 REPO = Path(__file__).resolve().parents[1]
-GCP = REPO / "platform/gcp"
 OUTPUT = REPO / "build/access-review.md"
 CATALOGUES = {
     "access": ("access/personas.yaml", "access/schema.json"),
@@ -33,21 +39,60 @@ CATALOGUES = {
     "review": ("access/review.yaml", "access/review.schema.json"),
 }
 
-# What a grant in platform/gcp lands on, by its resource type: one of them, or each with for_each.
+
+def _fences() -> ModuleType:
+    """`platform/fences.py`, the one reader of the `.tf` files, imported by its path: `platform/`
+    holds scripts run by path, and its name is the standard library's, so it is no package."""
+    if "fences" not in sys.modules:
+        spec = importlib.util.spec_from_file_location("fences", REPO / "platform/fences.py")
+        if spec is None or spec.loader is None:
+            raise ImportError("platform/fences.py cannot be loaded")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["fences"] = module
+        spec.loader.exec_module(module)
+    return sys.modules["fences"]
+
+
+fences = _fences()
+
+# Resource and data source types that grant nothing to a principal. Any other type that is not a
+# member or binding grant is refused, so a new kind of grant cannot pass unread.
+GRANTS_NOTHING = {
+    "data.google_billing_account",
+    "data.google_project",
+    "data.google_service_account",
+    "google_bigquery_datapolicy_data_policy",
+    "google_bigquery_dataset",
+    "google_billing_budget",
+    "google_data_catalog_policy_tag",
+    "google_data_catalog_taxonomy",
+    "google_eventarc_trigger",
+    "google_project_iam_custom_role",
+    "google_pubsub_topic",
+    "google_service_account",
+    "google_service_usage_consumer_quota_override",
+    "google_storage_bucket",
+    "google_workflows_workflow",
+}
+# What a grant lands on, by its resource type, and the attribute naming the one it lands on.
 TARGETS = {
-    "google_project_iam_member": "lab project",
-    "google_bigquery_dataset_iam_member": "warehouse dataset",
-    "google_data_catalog_policy_tag_iam_member": "policy tag",
-    "google_data_catalog_taxonomy_iam_member": "policy-tag taxonomy",
-    "google_storage_bucket_iam_member": "landing bucket",
-    "google_service_account_iam_member": "persona account",
+    "google_project": ("lab project", None),
+    "google_bigquery_dataset": ("warehouse dataset", "dataset_id"),
+    "google_data_catalog_policy_tag": ("policy tag", "policy_tag"),
+    "google_bigquery_datapolicy_data_policy": ("masking rule", "data_policy_id"),
+    "google_data_catalog_taxonomy": ("policy-tag taxonomy", None),
+    "google_storage_bucket": ("landing bucket", None),
+    "google_service_account": ("account", "service_account_id"),
 }
 PERSONA_ACCOUNTS = "google_service_account.persona"
-MINTS_TOKENS = "roles/iam.serviceAccountTokenCreator"
 CLEAR_READER = "roles/datacatalog.categoryFineGrainedReader"
+MASKED_READER = "roles/bigquerydatapolicy.maskedReader"
 KINDS = {"human": "human persona", "agent": "agent persona", "automation": "automation account"}
+INDEX = re.compile(r'\["([^"]+)"\]')
+CUSTOM_ROLE = re.compile(r"^\$\{google_project_iam_custom_role\.([a-z_]+)\.name\}$")
 
 Doc = dict[str, Any]
+Config = Mapping[str, list[Any]]
 
 
 @dataclass(frozen=True, order=True)
@@ -59,9 +104,9 @@ class Grant:
     access: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, order=True)
 class CloudGrant:
-    """A role an account holds in the project, as platform/gcp declares it or as granted by hand."""
+    """A role an identity holds, as the configuration declares it or as granted by hand."""
 
     role: str
     on: str
@@ -70,10 +115,11 @@ class CloudGrant:
 
 @dataclass(frozen=True)
 class Conflict:
-    """A checkable pair held on one entity's product, or on a group product (entity None)."""
+    """A checkable pair whose two sides are held, with the entities they are held on (None for a
+    group product)."""
 
     rule: str
-    entity: str | None
+    entities: tuple[str | None, ...]
 
 
 @dataclass(frozen=True)
@@ -89,7 +135,7 @@ class Reviewed:
     acts_as: tuple[str, ...]
     limits: tuple[str, ...]
     conflicts: tuple[Conflict, ...]
-    # For an account acting as personas: each conflict the union of their grants holds.
+    # Each conflict its own grants and those of the identities it can act as hold together.
     conflicts_acting: tuple[Conflict, ...]
 
 
@@ -107,23 +153,14 @@ def load_catalogues() -> dict[str, Doc]:
 
 
 def load_config() -> dict[str, list[Any]]:
-    """Every top-level block of every `.tf` file, merged by kind, as fences.py reads them."""
-    merged: dict[str, list[Any]] = {}
-    for path in sorted(GCP.glob("*.tf")):
-        with path.open() as handle:
-            for key, value in hcl2.load(handle).items():
-                if isinstance(value, list):
-                    merged.setdefault(key, []).extend(value)
-    return merged
+    return fences.load()
 
 
-def unquote(value: Any) -> Any:
-    if isinstance(value, str) and len(value) >= 2 and value[0] == value[-1] == '"':
-        return value[1:-1]
-    return value
+def unquote(value: Any) -> str:
+    return str(fences.unquote(value))
 
 
-def blocks(config: Mapping[str, list[Any]], kind: str) -> dict[str, dict[str, Any]]:
+def blocks(config: Config, kind: str) -> dict[str, dict[str, Any]]:
     """Resources (or data sources, with `data.` before the address) by address."""
     prefix = "data." if kind == "data" else ""
     found = {}
@@ -135,16 +172,21 @@ def blocks(config: Mapping[str, list[Any]], kind: str) -> dict[str, dict[str, An
 
 
 def conflicts(grants: Iterable[Grant], rules: Sequence[Doc]) -> list[Conflict]:
-    """Every checkable pair the grants hold both sides of on one entity, or on a group product."""
-    held = {(g.product, g.access, g.entity) for g in grants}
-    entities = {g.entity for g in grants}
+    """Every checkable pair the grants hold both sides of, within the pair's scope."""
+    held = list(grants)
     found = []
     for rule in rules:
         if "sides" not in rule:
             continue
-        for entity in sorted(entities, key=lambda e: e or ""):
-            if all((s["product"], s["access"], entity) in held for s in rule["sides"]):
-                found.append(Conflict(rule["id"], entity))
+        on = [
+            {g.entity for g in held if (g.product, g.access) == (s["product"], s["access"])}
+            for s in rule["sides"]
+        ]
+        if rule["scope"] == "same-entity":
+            on = [set.intersection(*on)] * len(on)
+        if all(on):
+            entities = sorted(set().union(*on), key=lambda e: e or "")
+            found.append(Conflict(rule["id"], tuple(entities)))
     return found
 
 
@@ -155,67 +197,203 @@ def persona_grants(access: Doc) -> dict[str, tuple[Grant, ...]]:
     return {persona: tuple(held) for persona, held in grants.items()}
 
 
-def tag_reads(columns: Doc, persona: str) -> dict[str, str]:
+def local_map(config: Config, name: str) -> dict[str, str]:
+    values = [entry[name] for entry in config.get("locals", []) if name in entry]
+    if len(values) != 1:
+        raise ValueError(f"local.{name}: {len(values)} defined, expected one")
+    return {unquote(k): unquote(v) for k, v in values[0].items()}
+
+
+def instances(
+    for_each: str | None, docs: Mapping[str, Doc], config: Config
+) -> list[dict[str, str]]:
+    """Each instance a `for_each` makes, as the `each.` references it substitutes, or one instance
+    marked `every` for a for_each over a whole resource collection.
+
+    The generated maps are evaluated here as `platform/gcp` writes them; the access rules tests pin
+    their expressions and have OpenTofu evaluate them against the catalogues.
+    """
+    if for_each is None:
+        return [{}]
+    access, columns = docs["access"], docs["columns"]
+    if for_each == "${local.dataset_grants}" or for_each == "${local.warehouse_readers}":
+        roles = local_map(config, "dataset_roles")
+        grants = sorted(
+            {
+                (g["persona"], g["product"].replace("-", "_"), roles[g["access"]])
+                for g in access["grants"]
+                if g["access"] in roles
+            }
+        )
+        if for_each == "${local.warehouse_readers}":
+            return [{"each.key": p} for p in sorted({p for p, _, _ in grants})]
+        return [
+            {"each.value.persona": p, "each.value.dataset": d, "each.value.role": r}
+            for p, d, r in grants
+        ]
+    for kind in ("clear", "masked"):
+        if for_each == f"${{local.{kind}_readers}}":
+            return [
+                {"each.value.persona": p, "each.value.tag": t["id"]}
+                for t in columns["tags"]
+                for p in t[kind]
+            ]
+    if for_each == f"${{{PERSONA_ACCOUNTS}}}":
+        return [
+            {"each.key": p["id"], "each.value.name": f'{PERSONA_ACCOUNTS}["{p["id"]}"].name'}
+            for p in access["personas"]
+        ]
+    if re.fullmatch(r"\$\{google_[a-z_]+\.[a-z_]+\}", for_each):
+        return [{"every": "every"}]
+    raise ValueError(f"no reading of for_each {for_each}")
+
+
+def substitute(expression: str, instance: Mapping[str, str]) -> str:
+    for ref, value in instance.items():
+        if ref.startswith("each."):
+            quoted = value if ref == "each.value.name" else f'"{value}"'
+            expression = expression.replace(ref, quoted)
+    return expression
+
+
+def attribute(member: str, addresses: Mapping[str, str], personas: set[str]) -> str | None:
+    """The reviewed identity a member expression names, or None."""
+    for address, identity in addresses.items():
+        if member in (f"serviceAccount:${{{address}.email}}", f"${{{address}.member}}"):
+            return identity
+    found = re.fullmatch(
+        r'(?:serviceAccount:\$\{google_service_account\.persona\["([a-z0-9-]+)"\]\.email\}'
+        r'|\$\{google_service_account\.persona\["([a-z0-9-]+)"\]\.member\})',
+        member,
+    )
+    persona = found and (found[1] or found[2])
+    return persona if persona in personas else None
+
+
+def target(rtype: str, body: Mapping[str, Any], every: bool, addresses: Mapping[str, str]) -> str:
+    noun, attribute_name = TARGETS[rtype]
+    if every:
+        return f"every {noun}"
+    if attribute_name is None:
+        return f"the {noun}"
+    expression = unquote(body[attribute_name])
+    if rtype == "google_service_account":
+        for address, identity in addresses.items():
+            if expression in (f"${{{address}.name}}", f"${{{address}.id}}"):
+                return f"account {identity}"
+    index = INDEX.search(expression)
+    if index is None:
+        raise ValueError(f"cannot tell which {noun} {expression} names")
+    return f"{noun} {index[1]}"
+
+
+def declared_grants(
+    docs: Mapping[str, Doc], config: Config
+) -> tuple[dict[str, list[CloudGrant]], dict[str, set[str]]]:
+    """Every role the configuration grants, by identity, and whom each identity can act as.
+
+    Refuses the configuration when it declares a service account the review does not list, a
+    resource of a type the review does not know, a grant it cannot read member by member, or a
+    member no reviewed identity is.
+    """
+    personas = {p["id"] for p in docs["access"]["personas"]}
+    accounts = docs["review"]["accounts"]
+    resources, data = blocks(config, "resource"), blocks(config, "data")
+    service_accounts = {
+        a for a in [*resources, *data] if a.split(".")[-2] == "google_service_account"
+    }
+    listed = {a["declared"] for a in accounts}
+    if service_accounts - listed - {PERSONA_ACCOUNTS}:
+        unlisted = service_accounts - listed - {PERSONA_ACCOUNTS}
+        raise ValueError(f"platform/gcp declares accounts the review does not list: {unlisted}")
+    if listed - service_accounts:
+        raise ValueError(
+            f"access/review.yaml lists undeclared accounts: {listed - service_accounts}"
+        )
+    addresses = {a["declared"]: a["id"] for a in accounts}
+    roles = {
+        address.split(".")[1]: f"{unquote(body['title'])} (custom role)"
+        for address, body in resources.items()
+        if address.startswith("google_project_iam_custom_role.")
+    }
+    refused: list[str] = []
+    for address, body in sorted({**resources, **data}.items()):
+        rtype = address.rsplit(".", 1)[0]
+        grant = re.search(r"_iam_(member|binding)$", rtype)
+        if rtype == "google_bigquery_dataset" and "access" in body:
+            refused.append(f"{address}: an access block, which the review cannot read")
+        elif grant is None and rtype not in GRANTS_NOTHING:
+            refused.append(f"{address}: a {rtype}, which the review does not know to grant nothing")
+        elif grant and rtype[: grant.start()] not in TARGETS:
+            refused.append(f"{address}: a grant on a resource the review has no words for")
+    found: dict[str, list[CloudGrant]] = {i: [] for i in [*sorted(personas), *addresses.values()]}
+    acts_as: dict[str, set[str]] = {i: set() for i in found}
+    for address, body in sorted(resources.items()):
+        rtype, _ = address.split(".", 1)
+        grant = re.search(r"_iam_(member|binding)$", rtype)
+        if grant is None or rtype[: grant.start()] not in TARGETS:
+            continue
+        base = rtype[: grant.start()]
+        members = [body["member"]] if grant[1] == "member" else list(body["members"])
+        for instance in instances(body.get("for_each"), docs, config):
+            role = unquote(substitute(unquote(body["role"]), instance))
+            role = role[3:-2] if role.startswith('${"') else role
+            custom = CUSTOM_ROLE.fullmatch(role)
+            role = roles.get(custom[1], role) if custom else role
+            subbed = {
+                k: substitute(unquote(v), instance) for k, v in body.items() if k != "for_each"
+            }
+            on = target(base, subbed, "every" in instance, addresses)
+            for member in members:
+                who = attribute(substitute(unquote(member), instance), addresses, personas)
+                if who is None:
+                    refused.append(f"{address}: a member the review cannot attribute")
+                    continue
+                found[who].append(CloudGrant(role, on, True))
+                if base == "google_service_account":
+                    if "every" in instance:
+                        refused.append(f"{address}: a role on every account of a collection")
+                    else:
+                        acts_as[who].add(on.removeprefix("account "))
+    if refused:
+        raise ValueError(
+            "the review refuses the configuration:\n" + "\n".join(sorted(set(refused)))
+        )
+    return found, acts_as
+
+
+def reachable(acts_as: Mapping[str, set[str]], start: str) -> list[str]:
+    """Every identity `start` can act as, directly or through another it can act as."""
+    seen: set[str] = set()
+    todo = sorted(acts_as[start])
+    while todo:
+        identity = todo.pop()
+        if identity not in seen and identity != start:
+            seen.add(identity)
+            todo += sorted(acts_as.get(identity, set()))
+    return sorted(seen)
+
+
+def tag_reads(columns: Doc, cloud: Sequence[CloudGrant]) -> dict[str, str]:
+    """What the identity reads in each tagged column, from the roles it holds."""
+    held = {(c.role, c.on) for c in cloud}
     reads = {}
     for tag in columns["tags"]:
-        if persona in tag["clear"]:
+        clear = {(CLEAR_READER, f"policy tag {tag['id']}"), (CLEAR_READER, "every policy tag")}
+        masked = {
+            (MASKED_READER, f"masking rule {tag['id']}"),
+            (MASKED_READER, "every masking rule"),
+        }
+        if held & clear:
             reads[tag["id"]] = "clear"
-        elif persona in tag["masked"]:
+        elif held & masked:
             reads[tag["id"]] = f"masked ({tag['masking']})"
         else:
             reads[tag["id"]] = "no role"
     return reads
 
 
-def account_grants(
-    config: Mapping[str, list[Any]], accounts: Sequence[Doc], personas: Sequence[str]
-) -> dict[str, tuple[list[CloudGrant], list[str]]]:
-    """Each account's declared grants and the personas it may act as, read from platform/gcp.
-
-    Refuses a service account platform/gcp declares that is neither a persona account nor listed
-    in access/review.yaml, and a grant to an account it cannot describe, so none is left out.
-    """
-    declared = set(blocks(config, "resource")) | set(blocks(config, "data"))
-    service_accounts = {a for a in declared if a.split(".")[-2] == "google_service_account"}
-    listed = {a["declared"] for a in accounts}
-    unlisted = service_accounts - listed - {PERSONA_ACCOUNTS}
-    if unlisted:
-        raise ValueError(f"platform/gcp declares accounts the review does not list: {unlisted}")
-    if listed - service_accounts:
-        raise ValueError(
-            f"access/review.yaml lists undeclared accounts: {listed - service_accounts}"
-        )
-    member = {f"serviceAccount:${{{a['declared']}.email}}": a["id"] for a in accounts}
-    roles: dict[str, str] = {
-        f"${{{address}.name}}": f"{unquote(body['title'])} (custom role)"
-        for address, body in blocks(config, "resource").items()
-        if address.startswith("google_project_iam_custom_role.")
-    }
-    found: dict[str, tuple[list[CloudGrant], list[str]]] = {a["id"]: ([], []) for a in accounts}
-    for address, body in sorted(blocks(config, "resource").items()):
-        rtype = address.split(".")[0]
-        if not rtype.endswith("_iam_member"):
-            continue
-        who = member.get(unquote(body["member"]))
-        if who is None:
-            continue
-        if rtype not in TARGETS:
-            raise ValueError(f"{address}: no words for what a {rtype} grant lands on")
-        role = str(unquote(body["role"]))
-        each = "for_each" in body
-        found[who][0].append(
-            CloudGrant(
-                roles.get(role, role), f"{'every' if each else 'the'} {TARGETS[rtype]}", True
-            )
-        )
-        if role == MINTS_TOKENS:
-            if body.get("for_each") != f"${{{PERSONA_ACCOUNTS}}}":
-                raise ValueError(f"{address}: token creation on an account that is no persona's")
-            found[who][1].extend(personas)
-    return found
-
-
-def review(docs: Mapping[str, Doc], config: Mapping[str, list[Any]]) -> list[Reviewed]:
+def review(docs: Mapping[str, Doc], config: Config) -> list[Reviewed]:
     """Every identity: the personas in catalogue order, then the accounts."""
     access, columns, data = docs["access"], docs["columns"], docs["review"]
     rules = data["conflicts"]
@@ -225,74 +403,66 @@ def review(docs: Mapping[str, Doc], config: Mapping[str, list[Any]]) -> list[Rev
         # A side on no product would never be held, so its pair would pass unseen.
         raise ValueError(f"a conflicting pair names a product the catalogue lacks: {unknown}")
     owners = data["owners"]
-    identities = [p["id"] for p in access["personas"]] + [a["id"] for a in data["accounts"]]
+    entries: list[tuple[Doc, bool]] = [(p, True) for p in access["personas"]]
+    entries += [(a, False) for a in data["accounts"]]
+    identities = [e["id"] for e, _ in entries]
     if sorted(owners) != sorted(identities) or len(set(identities)) != len(identities):
         raise ValueError("access/review.yaml must name one owner for each identity, and no other")
     grants = persona_grants(access)
-    reviewed = [
-        Reviewed(
-            id=p["id"],
-            kind=KINDS[p["kind"]],
-            owner=owners[p["id"]],
-            duties=p["duties"],
-            reach="",
-            grants=grants[p["id"]],
-            tags=tag_reads(columns, p["id"]),
-            cloud=(),
-            acts_as=(),
-            limits=(),
-            conflicts=tuple(conflicts(grants[p["id"]], rules)),
-            conflicts_acting=(),
-        )
-        for p in access["personas"]
-    ]
-    cloud = account_grants(config, data["accounts"], list(grants))
-    for account in data["accounts"]:
-        declared, acts_as = cloud[account["id"]]
+    cloud, acts_as = declared_grants(docs, config)
+    reviewed = []
+    for entry, persona in entries:
+        held = grants[entry["id"]] if persona else ()
         by_hand = [
             CloudGrant(role, "the lab project", False)
-            for role in account.get("project_roles_granted_by_hand", [])
+            for role in entry.get("project_roles_granted_by_hand", [])
         ]
-        clear_on_every_tag = CloudGrant(CLEAR_READER, "every policy tag", True) in declared
-        acting = [g for persona in acts_as for g in grants[persona]]
+        rows = sorted(cloud[entry["id"]]) + by_hand
+        acting = reachable(acts_as, entry["id"])
         reviewed.append(
             Reviewed(
-                id=account["id"],
-                kind=KINDS[account["kind"]],
-                owner=owners[account["id"]],
-                duties=account["duties"],
-                reach=account["reach"],
-                grants=(),
-                tags={
-                    t["id"]: "clear" if clear_on_every_tag else "no role" for t in columns["tags"]
-                },
-                cloud=tuple(declared + by_hand),
-                acts_as=tuple(acts_as),
-                limits=tuple(account["limits"]),
-                conflicts=(),
-                conflicts_acting=tuple(conflicts(acting, rules)),
+                id=entry["id"],
+                kind=KINDS[entry["kind"]],
+                owner=owners[entry["id"]],
+                duties=entry["duties"],
+                reach=entry.get("reach", ""),
+                grants=held,
+                tags=tag_reads(columns, rows),
+                cloud=tuple(rows),
+                acts_as=tuple(acting),
+                limits=tuple(entry.get("limits", [])),
+                conflicts=tuple(conflicts(held, rules)),
+                conflicts_acting=tuple(
+                    c
+                    for c in conflicts(
+                        [*held, *(g for i in acting for g in grants.get(i, ()))], rules
+                    )
+                    if acting and c not in conflicts(held, rules)
+                ),
             )
         )
     return reviewed
 
 
 def where(conflict: Conflict) -> str:
-    return f"`{conflict.rule}` on {conflict.entity or 'the group'}"
+    on = " and ".join(e or "the group" for e in conflict.entities)
+    return f"`{conflict.rule}` on {on}"
 
 
-def holders(conflict: Conflict, rules: Sequence[Doc], access: Doc, acts_as: Sequence[str]) -> str:
-    """Which of the personas an account acts as give each side of the conflict."""
+def holders(conflict: Conflict, rules: Sequence[Doc], access: Doc, who: Sequence[str]) -> str:
+    """Which of the identity itself and those it acts as give each side of the conflict."""
     (rule,) = [r for r in rules if r["id"] == conflict.rule]
     sides = []
     for side in rule["sides"]:
-        who = sorted(
-            g["persona"]
-            for g in access["grants"]
-            if g["persona"] in acts_as
-            and (g["product"], g["access"], g.get("entity"))
-            == (side["product"], side["access"], conflict.entity)
+        giving = sorted(
+            {
+                g["persona"]
+                for g in access["grants"]
+                if g["persona"] in who
+                and (g["product"], g["access"]) == (side["product"], side["access"])
+            }
         )
-        sides.append(f"{side['access']} {side['product']} as {', '.join(f'`{p}`' for p in who)}")
+        sides.append(f"{side['access']} {side['product']} as {', '.join(f'`{p}`' for p in giving)}")
     return "; ".join(sides)
 
 
@@ -308,14 +478,18 @@ GLOSSARY = [
     ("post", "posts an approved entry"),
     ("Tagged column", "a column marked as holding bank details or standing for a person"),
     ("clear, masked", "reads a tagged column's value, or the value with its masking rule applied"),
-    ("Acts as", "may mint the persona's token and hold that persona's grants"),
+    ("Acts as", "may mint the identity's token or run as it, and so hold its grants"),
+    ("Declared", "written in the configuration, which the project owner applies"),
     ("Conflicting duties", "two duties one identity must not hold together"),
     ("Not checkable", "a pair the catalogues cannot state, so the review neither passes nor fails"),
 ]
 
 
 def render(docs: Mapping[str, Doc], reviewed: Sequence[Reviewed]) -> str:
-    access, rules = docs["access"], docs["review"]["conflicts"]
+    access, rules, owners = docs["access"], docs["review"]["conflicts"], docs["review"]["owners"]
+    checkable = [r for r in rules if "sides" in r]
+    unchecked = len(rules) - len(checkable)
+    mutual = sorted(f"`{a}` and `{b}`" for a, b in owners.items() if a < b and owners.get(b) == a)
     lines = [
         "# Access review",
         "",
@@ -323,23 +497,34 @@ def render(docs: Mapping[str, Doc], reviewed: Sequence[Reviewed]) -> str:
         "catalogues in `access/` and the declared configuration in `platform/gcp/`, "
         "never from the live project.",
         "",
-        "| Identity | Kind | Owner | Acts as | Conflicts |",
-        "| --- | --- | --- | --- | --- |",
+        "A role marked declared is written in the configuration, which the project owner applies, "
+        "so it may not be in force yet; a role marked granted by hand is recorded from the "
+        "project owner's statements, and this review does not verify it.",
+        "",
+        "The project owner, who applies the configuration and administers access, is outside the "
+        "catalogue and is not reviewed here.",
+    ]
+    lines += [f"{pair} own each other." for pair in mutual]
+    lines += [
+        "",
+        "| Identity | Kind | Owner | Acts as | Checked conflicts | Not checkable |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for r in reviewed:
-        acts = f"{len(r.acts_as)} personas" if r.acts_as else "nobody"
+        acts = f"{len(r.acts_as)} identities" if r.acts_as else "nobody"
         held = [where(c) for c in r.conflicts]
-        held += [f"{where(c)} acting as personas" for c in r.conflicts_acting]
+        held += [f"{where(c)} acting as others" for c in r.conflicts_acting]
+        found = "; ".join(held) or f"none found in {len(checkable)} checked"
         lines.append(
-            f"| `{r.id}` | {r.kind} | `{r.owner}` | {acts} | {'; '.join(held) or 'none'} |"
+            f"| `{r.id}` | {r.kind} | `{r.owner}` | {acts} | {found} | {unchecked} pairs |"
         )
-    checkable = [r for r in rules if "sides" in r]
     lines += ["", "## Conflicting duties", ""]
     for rule in rules:
         pair = " and ".join(rule["duties"])
         if "sides" in rule:
             sides = " and ".join(f"{s['access']} on {s['product']}" for s in rule["sides"])
-            lines.append(f"- **{pair}** (`{rule['id']}`): checked, as {sides} on one entity.")
+            scope = "on one entity" if rule["scope"] == "same-entity" else "on any entities"
+            lines.append(f"- **{pair}** (`{rule['id']}`): checked, as {sides} {scope}.")
         else:
             lines.append(f"- **{pair}** (`{rule['id']}`): not checkable. {rule['not_checkable']}")
     for r in reviewed:
@@ -350,8 +535,6 @@ def render(docs: Mapping[str, Doc], reviewed: Sequence[Reviewed]) -> str:
         if r.grants:
             lines += ["", "| Product | Entity | Access |", "| --- | --- | --- |"]
             lines += [f"| {g.product} | {g.entity or 'group'} | {g.access} |" for g in r.grants]
-        elif not r.cloud:
-            lines += ["", "No grant on any data product."]
         if r.cloud:
             lines += ["", "| Role | On | Source |", "| --- | --- | --- |"]
             lines += [
@@ -359,26 +542,32 @@ def render(docs: Mapping[str, Doc], reviewed: Sequence[Reviewed]) -> str:
                 f"{'declared' if c.declared else 'granted by hand, not declared'} |"
                 for c in r.cloud
             ]
+        if not r.grants and not r.cloud:
+            lines += ["", "No grant and no role."]
         tags = ", ".join(f"{tag} {read}" for tag, read in r.tags.items())
         lines += ["", f"- Tagged columns: {tags}"]
         if r.acts_as:
             names = ", ".join(f"`{p}`" for p in r.acts_as)
-            lines.append(f"- Acts as: every persona ({names}), holding each one's grants in turn")
+            lines.append(f"- Acts as: {names}, holding each one's grants in turn")
+            owning = sorted({owners[i] for i in owners} & set(r.acts_as))
+            if r.owner in r.acts_as:
+                others = ", ".join(f"`{o}`" for o in owning if o != r.owner)
+                lines.append(
+                    f"- Acts as its own owner, `{r.owner}`, and every other owner ({others})"
+                )
         else:
             lines.append("- Acts as: nobody")
         for limit in r.limits:
             lines.append(f"- Limit: {limit}")
-        if r.conflicts:
-            lines += [f"- **Conflict:** holds {where(c)}" for c in r.conflicts]
-        else:
-            ids = ", ".join(f"`{rule['id']}`" for rule in checkable)
-            lines.append(f"- Conflicts: none of the checked pairs ({ids})")
+        lines += [f"- **Conflict:** holds {where(c)}" for c in r.conflicts]
         lines += [
-            f"- **Conflict acting as personas, not refused:** {where(c)}: "
-            f"{holders(c, rules, access, r.acts_as)}"
+            f"- **Conflict acting as others, not refused:** {where(c)}: "
+            f"{holders(c, rules, access, [r.id, *r.acts_as])}"
             for c in r.conflicts_acting
         ]
-        unchecked = len(rules) - len(checkable)
+        if not r.conflicts and not r.conflicts_acting:
+            ids = ", ".join(f"`{rule['id']}`" for rule in checkable)
+            lines.append(f"- Conflicts: none found in the checked pairs ({ids})")
         lines.append(f"- Not checkable: {unchecked} of the {len(rules)} pairs, listed above")
     lines += ["", "## Glossary", ""]
     lines += [f"- **{term}**: {meaning}." for term, meaning in GLOSSARY]

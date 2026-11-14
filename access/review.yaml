@@ -13,7 +13,7 @@ accounts:
     kind: automation
     declared: data.google_service_account.agent
     duties: The sessions' credential; builds the warehouse models, lands the verified files and acts as any persona in the tests.
-    reach: The largest concentration of access in the lab; it reads and replaces every table of every warehouse dataset, reads every tagged column in clear, writes the landing bucket and can act as every persona.
+    reach: The largest concentration of access in the lab; the data editor role granted by hand on the project reads and changes every dataset in it, the billing export's included, and creates datasets; its declared builder role reads and replaces every table of every warehouse dataset; it reads every tagged column in clear, writes the landing bucket and can act as every persona, its own owner and every other owner among them.
     project_roles_granted_by_hand:
       - roles/viewer
       - roles/bigquery.jobUser
@@ -26,7 +26,7 @@ accounts:
       - Its builder role sets no dataset or table access and deletes no dataset; setting a row access policy's grantees is its one access write.
       - It mints tokens on the persona accounts only, so it acts as a persona and as nobody else, and acting as one it holds that persona's grants alone.
       - None of its declared roles holds a permission that moves a spend fence.
-      - Not limited by any declaration, the data editor role granted by hand on the project reads and changes every dataset in it, the billing export's included.
+      - Not limited yet, acting as the proposer and the approver it can enter an entry and approve it alone; that ends with the approval workflow, which gives the proposer and the approver identities no one account acts as both of, and refuses an approval from the identity that drafted the entry.
   - id: kill-switch
     kind: automation
     declared: google_service_account.kill_switch
@@ -56,14 +56,18 @@ owners:
   kill-switch: group-controller
 
 # Pairs of duties no identity may hold together, in business words. A pair the grants can state
-# names its two sides as a product and an access in access/personas.yaml, and an identity holding
-# both on one entity's product (or on a group product) holds the conflict; a pair they cannot
-# state says why, and the review reports it as not checkable, never as passing.
+# names its two sides as a product and an access in access/personas.yaml, and a scope: an identity
+# holding both on the same entity (same-entity), or on any entities at all (any-entity), holds the
+# conflict. A pair they cannot state says why, and the review reports it as not checkable, never as
+# passing. The access review checks each persona's grants against these, and the visibility
+# matrix test checks each persona's cells against the same pairs.
 conflicts:
   - id: enter-and-approve-entry
-    duties: [post entry, approve entry]
-    # In the lab an entry is entered by drafting it and approved by posting it: the approver posts
-    # what it approves, so the maker is the one who drafts and the checker the one who posts.
+    duties: [enter an entry (draft), approve an entry (post)]
+    # The issue's "post entry and approve entry": in the lab the maker enters an entry by drafting
+    # it and the checker approves it by posting it. Any entity: one who approves entries drafts on
+    # no ledger, so no one checks entries in one ledger and makes them in another.
+    scope: any-entity
     sides:
       - {product: ledger, access: draft}
       - {product: ledger, access: post}

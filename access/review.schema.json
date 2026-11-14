@@ -48,7 +48,10 @@
         "type": "object",
         "additionalProperties": false,
         "required": ["id", "duties"],
-        "oneOf": [{"required": ["sides"]}, {"required": ["not_checkable"]}],
+        "oneOf": [
+          {"required": ["sides", "scope"], "not": {"required": ["not_checkable"]}},
+          {"required": ["not_checkable"], "not": {"anyOf": [{"required": ["sides"]}, {"required": ["scope"]}]}}
+        ],
         "properties": {
           "id": {"$ref": "#/$defs/slug"},
           "duties": {
@@ -73,6 +76,7 @@
               }
             }
           },
+          "scope": {"enum": ["same-entity", "any-entity"]},
           "not_checkable": {"$ref": "#/$defs/text"}
         }
       }

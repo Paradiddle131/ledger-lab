@@ -119,7 +119,7 @@ Before applying, the owner enables the APIs the definitions use, which the agent
 The Data Lineage API (`datalineage.googleapis.com`) and the Dataplex API (`dataplex.googleapis.com`) stay off: lineage parsing and lineage metadata are billed.
 Each persona account's id is its id in `access/personas.yaml`, so renaming or removing a persona there deletes that account at the next apply, and a rename creates a new one in its place.
 
-The access review lists every identity that can touch the lab's data or its controls (each persona, the agent account and the kill-switch account) with its kind, owner, grants, tagged-column reads, the personas it can act as and any conflicting pair of duties it holds, generated offline from the catalogues in `access/` and the definitions in `platform/gcp/`:
+The access review lists every identity that can touch the lab's data or its controls (each persona, the agent account and the kill-switch account) with its kind, owner, catalogue grants, the roles the definitions give it, its tagged-column reads, the identities it can act as and any conflicting pair of duties it holds, generated offline from the catalogues in `access/` and the definitions in `platform/gcp/`; it refuses to write a report when the definitions hold a grant it cannot attribute to one of those identities:
 
 ```bash
 uv run python -m access.review              # writes build/access-review.md
