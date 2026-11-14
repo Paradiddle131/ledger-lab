@@ -1,0 +1,78 @@
+# What the access review reads beside the persona catalogue, the tag readers and the declared
+# configuration in platform/gcp: the identities that are not personas, the owner of every identity,
+# and the pairs of duties no identity may hold together. `python -m access.review` writes the
+# report from these; tests/access/test_review.py checks it. Shape: access/review.schema.json.
+
+# The service accounts platform/gcp declares or references beside the persona accounts, each by
+# the address of its declaration there, so a test can hold that no account is left out. Their
+# grants are read from platform/gcp, except the project roles the owner granted the agent account
+# by hand when making it, which no file declares and so nothing offline checks; `make cost-check`
+# asks the live project whether that account holds a permission that moves a spend fence.
+accounts:
+  - id: agent
+    kind: automation
+    declared: data.google_service_account.agent
+    duties: The sessions' credential; builds the warehouse models, lands the verified files and acts as any persona in the tests.
+    reach: The largest concentration of access in the lab; it reads and replaces every table of every warehouse dataset, reads every tagged column in clear, writes the landing bucket and can act as every persona.
+    project_roles_granted_by_hand:
+      - roles/viewer
+      - roles/bigquery.jobUser
+      - roles/bigquery.dataEditor
+      - roles/serviceusage.serviceUsageConsumer
+    # Each limit is held by a test of the access rules in tests/platform, except the last, which
+    # says what nothing limits.
+    limits:
+      - Its declared rights reach only the warehouse datasets, the policy-tag taxonomy and its tags, the landing bucket and the persona accounts, never the project.
+      - Its builder role sets no dataset or table access and deletes no dataset; setting a row access policy's grantees is its one access write.
+      - It mints tokens on the persona accounts only, so it acts as a persona and as nobody else, and acting as one it holds that persona's grants alone.
+      - None of its declared roles holds a permission that moves a spend fence.
+      - Not limited by any declaration, the data editor role granted by hand on the project reads and changes every dataset in it, the billing export's included.
+  - id: kill-switch
+    kind: automation
+    declared: google_service_account.kill_switch
+    duties: Runs the kill-switch workflow, which unlinks billing from the project once the month's cost passes the kill threshold.
+    reach: It can unlink billing from the project, which stops every paid service in it.
+    limits:
+      - It holds three project roles, for billing, receiving events and invoking workflows, and no grant on any dataset, tag or account, so it reads no data.
+
+# The human persona who answers for each identity's access in a review: confirms that every grant
+# is still needed and asks for any change, which the owner of the project applies. The group
+# controller owns the control that each persona sees what the catalogue says, so owns the personas'
+# access, except its own, which goes to the auditor, who reads everything and changes nothing; the
+# agent operator runs the agents, so owns the agent persona and the account they run on; the group
+# controller owns the spend fences, so owns the kill switch. No identity owns itself.
+owners:
+  accountant-chicago: group-controller
+  accountant-uk-transport: group-controller
+  accountant-nl-government: group-controller
+  group-controller: auditor
+  payables-clerk: group-controller
+  approver: group-controller
+  auditor: group-controller
+  metric-owner: group-controller
+  agent-operator: group-controller
+  proposer: agent-operator
+  agent: agent-operator
+  kill-switch: group-controller
+
+# Pairs of duties no identity may hold together, in business words. A pair the grants can state
+# names its two sides as a product and an access in access/personas.yaml, and an identity holding
+# both on one entity's product (or on a group product) holds the conflict; a pair they cannot
+# state says why, and the review reports it as not checkable, never as passing.
+conflicts:
+  - id: enter-and-approve-entry
+    duties: [post entry, approve entry]
+    # In the lab an entry is entered by drafting it and approved by posting it: the approver posts
+    # what it approves, so the maker is the one who drafts and the checker the one who posts.
+    sides:
+      - {product: ledger, access: draft}
+      - {product: ledger, access: post}
+  - id: create-and-pay-vendor
+    duties: [create vendor, pay vendor]
+    not_checkable: No grant creates a vendor, since vendors arrive with the landed public records, and none pays one, since the payables clerk reads the payments its duty processes.
+  - id: make-and-deploy-change
+    duties: [make change, deploy change]
+    not_checkable: Editing the metric definitions is a grant, but deploying a change is merging it and applying platform/gcp, rights on the repository and the project that no catalogue records.
+  - id: administer-access-and-run-transactions
+    duties: [administer access, run transactions]
+    not_checkable: Drafting and posting entries are grants, but administering access is changing the catalogues and applying them, which no catalogue records; no persona holds it, and the agent account's row-policy grantees and its tokens for every persona are shown in its section instead.
