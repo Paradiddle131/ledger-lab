@@ -51,8 +51,6 @@ AFTER = (
     "12571;0;12571;0;0"
 )
 ODD_TEXT = "2024;U;I;NULL;01;;11640;11640;11895;11895;012043"
-# The fiscal calendars cover 2023 to 2026, and 2026's outturn is not yet published.
-COVERED_WITH_OUTTURN = ("2023", "2024", "2025")
 
 
 def served(*lines: str, header: str = HEADER) -> bytes:
@@ -144,17 +142,10 @@ def test_the_profile_counts_moments_per_year_units_and_split_articles(tmp_path: 
 
 
 @pytest.mark.landed
-def test_each_landed_year_has_its_draft_supplementary_and_outturn_moments() -> None:
+def test_the_landed_unit_is_the_one_the_publishers_annual_report_prints() -> None:
+    """The moments each year serves, the unit and the mess are the landed file's quality suite's
+    (`ingest/quality`); this ties the unit to a figure the publisher prints."""
     path = landed_file("nl-government-budget")
-    counts = profile(path)
-    print(counts)
-    assert set(COVERED_WITH_OUTTURN) <= set(counts["moments"])
-    for year in COVERED_WITH_OUTTURN:
-        for moment in MOMENTS:
-            assert counts["moments"][year][moment]["non_zero"] > 0, (year, moment)
-    assert counts["units"] == [UNIT]
-    assert counts["non_integer_amounts"] == 0
-    assert counts["articles_on_several_rows"] > 0
     # The publisher's 2024 annual report for chapter I shows this outturn as 12.043 under
     # "bedragen x € 1.000" (table 1 of rijksfinancien.nl/jaarverslag/2024/I).
     king = (

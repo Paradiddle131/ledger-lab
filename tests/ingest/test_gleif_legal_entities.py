@@ -333,14 +333,8 @@ def test_the_step_refuses_an_archive_that_declares_more_than_the_bound_unzipped(
 
 
 @pytest.mark.landed
-def test_the_landed_register_holds_complete_records_for_the_vendors_countries() -> None:
+def test_no_landed_record_is_one_the_step_should_have_left_out() -> None:
+    """Every leave-out rule applied again to the landed records; their keys, counts and what the
+    step left out are the register's quality suite's (`ingest/quality`)."""
     counts = profile(landed_file("gleif-legal-entities"))
-    print(counts)
-    assert counts["incomplete"] == 0
-    assert counts["malformed_leis"] == 0
-    assert counts["duplicate_leis"] == 0
     assert counts["still_to_leave_out"] == {}
-    assert counts["left_out"]["sole proprietor category"] > 0
-    assert counts["left_out"]["partnership 62Y3"] > 0
-    assert set(counts["rows_by_country"]) == set(COUNTRIES)
-    assert min(counts["rows_by_country"].values()) > 100_000
