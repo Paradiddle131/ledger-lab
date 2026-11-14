@@ -10,7 +10,7 @@
       "hashed_suppliers": 1099,
       "redacted_rows": 1,
       "placeholder_references": 2535,
-      "hashed_references_on_clear_rows": 135,
+      "hashed_references_on_clear_rows": 0,
       "identical_copies": 65
     },
     "names": [
@@ -56,7 +56,7 @@
     {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "supplier", "regex": "^(?:person:[0-9a-f]{64}|(?!person:).+)$"}, "notes": "A hashed name is `person:` and 64 hex digits; no clear name starts with `person:`."},
     {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "transaction_number", "regex": "^(?:id:[0-9a-f]{64}|(?!id:).+)$"}, "notes": "A hashed reference is `id:` and 64 hex digits; no clear one starts with `id:`."},
     {"type": "expect_column_values_to_be_between", "kwargs": {"column": "is_hidden_row_with_clear_reference", "min_value": 0, "max_value": 0}, "notes": "A hashed or redacted row's transaction number is a keyed hash or a placeholder, never a number in clear."},
-    {"type": "expect_column_values_to_be_between", "kwargs": {"column": "is_hashed_reference_of_no_hidden_row", "min_value": 0, "max_value": 0}, "notes": "A transaction number is hashed only where a hashed or redacted row carries it."},
+    {"type": "expect_column_values_to_be_between", "kwargs": {"column": "is_hashed_reference_of_no_hidden_row", "min_value": 0, "max_value": 0}, "notes": "A transaction number is hashed only where a hashed or redacted row of its paying body carries it."},
     {"type": "expect_column_values_to_be_between", "kwargs": {"column": "is_hidden_row_describing_supplier", "min_value": 0, "max_value": 0}, "notes": "A hashed or redacted row keeps no description or postcode."},
     {"type": "expect_table_row_count_to_equal", "kwargs": {"value": {"$PARAMETER": "rows"}}, "notes": "Pinned: every served row of the year, headers aside."},
     {"type": "expect_column_unique_value_count_to_be_between", "kwargs": {"column": "source_file", "min_value": {"$PARAMETER": "files"}, "max_value": {"$PARAMETER": "files"}}, "notes": "Pinned mess, twelve files: one file a month."},
@@ -66,7 +66,7 @@
     {"type": "expect_column_unique_value_count_to_be_between", "kwargs": {"column": "hashed_supplier", "min_value": {"$PARAMETER": "hashed_suppliers"}, "max_value": {"$PARAMETER": "hashed_suppliers"}}, "notes": "Pinned: the distinct hashed suppliers; the same count under any key."},
     {"type": "expect_column_sum_to_be_between", "kwargs": {"column": "is_redacted", "min_value": {"$PARAMETER": "redacted_rows"}, "max_value": {"$PARAMETER": "redacted_rows"}}, "notes": "Pinned: rows the Department redacted."},
     {"type": "expect_column_sum_to_be_between", "kwargs": {"column": "is_placeholder_reference", "min_value": {"$PARAMETER": "placeholder_references"}, "max_value": {"$PARAMETER": "placeholder_references"}}, "notes": "Pinned: rows whose reference is a placeholder, `#` (2,474, every High Speed Two row) or `DIRECT DEBIT` (61), on any row."},
-    {"type": "expect_column_sum_to_be_between", "kwargs": {"column": "is_hashed_reference_on_clear_row", "min_value": {"$PARAMETER": "hashed_references_on_clear_rows"}, "max_value": {"$PARAMETER": "hashed_references_on_clear_rows"}}, "notes": "Pinned: organisation rows whose transaction number is hashed because a hashed row carries it too (89 numbers of other paying bodies on 49 organisations' rows); it moves with the register and the classifier."},
+    {"type": "expect_column_sum_to_be_between", "kwargs": {"column": "is_hashed_reference_on_clear_row", "min_value": {"$PARAMETER": "hashed_references_on_clear_rows"}, "max_value": {"$PARAMETER": "hashed_references_on_clear_rows"}}, "notes": "Pinned: organisation rows whose transaction number is hashed because a hidden row of the same paying body carries it; none on the pinned files, where no body's number is shared by its hidden and clear rows; it moves with the register and the classifier."},
     {"type": "expect_column_sum_to_be_between", "kwargs": {"column": "is_identical_copy", "min_value": {"$PARAMETER": "identical_copies"}, "max_value": {"$PARAMETER": "identical_copies"}}, "notes": "Pinned mess, identical rows: further copies of a row identical to another of its file in every landed cell (121 rows in 56 groups)."}
   ]
 }

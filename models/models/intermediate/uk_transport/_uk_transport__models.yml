@@ -36,7 +36,8 @@ models:
         description: As landed, a possible person's a keyed hash.
       - name: transaction_number
         description: >
-          As landed, keyed-hashed on every row carrying a number a hashed or redacted row carries.
+          As landed, keyed-hashed with its paying body on every row of that body carrying a
+          number a hashed or redacted row of the body carries.
 
   - name: int_uk_transport__payments
     description: >
@@ -102,8 +103,9 @@ models:
       - name: document_number
         description: >
           The Department's transaction number as landed: `#` or `DIRECT DEBIT` where it gives
-          none, and `id:` and a keyed hash on every row carrying a number a hashed or redacted row
-          carries, so it repeats and is no key.
+          none, and `id:` and a keyed hash of the paying body and number on every row of that body
+          carrying a number a hashed or redacted row of the body carries, so it repeats and is no
+          key.
         data_tests:
           - not_null
       - name: contract_number

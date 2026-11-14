@@ -280,7 +280,9 @@ def test_the_real_year_lands_whole_in_payments(real: Build) -> None:
         real,
         "select count(*), count(distinct payment_key), count(distinct document_number)"
         " from int_uk_transport__payments",
-    ) == [(31_103, 31_103, 26_097)], "one value per served number: each is in clear or hashed"
+    ) == [(31_103, 31_103, 26_204)], (
+        "26,097 served numbers; one each body hides is one keyed value per body"
+    )
     assert (
         query(
             real,
