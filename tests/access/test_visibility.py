@@ -36,6 +36,8 @@ import shutil
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -67,7 +69,10 @@ PERSONAS = [p["id"] for p in load_access()["personas"]]
 
 
 def select(what: str, table: str, where: str = "") -> str:
-    return f"select {what} from {quote(table)}{where}"  # noqa: S608
+    """A select from a table named as `Reader.tables` names it: `<schema>.<table>` outside the
+    main schema. No catalogue name holds a dot."""
+    named = ".".join(quote(part) for part in table.split(".", 1))
+    return f"select {what} from {named}{where}"  # noqa: S608
 
 
 def of_entities(entities: set[str] | None) -> str:
@@ -92,7 +97,12 @@ class Reader(Protocol):
     def rows(self, sql: str) -> list[Row]: ...
 
     def tables(self) -> dict[str, dict[str, str]]:
-        """Each table the connection can name, with its columns and their types in order."""
+        """Each table and view the connection's database holds, in any schema, with its columns
+        and their types in order; one outside the main schema is named `<schema>.<table>`."""
+        ...
+
+    def views(self) -> set[str]:
+        """The names of `tables` that are views."""
         ...
 
     def row_hash(self, columns: Sequence[str]) -> str:
@@ -136,12 +146,23 @@ class LocalReader:
     def tables(self) -> dict[str, dict[str, str]]:
         found: dict[str, dict[str, str]] = {}
         for table, column, kind in self.db.execute(
-            "select table_name, column_name, data_type from duckdb_columns()"
-            " where database_name = system.main.current_database() and schema_name = 'main'"
-            " order by table_name, column_index"
+            "select case when schema_name = 'main' then table_name"
+            " else schema_name || '.' || table_name end, column_name, data_type"
+            " from duckdb_columns() where database_name = system.main.current_database()"
+            " order by schema_name, table_name, column_index"
         ).fetchall():
             found.setdefault(table, {})[column] = kind
         return found
+
+    def views(self) -> set[str]:
+        return {
+            name
+            for (name,) in self.db.execute(
+                "select case when schema_name = 'main' then view_name"
+                " else schema_name || '.' || view_name end from duckdb_views()"
+                " where database_name = system.main.current_database() and not internal"
+            ).fetchall()
+        }
 
     def row_hash(self, columns: Sequence[str]) -> str:
         return f"hash({', '.join(quote(c) for c in columns)})"
@@ -329,9 +350,15 @@ def read_entities(row: Doc, product: str) -> set[str] | None:
     return {e for e, cell in cells.items() if cell in READS}
 
 
-def known_entities(row: Doc) -> set[str]:
-    """The entities whose rows the persona reads in some entity-scoped product."""
-    return {e for _, e, cell in cells_of(row) if e is not None and cell in READS}
+def known_entities(row: Doc, aggregates: Doc) -> set[str]:
+    """The entities whose share of a group the persona can work out: those whose rows it reads in
+    some entity-scoped product, and those it reads per entity in an aggregate table."""
+    apart = {p for p, e in aggregates["products"].items() if e["entity_rows"]}
+    return {
+        e
+        for p, e, cell in cells_of(row)
+        if e is not None and (cell in READS or cell == "aggregate" and p in apart)
+    }
 
 
 def tagged_columns(columns: Doc) -> dict[str, dict[str, str]]:
@@ -484,6 +511,8 @@ def observe(engine: Engine, matrix: Doc, persona: str) -> list[Seen]:
     inventory = Seen(persona, "tables", "only tables its products list", len(sight.held))
     if unlisted := sorted(set(sight.held) - listed):
         inventory.fail(f"observed {len(unlisted)} more: {', '.join(unlisted)}")
+    if views := sorted(me.views()):
+        inventory.fail(f"observed {len(views)} views: {', '.join(views)}")
     return [*seen, inventory]
 
 
@@ -505,6 +534,7 @@ def observe_product(
 
     one = {entity} if entity else None
     tagged = tagged_columns(cat.columns)
+    reads = any(c in READS for p, _, c in cells_of(sight.row) if p == product)
     for table in tables:
         total = sight.count(source, table, one)
         # What a cell shows or hides; an aggregate cell is proven by the groups it is given.
@@ -523,7 +553,8 @@ def observe_product(
             if differ := Counter(source.rows(digest)) - Counter(me.rows(digest)):
                 place.fail(f"observed {sum(differ.values())} rows of {table} unlike the source's")
         elif is_rows(table):
-            if place.cell == "aggregate" or entity is None or ENTITY not in held[table]:
+            # A product the persona reads no rows of has no row table at all, not an empty one.
+            if not reads or entity is None or ENTITY not in held[table]:
                 place.fail(f"observed a row table {table}")
             elif n := sight.count(me, table, one):
                 place.fail(f"observed {n} rows of the entity in {table}")
@@ -549,7 +580,7 @@ def observe_product(
             entry,
             cat.aggregates,
             scope if entity else None,
-            known_entities(sight.row),
+            known_entities(sight.row, cat.aggregates),
         )
         got = me.rows(select(", ".join(quote(c) for c in shape[name]), name))
         if apart:
@@ -768,6 +799,10 @@ MUTATIONS = [
     "add-a-tagged-column-to-a-denied-reader",
     "add-a-tagged-value-under-another-name",
     "hold-an-unlisted-table",
+    "leak-rows-in-another-schema",
+    "leak-clear-values-in-another-schema",
+    "a-view-over-a-hidden-table",
+    "an-empty-table-of-a-denied-product",
 ]
 WAREHOUSE = f"{SOURCE}.main"
 
@@ -885,6 +920,40 @@ def mutation(
             ],
             {"tag individual-id"},
         )
+    plan = compile_persona(
+        cat.access, cat.columns, cat.aggregates, "accountant-chicago", source_schema(warehouse)
+    )
+    (rows,) = [t for t in plan.tables if isinstance(t, Rows) and t.table == "payments"]
+    uk = f"from {WAREHOUSE}.payments where entity_id = 'uk-transport'"
+    as_masked = f"select {', '.join(masked(c) for c in rows.columns)} {uk}"  # noqa: S608
+    if name == "leak-rows-in-another-schema":
+        return (
+            "accountant-chicago",
+            ["create schema other", f"create table other.uk as {as_masked}"],
+            {"tables"},
+        )
+    if name == "leak-clear-values-in-another-schema":
+        return (
+            "accountant-chicago",
+            ["create schema other", f"create table other.uk as select * {uk}"],  # noqa: S608
+            {"tables", "tag individual-id"},
+        )
+    if name == "a-view-over-a-hidden-table":
+        return (
+            "accountant-chicago",
+            [
+                "create schema hidden",
+                f"create table hidden.uk as {as_masked}",
+                "create view uk_payments as select * from hidden.uk",
+            ],
+            {"tables"},
+        )
+    if name == "an-empty-table-of-a-denied-product":
+        return (
+            "proposer",
+            [f"create table payments as select {plain} from {WAREHOUSE}.payments where false"],  # noqa: S608
+            {f"payments {e}" for e in matrix["personas"]["proposer"]["products"]["payments"]},
+        )
     assert name == "hold-an-unlisted-table"
     return (
         "accountant-chicago",
@@ -995,20 +1064,65 @@ def test_a_small_cell_query_returns_nothing(
     }
 
 
-def one_entitys_figures(engine: Engine, matrix: Doc, minimum: int) -> Counter[str]:
+def cents(value: Fraction) -> Decimal:
+    """Rounded half away from zero to two decimal places, as the models translate a figure."""
+    hundredths = abs(value) * 100
+    whole = int(hundredths) + (1 if hundredths - int(hundredths) >= Fraction(1, 2) else 0)
+    return Decimal(whole if value >= 0 else -whole) / 100
+
+
+def own_shares(engine: Engine, persona: str, entities: set[str]) -> dict[Row, list[Any]]:
+    """The figures and constant-rate amount the persona's own entities bring to each span of the
+    group totals, worked out from the payments it reads in clear and two public tables: the
+    entities' fiscal calendars and the ECB's rates on the day the constant rates are taken."""
+    source = engine.source()
+    ((reporting, day),) = source.rows(
+        select("distinct reporting_currency, constant_rates_on", "group_totals")
+    )
+    rates = dict(
+        source.rows(
+            select("currency, units_per_euro", "fx_rates", f" where rate_on = date '{day}'")
+        )
+    )
+    periods = source.rows(
+        select("entity_id, fiscal_year, fiscal_period, period_start, period_end", "fiscal_periods")
+    )
+    span = {(e, y, p): (s, t) for e, y, p, s, t in periods}
+    for e, y, _, s, t in periods:
+        first, last = span.get((e, y, None), (s, t))
+        span[(e, y, None)] = (min(first, s), max(last, t))
+    shares: dict[Row, list[Any]] = {}
+    for entity, year, period, currency, amount in engine.persona(persona).rows(
+        "select entity_id, fiscal_year, fiscal_period, currency, amount from payments"
+        " where not is_repeat"
+    ):
+        if entity not in entities or (entity, year, period) not in span or amount is None:
+            continue
+        key = (*span[(entity, year, period)], reporting, day)
+        share = shares.setdefault(key, [0, Decimal(0)])
+        share[0] += 1
+        share[1] += cents(Fraction(amount) * Fraction(rates[reporting]) / Fraction(rates[currency]))
+    return shares
+
+
+def one_entitys_figures(engine: Engine, matrix: Doc, minimum: int) -> dict[str, Counter[str]]:
     """Per reader of figures across all entities, the figures that are one other entity's, alone
-    or once the reader takes away its own entities' share, which it reads in clear.
+    (`alone`) or once the reader takes away its own entities' share (`less own`).
 
     With the entities apart at one, each such figure is given and, less the reader's own share,
-    is exactly the other entity's figure; at the catalogue's two, none is given."""
+    is exactly the other entity's figure; at the catalogue's two, none is given. The share is the
+    one the persona works out from the payments it reads (`own_shares`) where that equals its
+    entities' share; one it cannot work out from its rows (an entity whose figures are not
+    payments) is taken from the source, as the public files give it, and counted apart."""
     cat = engine.catalogues
     at = {**cat.aggregates, "minimum_group": minimum}
     strict = engine.rebuilt(Catalogues(cat.access, cat.columns, at))
     loose = engine.rebuilt(Catalogues(cat.access, cat.columns, {**at, "minimum_entities": 1}))
-    isolated: Counter[str] = Counter()
+    isolated: dict[str, Counter[str]] = {}
     for persona in PERSONAS:
         row = matrix["personas"][persona]
-        known = known_entities(row)
+        known = known_entities(row, at)
+        clear = read_entities(row, "payments") or set()
         for spec, entry, scope in aggregate_cells(row, at):
             if entry["entity_rows"] or scope is not None:
                 continue
@@ -1023,14 +1137,26 @@ def one_entitys_figures(engine: Engine, matrix: Doc, minimum: int) -> Counter[st
                 tuple(r[: len(grain)]): list(r[len(grain) :])
                 for r in loose.persona(persona).rows(select(shown, spec["name"]))
             }
+            derivable = spec["from"] == "group_totals" and sums == [
+                "figures",
+                "amount_at_constant_rates",
+            ]
+            worked = own_shares(engine, persona, clear) if derivable and clear else {}
             for key, (group, other, own) in pairs.items():
-                taken = group.total(own) if own else [None] * len(sums)
+                if not own:
+                    taken, how = [None] * len(sums), "alone"
+                elif derivable and worked.get(key, [0, Decimal(0)]) == group.total(own):
+                    taken, how = worked[key], "less own"
+                else:
+                    # Not in the rows the persona reads (the Dutch figures are budget lines, not
+                    # payments): the share comes from the source, as the public files give it.
+                    taken, how = group.total(own), "less a share from the source"
                 difference = [
                     None if a is None else a - (b or 0)
                     for a, b in zip(given[key], taken, strict=True)
                 ]
-                assert difference == group.sums[other], (persona, spec["name"])
-                isolated[persona] += 1
+                assert difference == group.sums[other], (persona, spec["name"], how)
+                isolated.setdefault(persona, Counter())[how] += 1
             held = {tuple(r) for r in strict.persona(persona).rows(select(shown, spec["name"]))}
             assert not set(pairs) & {h[: len(grain)] for h in held}, persona
     return isolated
@@ -1042,38 +1168,7 @@ def test_two_aggregates_whose_difference_isolates_one_entity_are_suppressed(
     # The samples' groups are small, so both lines run at a minimum group of two.
     assert aggregates["minimum_entities"] == 2
     isolated = one_entitys_figures(engine, visibility, 2)
-    assert isolated, "the samples hold a figure of one entity, or of one and the reader's own"
-
-
-def test_a_reader_of_an_entitys_payments_counts_its_share_of_each_group_total(
-    engine: Engine, visibility: Doc
-) -> None:
-    """What makes the difference real: a reader of one entity's payments counts, from its own
-    rows, the figures that entity brings to each group-totals period."""
-    source = engine.source()
-    compared = 0
-    for persona in PERSONAS:
-        own = read_entities(visibility["personas"][persona], "payments") or set()
-        cells = visibility["personas"][persona]["products"]["group-totals"]
-        if len(own) != 1 or cells != "aggregate":
-            continue
-        (entity,) = own
-        mine = engine.persona(persona).rows(
-            "select fiscal_year, fiscal_period, count(*) from payments where not is_repeat"
-            " group by all"
-        )
-        brought = source.rows(
-            select(
-                "fiscal_year, fiscal_period, sum(figures)",
-                "group_totals",
-                f"{of_entities({entity})} group by all",
-            )
-        )
-        counted = {tuple(r[:2]): r[2] for r in mine}
-        for year, period, figures in brought:
-            assert counted.get((year, period)) == figures, persona
-            compared += 1
-    assert compared
+    assert any(c["less own"] for c in isolated.values()), "no share worked out from own rows"
 
 
 # Over the whole landed build.
@@ -1208,14 +1303,24 @@ def test_every_persona_sees_its_matrix_over_the_landed_build(
         isolated = one_entitys_figures(engine, visibility, aggregates["minimum_group"])
     finally:
         engine.close()
+    print(f"\ncells proven, by kind ({sum(kinds(tally).values())} cells):")
+    for persona, counted in tally.items():
+        print(f"  {persona}: {dict(sorted(counted.items()))}")
+    print(f"  all: {kinds(tally)}")
     assert failures == []
     assert {p: dict(sorted(t.items())) for p, t in tally.items()} == LANDED_PROVEN
     assert isolating == LANDED_ISOLATING
-    # The figures of one other entity, alone or less the reader's own, each given at one entity
-    # apart and exactly the other's figure less the reader's share, and none given at two.
+    # The figures of one other entity, alone or less the reader's own share worked out from its
+    # own rows, each given at one entity apart and exactly the other's figure, none given at two.
+    # The Dutch accountant's own share is budget lines, which it does not read.
     assert isolated == {
-        persona: sum(one + less for one, less in (t[1:3] for t in tables.values()))
-        for persona, tables in LANDED_ISOLATING.items()
+        "accountant-chicago": Counter({"alone": 2, "less own": 14}),
+        "approver": Counter({"alone": 2, "less own": 14}),
+        "accountant-uk-transport": Counter({"alone": 42, "less own": 12}),
+        "accountant-nl-government": Counter({"alone": 40, "less a share from the source": 2}),
+    }
+    assert {p: sum(c.values()) for p, c in isolated.items()} == {
+        p: sum(t[1] + t[2] for t in tables.values()) for p, tables in LANDED_ISOLATING.items()
     }
 
 
@@ -1228,7 +1333,7 @@ def isolating_groups(
     found: dict[str, dict[str, tuple[int, int, int, int]]] = {}
     for persona in PERSONAS:
         row = matrix["personas"][persona]
-        known = known_entities(row)
+        known = known_entities(row, aggregates)
         for spec, entry, scope in aggregate_cells(row, aggregates):
             if entry["entity_rows"] or scope is not None:
                 continue
