@@ -1,0 +1,53 @@
+# What a persona with an `aggregate` grant on a data product reads in place of its rows: a fixed set
+# of aggregate tables, each at one stated grain, holding only the groups of at least the minimum
+# group. The local engine materialises them in the persona's database (access/compile.py), so a
+# narrower filter or grain finds no row to sum; BigQuery's twin is an aggregation threshold policy
+# on a view at the same grain. Shape: access/aggregates.schema.json.
+#
+# Each table names its source table (one of the product's `tables` in access/personas.yaml), the
+# columns it groups by, the columns it sums, and its units: what the minimum counts. A group is
+# kept when its units are at least the minimum. `count_distinct` counts distinct values of a
+# column, as BigQuery's threshold counts distinct privacy units; `sum` adds a count the source
+# rows already hold, for a product whose rows are themselves aggregates. No table groups by or
+# sums a tagged column of access/columns.yaml: an aggregate never shows a personal value.
+# Differencing two allowed answers is not stopped here.
+
+# Ten, a common small-cell threshold, and the one the adversarial cases measure their targets
+# against (agent/evals/adversarial.yaml); BigQuery states it as the policy's `threshold`.
+minimum_group: 10
+
+products:
+  # By entity and fiscal period. The units are distinct payees, the published payee as stored (an
+  # organisation's name or a person's keyed hash), since a sum over many payments to one person
+  # is that person's: BigQuery's privacy unit column.
+  payments:
+    - name: payments_by_period
+      from: payments
+      group_by: [entity_id, currency, fiscal_year, fiscal_period, is_repeat]
+      sum: [amount]
+      units: {name: payees, count_distinct: vendor_name}
+  # The product's own rows, each an entity's span and basis. Its rows hold no payee, so the units
+  # are the figures each row sums (payments, or Dutch budget lines): a row of ten payments may be
+  # fewer payees. Grouping by entity keeps one entity's rows readable on their own; leaving the
+  # entity columns out would give all-entity figures only.
+  group-totals:
+    - name: group_totals
+      from: group_totals
+      group_by:
+        - group_total_key
+        - entity_id
+        - fiscal_year
+        - fiscal_period
+        - period_start
+        - period_end
+        - basis
+        - currency
+        - reporting_currency
+        - constant_rates_on
+      sum: [amount, amount_at_actual_rates, amount_at_constant_rates]
+      units: {name: figures, sum: figures}
+    - name: group_totals_left_out
+      from: group_totals_left_out
+      group_by: [entity_id, fiscal_year, basis, left_out_by, currency]
+      sum: [amount]
+      units: {name: figures, sum: figures}
