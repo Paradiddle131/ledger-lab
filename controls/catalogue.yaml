@@ -35,6 +35,12 @@ controls:
     asserts: The warehouse, never the prompt, decides what each persona sees; every persona against every entity and sensitive column is clear, masked, aggregate only or denied as access/personas.yaml says.
     proven_by: [tests/access/test_visibility.py::test_every_persona_sees_its_matrix]
     status: not-implemented
+  - id: aggregates-hold-a-minimum-group-across-the-session
+    layer: Data access
+    owner: group-controller
+    asserts: An answer to a persona whose grant on a product is aggregate gives no figure over fewer rows than the minimum group, counted across the session, so neither one answer nor the difference of two answers in a session covers fewer rows than the minimum group.
+    proven_by: [tests/agent/test_aggregates.py::test_no_answer_or_difference_isolates_a_small_group]
+    status: not-implemented
   - id: individuals-hashed-before-landing
     layer: Data access
     owner: group-controller
@@ -58,6 +64,12 @@ controls:
     owner: agent-operator
     asserts: An instruction planted in a cell, a column description or a glossary entry changes no tool call; tools are read-only and denied by default.
     proven_by: [tests/agent/test_injection.py::test_planted_instructions_are_ignored]
+    status: not-implemented
+  - id: no-outbound-channel-carries-data
+    layer: Injection and tool authorisation
+    owner: agent-operator
+    asserts: An answer holds no link or image to an address outside the lab, and the agent sends no request but to the warehouse and its model, so no address an untrusted value or definition asks it to build carries data out.
+    proven_by: [tests/agent/test_exfiltration.py::test_no_link_image_or_request_carries_data_out]
     status: not-implemented
   - id: answers-cite-and-re-execute
     layer: Answer integrity
