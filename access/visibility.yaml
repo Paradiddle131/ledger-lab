@@ -1,0 +1,120 @@
+# What each persona must see and do: the outcome the access tests act out as each persona, written
+# from the personas' duties in access/personas.yaml, except where a comment says a cell states the
+# current grant while its choice is open, and checked against the grants there and the tag readers
+# in access/columns.yaml, which are the mechanism. Shape: access/visibility.schema.json.
+#
+# Each persona states one cell per data product, and per entity for an entity-scoped product, so
+# its own entity against the others is the row rule; and one cell per policy tag.
+#
+# Product cells: clear (reads the rows, masking rules still apply); aggregate (only aggregates
+# above the minimum group); edit (reads and changes the definitions); draft (proposes an entry,
+# never posts it); post (posts an approved entry); denied (none of these). Draft and post act
+# through the approval workflow and read nothing.
+# Column cells, what the persona observes in the columns a tag marks: clear (the value), masked
+# (the tag's masking rule applied), denied (it reads no rows of a product that can carry one).
+# A persona that reads the warehouse but no such product still holds a masked-reader role on every
+# tag, so no query it may run fails on a tagged column; its cells are denied all the same.
+#
+# Two duty rules the cells cannot express:
+# - an approver never approves an entry they prompted, which is a property of each entry;
+# - the audit log the agent operator reads holds the agents' answers, which can quote their data.
+
+# The products that can carry a tagged column: payments and the ledger hold payee and bank fields;
+# the group products hold sums, metric definitions and the agents' records.
+tagged_products: [payments, ledger]
+
+personas:
+  # Books and reconciles one entity: its payments in clear, no other entity's rows, the group only
+  # in aggregate, the metrics it reports against, and no one's bank details or identity.
+  accountant-chicago:
+    products:
+      payments: {chicago: clear, uk-transport: denied, nl-government: denied}
+      ledger: {chicago: denied, uk-transport: denied, nl-government: denied}
+      group-totals: aggregate
+      metric-definitions: clear
+      audit-log: denied
+    columns: {bank-account-number: masked, bank-account-holder: masked, individual-id: masked}
+  accountant-uk-transport:
+    products:
+      payments: {chicago: denied, uk-transport: clear, nl-government: denied}
+      ledger: {chicago: denied, uk-transport: denied, nl-government: denied}
+      group-totals: aggregate
+      metric-definitions: clear
+      audit-log: denied
+    columns: {bank-account-number: masked, bank-account-holder: masked, individual-id: masked}
+  accountant-nl-government:
+    products:
+      payments: {chicago: denied, uk-transport: denied, nl-government: clear}
+      ledger: {chicago: denied, uk-transport: denied, nl-government: denied}
+      group-totals: aggregate
+      metric-definitions: clear
+      audit-log: denied
+    columns: {bank-account-number: masked, bank-account-holder: masked, individual-id: masked}
+  # Owns the group figures: every entity's payments and the group totals in clear, never the
+  # agents' audit log, and a vendor's bank details or identity only masked.
+  group-controller:
+    products:
+      payments: {chicago: clear, uk-transport: clear, nl-government: clear}
+      ledger: {chicago: denied, uk-transport: denied, nl-government: denied}
+      group-totals: clear
+      metric-definitions: clear
+      audit-log: denied
+    columns: {bank-account-number: masked, bank-account-holder: masked, individual-id: masked}
+  # Pays vendors of the entity with the full payment chain, so needs their bank details in clear,
+  # and nothing beyond that entity.
+  payables-clerk:
+    products:
+      payments: {chicago: clear, uk-transport: denied, nl-government: denied}
+      ledger: {chicago: denied, uk-transport: denied, nl-government: denied}
+      group-totals: denied
+      metric-definitions: clear
+      audit-log: denied
+    columns: {bank-account-number: clear, bank-account-holder: clear, individual-id: clear}
+  # Posts the entries the agent drafts for the entity with a ledger, reading its payments to judge
+  # them, never drafting one.
+  approver:
+    products:
+      payments: {chicago: clear, uk-transport: denied, nl-government: denied}
+      ledger: {chicago: post, uk-transport: denied, nl-government: denied}
+      group-totals: aggregate
+      metric-definitions: clear
+      audit-log: denied
+    columns: {bank-account-number: masked, bank-account-holder: masked, individual-id: masked}
+  # Reads everything there is, changes nothing: only one entity has a ledger.
+  # Its three column cells state the current grant, clear; the visibility matrix's sketch on the
+  # roadmap says masked, and which it should be is open with the owner.
+  auditor:
+    products:
+      payments: {chicago: clear, uk-transport: clear, nl-government: clear}
+      ledger: {chicago: clear, uk-transport: denied, nl-government: denied}
+      group-totals: clear
+      metric-definitions: clear
+      audit-log: clear
+    columns: {bank-account-number: clear, bank-account-holder: clear, individual-id: clear}
+  # Defines the metrics: changes their definitions, reads payments only in aggregate.
+  metric-owner:
+    products:
+      payments: {chicago: aggregate, uk-transport: aggregate, nl-government: aggregate}
+      ledger: {chicago: denied, uk-transport: denied, nl-government: denied}
+      group-totals: clear
+      metric-definitions: edit
+      audit-log: denied
+    columns: {bank-account-number: denied, bank-account-holder: denied, individual-id: denied}
+  # Runs the agents and reads their audit log, never their data.
+  agent-operator:
+    products:
+      payments: {chicago: denied, uk-transport: denied, nl-government: denied}
+      ledger: {chicago: denied, uk-transport: denied, nl-government: denied}
+      group-totals: denied
+      metric-definitions: clear
+      audit-log: clear
+    columns: {bank-account-number: denied, bank-account-holder: denied, individual-id: denied}
+  # The acting agent: drafts entries and holds no data role.
+  proposer:
+    products:
+      payments: {chicago: denied, uk-transport: denied, nl-government: denied}
+      ledger: {chicago: draft, uk-transport: denied, nl-government: denied}
+      group-totals: denied
+      metric-definitions: denied
+      audit-log: denied
+    columns: {bank-account-number: denied, bank-account-holder: denied, individual-id: denied}
