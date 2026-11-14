@@ -39,8 +39,8 @@ schema:
       # Not classified personal: it names one payment, not a payee. On a hashed row it is a hash of
       # the row as landed, hashed name included, so it cannot be recomputed from the publisher's
       # files without the hash key, and each of a payee's payments gets its own key, so it links
-      # nothing the row does not already show. `document_number` is personal: on a hashed UK row
-      # it is a keyed hash that ties together the rows of one hashed transaction.
+      # nothing the row does not already show. `document_number` is personal: on the UK's rows a
+      # keyed hash ties together every row carrying a number a hashed or redacted row carries.
       - name: payment_key
         logicalType: string
         physicalType: VARCHAR

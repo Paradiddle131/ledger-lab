@@ -710,6 +710,8 @@ join pairs on rows.entity_id = pairs.entity_id
     and rows.amount is not distinct from pairs.amount and rows.day is not distinct from pairs.day
 group by rows.entity_id
 """
+
+
 def uk_shared_transactions(landing: Path) -> dict[str, int]:
     """The UK numbers a row shows in clear that a hashed or redacted row carries as a keyed hash,
     found by the landing's own identifier hasher, and the placeholders the landing keyed; counts
