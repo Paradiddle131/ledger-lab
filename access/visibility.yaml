@@ -16,6 +16,10 @@
 # reader of payments states the bank tags too, which mark no column until the ERP's tables exist.
 # A persona that reads the warehouse but no such product still holds a masked-reader role on every
 # tag, so no query it may run fails on a tagged column; its cells are denied all the same.
+# A product cell states the rows; which of their columns a persona reads is its purposes'
+# (access/purposes.yaml). A clear or masked tag cell is how the persona reads the tag's columns
+# wherever its purposes list one; where they list none (the group controller's period close), the
+# cell is observed by the tag's values being nowhere in its database.
 #
 # Two duty rules the cells cannot express:
 # - an approver never approves an entry they prompted, which is a property of each entry;

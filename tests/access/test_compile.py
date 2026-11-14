@@ -693,9 +693,9 @@ def refusal(
 def test_the_compile_refuses_what_it_cannot_express(
     access: Doc, columns: Doc, aggregates: Doc, warehouse: Path, change: str
 ) -> None:
-    *changed, purposes = refusal(change, access, columns, aggregates)
+    access, columns, aggregates, persona, purposes = refusal(change, access, columns, aggregates)
     with pytest.raises(CompileError, match=REFUSALS[change]):
-        plan_of(*changed, warehouse, purposes)
+        plan_of(access, columns, aggregates, persona, warehouse, purposes)
 
 
 def test_an_entity_scoped_table_without_an_entity_column_is_refused(
