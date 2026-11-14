@@ -61,6 +61,8 @@ SEEDS = {
     "models/seeds/calendars/period_status.csv",
     "models/seeds/reference/fx/ecb_rates_sample.csv",
     "models/seeds/staging/nl_government/nl_government_budget_sample.csv",
+    "models/seeds/staging/chicago/chicago_contracts_sample.csv",
+    "models/seeds/staging/chicago/chicago_payments_sample.csv",
     "models/seeds/intermediate/vendors/vendor_contracts_sample.csv",
     "models/seeds/intermediate/vendors/vendor_legal_entities_sample.csv",
     "models/seeds/intermediate/vendors/vendor_payments_sample.csv",

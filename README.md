@@ -23,7 +23,7 @@ It turns public purchase-to-pay records into certified data products, gives each
 | GLEIF legal-entity register | matching vendor names to legal entities |
 | Annual filings of listed companies, from the regulator | an independent figure to tie out against: the revenue twenty listed vendors reported in their annual reports, each restated or amended value beside the original |
 
-Every figure is a public record, fetched by a script that checks it against a recorded checksum; no data is committed but a sample whose licence allows it and a test needs (a fortnight of ECB rates, some rows of the Dutch budget statements, and a few rows of the regulator's filings).
+Every figure is a public record, fetched by a script that checks it against a recorded checksum; no data is committed but a sample whose licence allows it and a test needs (a fortnight of ECB rates, some rows of the Dutch budget statements, some rows of Chicago's contracts and payments, and a few rows of the regulator's filings).
 The ledger is derived: an open-source ERP posts the real documents into journal lines, and every derived row says so.
 Individuals among vendors are hashed before anything is written.
 
@@ -46,7 +46,7 @@ The UK Department for Transport's spending over £25,000 comes from its monthly 
 What lands is the twelve files of one fiscal year in one shape, with every supplier who may be a person hashed and what describes or locates them left out.
 
 To land a source, run its line below; a source that names people (Chicago's contracts and payments, the UK spend) also needs `LEDGER_LAB_HASH_KEY` set (see `ingest/individuals.py`) and the legal-entity register landed first, since a payee the register vouches for as an organisation lands in clear (see `ingest/entities.py`).
-With one key, a name hashes the same in every landing.
+With one key, a name hashes the same in every landing; a new key changes every hash, and with it the `payment_key` of each payments-mart row whose payee is hashed, since the key hashes the row as landed.
 A set's name lands every source whose name it prefixes (`<set>-<member>`) as one file, through the set's step, once every member has verified.
 The landed tests need the key the files were landed with for Chicago, and the network for the UK spend, whose files they download again; the pages test reads each pinned UK month's GOV.UK page, and the filings' company-list test builds the vendor matching over the vendors' landed sources and register:
 
@@ -77,7 +77,7 @@ The dbt models build on DuckDB in the session by default, reading the landed fil
 uv run dbt build --project-dir models --profiles-dir models
 ```
 
-Every model that reads a fetched source reads the file the fetch kit landed (`python -m ingest.fetch ecb-rates`, `python -m ingest.fetch nl-government-budget`, and for the vendors' legal entities `chicago`, `uk-transport-spend-2025` and `gleif-legal-entities`), and the build fails on a missing file; the tests pass `--vars '{source_rows: sample}'` to read the committed samples of real rows instead (a fortnight of ECB rates, and Dutch budget rows chosen for their mess), and `uv run pytest -m landed` runs the translation and budget rules over the landed files.
+Every model that reads a fetched source reads the file the fetch kit landed (`python -m ingest.fetch ecb-rates`, `python -m ingest.fetch nl-government-budget`, for the payments mart `chicago`, and for the vendors' legal entities `chicago`, `uk-transport-spend-2025` and `gleif-legal-entities`), and the build fails on a missing file; the tests pass `--vars '{source_rows: sample}'` to read the committed samples of real rows instead (a fortnight of ECB rates, Dutch budget rows chosen for their mess, and Chicago contract and payment rows of companies, landed with a test hash key), and `uv run pytest -m landed` runs the translation and budget rules over the landed files.
 The Dutch budget against outturn shows the figures as the file serves them: a zero the file may serve in place of a figure is flagged on its line (`has_doubtful_zero`), and the landed tests count the figures the file serves wrong.
 
 Each source is fetched by name from [`ingest/sources.yaml`](ingest/sources.yaml), which records its URL or pinned query, SHA-256, licence link, publisher and whether it names people; the file lands under `LEDGER_LAB_LANDING` (default `landing/`, outside git) only when its checksum matches, and the command exits non-zero otherwise:
