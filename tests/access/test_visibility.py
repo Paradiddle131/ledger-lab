@@ -220,9 +220,9 @@ class LocalEngine:
 # The invented tables, every value labelled `invented`, never data: a ledger with rows of every
 # entity, the metric definitions and the audit log as tables of their products; the ERP's bank
 # details as columns of payments, the product whose readers the matrix states the bank tags for;
-# twelve payments to twelve payees, half of them people, for an entity the build holds none of;
-# and a span and year every entity brings figures of more payees than the minimum to, so a figure
-# across all entities is kept for a reader of one entity's rows.
+# twelve payments of an invented year to twelve payees of each entity, half of them people, so
+# every entity has rows and a group of payments kept; and a span and year every entity brings
+# figures of more payees than the minimum to, kept for a reader of one entity's rows.
 INVENTED_TABLES = {
     "ledger": "ledger",
     "metric-definitions": "metric_definitions",
@@ -263,8 +263,7 @@ def invent(access: Doc) -> list[str]:
             " case when i % 2 = 0 then 'invented payee ' || i end as vendor_person_key,"
             " 'INVENTED-' || i as vendor_bank_account_number,"
             " 'invented holder ' || i as vendor_bank_account_holder"
-            " from range(12) as r(i)"
-            f" where not exists (select 1 from payments where entity_id = {entity})",
+            " from range(12) as r(i)",
             "insert into group_totals by name select"  # noqa: S608
             f" 'invented-' || {entity} as group_total_key, {entity} as entity_id,"
             f" {INVENTED_YEAR} as fiscal_year, 1 as fiscal_period,"
@@ -508,7 +507,8 @@ def observe_product(
     tagged = tagged_columns(cat.columns)
     for table in tables:
         total = sight.count(source, table, one)
-        place.support += total
+        # What a cell shows or hides; an aggregate cell is proven by the groups it is given.
+        place.support += 0 if place.cell == "aggregate" else total
         if place.cell in READS:
             if not is_rows(table):
                 place.fail(f"observed no table {table}")
@@ -729,8 +729,8 @@ def kinds(tally: Mapping[str, Counter[str]]) -> dict[str, int]:
 # The cells proven over the samples, by kind, across the personas: on the build, and on invented
 # tables only. 120 cells; a change to the samples, the catalogues or an observation moves them.
 SAMPLE_PROVEN = {
-    "aggregate": 6,
-    "aggregate invented": 1,
+    "aggregate": 4,
+    "aggregate invented": 3,
     "clear": 11,
     "clear invented": 14,
     "denied": 13,
@@ -995,48 +995,54 @@ def test_a_small_cell_query_returns_nothing(
     }
 
 
-def test_two_aggregates_whose_difference_isolates_one_entity_are_suppressed(
-    engine: Engine, visibility: Doc, aggregates: Doc
-) -> None:
-    """A reader of one entity's rows given a figure across all entities can take away its own
-    entity's share, which it reads in clear: where one other entity brings the rest, the
-    difference is that entity's figure. With the entities apart at one, each such figure is given
-    and the difference is exactly the other entity's; at the catalogue's two, none is given. The
-    samples' groups are small, so both lines run at a minimum group of two."""
+def one_entitys_figures(engine: Engine, matrix: Doc, minimum: int) -> Counter[str]:
+    """Per reader of figures across all entities, the figures that are one other entity's, alone
+    or once the reader takes away its own entities' share, which it reads in clear.
+
+    With the entities apart at one, each such figure is given and, less the reader's own share,
+    is exactly the other entity's figure; at the catalogue's two, none is given."""
     cat = engine.catalogues
-    lower = {**cat.aggregates, "minimum_group": 2}
-    strict = engine.rebuilt(Catalogues(cat.access, cat.columns, lower))
-    loose = engine.rebuilt(Catalogues(cat.access, cat.columns, {**lower, "minimum_entities": 1}))
-    assert aggregates["minimum_entities"] == 2
-    isolated = 0
+    at = {**cat.aggregates, "minimum_group": minimum}
+    strict = engine.rebuilt(Catalogues(cat.access, cat.columns, at))
+    loose = engine.rebuilt(Catalogues(cat.access, cat.columns, {**at, "minimum_entities": 1}))
+    isolated: Counter[str] = Counter()
     for persona in PERSONAS:
-        row = visibility["personas"][persona]
+        row = matrix["personas"][persona]
         known = known_entities(row)
-        for spec, entry, scope in aggregate_cells(row, aggregates):
-            if entry["entity_rows"] or scope is not None or not known:
+        for spec, entry, scope in aggregate_cells(row, at):
+            if entry["entity_rows"] or scope is not None:
                 continue
-            grain, sums, units, *_ = spec_columns(spec, entry)
-            pairs = {}
+            grain, sums, *_ = spec_columns(spec, entry)
+            pairs: dict[Row, tuple[Group, str, list[str]]] = {}
             for key, group in groups_of(engine.source(), spec, entry, None).items():
                 others = [e for e in group.units if e not in known]
-                own = [e for e in group.units if e in known]
-                if len(others) == 1 and own and (group.count(others) or 0) >= 2:
-                    pairs[key] = (group, others[0], own)
+                if len(others) == 1 and (group.count(others) or 0) >= minimum:
+                    pairs[key] = (group, others[0], [e for e in group.units if e in known])
             shown = ", ".join(quote(c) for c in [*grain, *sums])
             given = {
                 tuple(r[: len(grain)]): list(r[len(grain) :])
                 for r in loose.persona(persona).rows(select(shown, spec["name"]))
             }
             for key, (group, other, own) in pairs.items():
+                taken = group.total(own) if own else [None] * len(sums)
                 difference = [
                     None if a is None else a - (b or 0)
-                    for a, b in zip(given[key], group.total(own), strict=True)
+                    for a, b in zip(given[key], taken, strict=True)
                 ]
                 assert difference == group.sums[other], (persona, spec["name"])
-                isolated += 1
+                isolated[persona] += 1
             held = {tuple(r) for r in strict.persona(persona).rows(select(shown, spec["name"]))}
-            assert not {k for k in pairs} & {h[: len(grain)] for h in held}, persona
-    assert isolated, "the samples hold a figure of one entity and the reader's own"
+            assert not set(pairs) & {h[: len(grain)] for h in held}, persona
+    return isolated
+
+
+def test_two_aggregates_whose_difference_isolates_one_entity_are_suppressed(
+    engine: Engine, visibility: Doc, aggregates: Doc
+) -> None:
+    # The samples' groups are small, so both lines run at a minimum group of two.
+    assert aggregates["minimum_entities"] == 2
+    isolated = one_entitys_figures(engine, visibility, 2)
+    assert isolated, "the samples hold a figure of one entity, or of one and the reader's own"
 
 
 def test_a_reader_of_an_entitys_payments_counts_its_share_of_each_group_total(
@@ -1083,6 +1089,109 @@ def landed_warehouse(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return built(tmp_path_factory.mktemp("dbt-landed"), "landed", landing_path().resolve()).database
 
 
+# Each persona's cells proven over the landed build by kind, and on invented tables only. The
+# readers of Chicago's payments (its accountant and the approver) are given no figure across all
+# entities on the landed build (below), so their aggregate cell is proven on invented tables.
+LANDED_PROVEN = {
+    "accountant-chicago": {
+        "aggregate invented": 1,
+        "clear": 1,
+        "clear invented": 1,
+        "denied": 1,
+        "denied invented": 5,
+        "tag masked": 1,
+        "tag masked invented": 2,
+    },
+    "accountant-uk-transport": {
+        "aggregate": 1,
+        "clear": 1,
+        "clear invented": 1,
+        "denied": 1,
+        "denied invented": 5,
+        "tag masked": 1,
+        "tag masked invented": 2,
+    },
+    "accountant-nl-government": {
+        "aggregate": 1,
+        "clear invented": 2,
+        "denied": 2,
+        "denied invented": 4,
+        "tag masked invented": 3,
+    },
+    "group-controller": {
+        "clear": 3,
+        "clear invented": 2,
+        "denied invented": 4,
+        "tag masked": 1,
+        "tag masked invented": 2,
+    },
+    "payables-clerk": {
+        "clear": 1,
+        "clear invented": 1,
+        "denied": 2,
+        "denied invented": 5,
+        "tag clear": 1,
+        "tag clear invented": 2,
+    },
+    "approver": {
+        "aggregate invented": 1,
+        "clear": 1,
+        "clear invented": 1,
+        "denied": 1,
+        "denied invented": 4,
+        "post invented": 1,
+        "tag masked": 1,
+        "tag masked invented": 2,
+    },
+    "auditor": {
+        "clear": 3,
+        "clear invented": 4,
+        "denied invented": 2,
+        "tag clear": 1,
+        "tag clear invented": 2,
+    },
+    "metric-owner": {
+        "aggregate": 2,
+        "aggregate invented": 1,
+        "clear": 1,
+        "denied invented": 4,
+        "edit invented": 1,
+        "tag denied": 1,
+        "tag denied invented": 2,
+    },
+    "agent-operator": {
+        "clear invented": 2,
+        "denied": 3,
+        "denied invented": 4,
+        "tag denied": 1,
+        "tag denied invented": 2,
+    },
+    "proposer": {
+        "denied": 3,
+        "denied invented": 5,
+        "draft invented": 1,
+        "tag denied": 1,
+        "tag denied invented": 2,
+    },
+}
+# Per reader of figures across all entities and table, the groups of at least the minimum over the
+# landed build: (of its own entities only, of one other entity alone, of one other and its own,
+# of two others or more). Before the entities apart every one of them was given; now only the last.
+CHICAGO_READER = {"group_totals": (34, 1, 14, 0), "group_totals_left_out": (6, 1, 0, 0)}
+LANDED_ISOLATING = {
+    "accountant-chicago": CHICAGO_READER,
+    "accountant-uk-transport": {
+        "group_totals": (0, 35, 12, 2),
+        "group_totals_left_out": (0, 7, 0, 0),
+    },
+    "accountant-nl-government": {
+        "group_totals": (1, 34, 2, 12),
+        "group_totals_left_out": (1, 6, 0, 0),
+    },
+    "approver": CHICAGO_READER,
+}
+
+
 @pytest.mark.landed
 def test_every_persona_sees_its_matrix_over_the_landed_build(
     access: Doc,
@@ -1095,7 +1204,47 @@ def test_every_persona_sees_its_matrix_over_the_landed_build(
     engine = LocalEngine(landed_warehouse, Catalogues(access, columns, aggregates), tmp_path)
     try:
         failures, tally = verdict(act_out(engine, visibility, PERSONAS))
+        isolating = isolating_groups(engine, visibility, aggregates)
+        isolated = one_entitys_figures(engine, visibility, aggregates["minimum_group"])
     finally:
         engine.close()
     assert failures == []
-    print({p: dict(sorted(t.items())) for p, t in tally.items()})
+    assert {p: dict(sorted(t.items())) for p, t in tally.items()} == LANDED_PROVEN
+    assert isolating == LANDED_ISOLATING
+    # The figures of one other entity, alone or less the reader's own, each given at one entity
+    # apart and exactly the other's figure less the reader's share, and none given at two.
+    assert isolated == {
+        persona: sum(one + less for one, less in (t[1:3] for t in tables.values()))
+        for persona, tables in LANDED_ISOLATING.items()
+    }
+
+
+def isolating_groups(
+    engine: Engine, matrix: Doc, aggregates: Doc
+) -> dict[str, dict[str, tuple[int, int, int, int]]]:
+    """Per reader of figures across all entities and per table, the groups of at least the
+    minimum: of its own entities only, of one other entity alone, of one other and its own (the
+    difference isolating the other), and of two others or more, the only ones it is given."""
+    found: dict[str, dict[str, tuple[int, int, int, int]]] = {}
+    for persona in PERSONAS:
+        row = matrix["personas"][persona]
+        known = known_entities(row)
+        for spec, entry, scope in aggregate_cells(row, aggregates):
+            if entry["entity_rows"] or scope is not None:
+                continue
+            shapes = Counter[str]()
+            for group in groups_of(engine.source(), spec, entry, None).values():
+                if (group.count() or 0) < aggregates["minimum_group"]:
+                    continue
+                others = len([e for e in group.units if e not in known])
+                mine = any(e in known for e in group.units)
+                shapes[
+                    "own" if not others else "two" if others > 1 else "less" if mine else "one"
+                ] += 1
+            found.setdefault(persona, {})[spec["name"]] = (
+                shapes["own"],
+                shapes["one"],
+                shapes["less"],
+                shapes["two"],
+            )
+    return found
