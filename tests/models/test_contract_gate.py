@@ -10,8 +10,10 @@ import copy
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 from models.contracts import gate
 from tests.models.test_payments_contract import (
@@ -19,6 +21,7 @@ from tests.models.test_payments_contract import (
     HASHED,
     Contract,
     changed,
+    column,
     committed,
     drop,
     drop_rule,
@@ -133,6 +136,12 @@ PASSING = {
     ),
     "a column not classified personal removed beside an added column": both(
         drop("contract_number"), add("department")
+    ),
+    "a personal column renamed with its classification": both(
+        rename("vendor_person_key", "payee_ref")
+    ),
+    "the table named with its server schema and in capitals": lambda c: c["schema"][0].update(
+        physicalName="MAIN.Payments"
     ),
 }
 
@@ -273,20 +282,35 @@ def at_two(change: Change, lines: list[str]) -> str:
     return changed(both(change, declaring("2.0.0", listed(lines))))
 
 
-def everything_declared(change: Change) -> str:
-    """The committed contract changed, at 2.0.0, listing every line the gate reports for the
-    change, the refused ones included, exactly as it reports them: only a refusal can fail it."""
+def declared(change: Change, version: str) -> str:
+    """The committed contract changed; at a new major `version`, listing every break the gate
+    may let it declare, exactly as the gate reports it, so only a refusal can fail it."""
+    if version == "1.0.0":
+        return changed(change)
+    return at_two(change, found_any(change))
+
+
+def found_any(change: Change) -> list[str]:
     after = committed()
     change(after)
-    declarable, refused = gate.breaks(committed(), after)
-    assert refused, "the change is refused by nothing, so this case proves nothing"
-    return at_two(change, declarable + refused)
+    return gate.breaks(committed(), after)[0]
+
+
+def schema_of(c: Contract) -> dict[str, Any]:
+    (schema,) = c["schema"]
+    return schema
 
 
 def rename_schema(name: str) -> Change:
     def change(c: Contract) -> None:
-        (schema,) = c["schema"]
-        schema["name"] = name
+        schema_of(c)["name"] = name
+
+    return change
+
+
+def schema_table(table: str) -> Change:
+    def change(c: Contract) -> None:
+        schema_of(c)["physicalName"] = table
 
     return change
 
@@ -296,108 +320,326 @@ def declassify_all(c: Contract) -> None:
         p.pop("classification", None)
 
 
-def table_under_a_new_schema(c: Contract) -> None:
-    """The published table's rows under a new schema, the old schema pointed at another table."""
-    (schema,) = c["schema"]
-    successor = copy.deepcopy(schema)
-    successor["name"] = "payments_v2"
-    for p in successor["properties"]:
-        p.pop("classification", None)
-    schema["physicalName"] = "payments_old"
-    c["schema"].append(successor)
+def twin(name: str, table: str, *, move: bool = False) -> Change:
+    """A copy of the schema, named `name` over `table`, its classifications dropped; with
+    `move`, the original pointed at another table."""
+
+    def change(c: Contract) -> None:
+        copied = copy.deepcopy(schema_of(c))
+        copied.update(name=name, physicalName=table)
+        for p in copied["properties"]:
+            p.pop("classification", None)
+        if move:
+            schema_of(c)["physicalName"] = "payments_old"
+        c["schema"].append(copied)
+
+    return change
 
 
-def nest_a_field(c: Contract) -> None:
-    properties(c).append(
-        {
-            "name": "payee",
-            "logicalType": "object",
-            "properties": [{"name": "name", "logicalType": "string", "physicalType": "VARCHAR"}],
-        }
+def nest(key: str) -> Change:
+    inner = [{"name": "name", "logicalType": "string", "physicalType": "VARCHAR"}]
+    shape: dict[str, object] = (
+        {"properties": inner}
+        if key == "properties"
+        else {"items": {"logicalType": "object", "properties": inner}}
     )
 
+    def change(c: Contract) -> None:
+        kind = "object" if key == "properties" else "array"
+        properties(c).append({"name": "payees", "logicalType": kind, **shape})
 
-REFUSED_BY_VERSION: dict[str, tuple[Change, str]] = {
+    return change
+
+
+def swap_physical(c: Contract) -> None:
+    """The personal column handed to a new unclassified property."""
+    column(c, "vendor_name")["physicalName"] = "vendor_name_old"
+    add("payee", physicalName="vendor_name")(c)
+
+
+def duplicate(name: str, **settings: object) -> Change:
+    def change(c: Contract) -> None:
+        copied = copy.deepcopy(column(c, name))
+        copied.pop("classification", None)
+        copied.update(settings)
+        properties(c).insert(0, copied)
+
+    return change
+
+
+def duplicate_schema(name: str) -> Change:
+    def change(c: Contract) -> None:
+        copied = copy.deepcopy(schema_of(c))
+        copied["name"] = name
+        for p in copied["properties"]:
+            p.pop("classification", None)
+        c["schema"].append(copied)
+
+    return change
+
+
+IN = "origin/main"
+SWAPPED = "payments's payments.payee (payments.vendor_name)"
+REFUSED_BY_VERSION: dict[str, tuple[Change, str, list[str]]] = {
+    "a twin schema over the table named in capitals": (
+        twin("payments_open", "PAYMENTS"),
+        "table payments is described by both payments's schema payments and payments's"
+        " schema payments_open",
+        ["1.0.0", "2.0.0"],
+    ),
+    "a twin schema over the table named with its server schema": (
+        twin("payments_open", "main.payments"),
+        "table payments is described by both",
+        ["1.0.0", "2.0.0"],
+    ),
+    "a twin schema over the table named in double quotes": (
+        twin("payments_open", '"Payments"'),
+        "table payments is described by both",
+        ["1.0.0"],
+    ),
+    "the table moved to a new schema named in capitals": (
+        twin("payments_v2", "PAYMENTS", move=True),
+        f"payments's schema payments_v2 describes table payments, which {IN} describes as"
+        " payments's schema payments",
+        ["2.0.0"],
+    ),
+    "the table moved to a new schema named with its server schema": (
+        twin("payments_v2", "main.payments", move=True),
+        "payments's payments_v2.vendor_name (payments.vendor_name) describes a column"
+        f" {IN} classifies personal and is classified nothing",
+        ["2.0.0"],
+    ),
+    "the personal column handed to a new property by physical name": (
+        swap_physical,
+        f"{SWAPPED} describes a column {IN} classifies personal and is classified nothing",
+        ["2.0.0"],
+    ),
+    "a property aliasing the personal column": (
+        add("payee_label", physicalName="vendor_name"),
+        "schema payments has two properties over column vendor_name",
+        ["1.0.0"],
+    ),
+    "a second schema with the schema's name": (
+        duplicate_schema("payments"),
+        "two schema entries are named payments",
+        ["1.0.0"],
+    ),
+    "a second schema with the schema's name in capitals": (
+        duplicate_schema("Payments"),
+        "two schema entries are named Payments",
+        ["1.0.0"],
+    ),
+    "a second property with a personal column's name": (
+        duplicate("vendor_name"),
+        "schema payments has two properties named vendor_name",
+        ["1.0.0"],
+    ),
+    "a second property with the amount's name, retyped and nullable": (
+        duplicate("amount", physicalType="FLOAT64", required=False),
+        "schema payments has two properties named amount",
+        ["1.0.0"],
+    ),
+    "a field nested in a column's properties": (
+        nest("properties"),
+        "payments.payees nests properties",
+        ["1.0.0"],
+    ),
+    "a field nested in a column's items": (
+        nest("items"),
+        "payments.payees nests properties",
+        ["1.0.0"],
+    ),
     "a personal column declassified": (
         unsetting("vendor_name", "classification"),
-        "payments: payments.vendor_name is no longer classified personal, which no version",
+        "payments's payments.vendor_name (payments.vendor_name) describes a column"
+        f" {IN} classifies personal and is classified nothing",
+        ["1.0.0", "2.0.0"],
     ),
     "a personal column reclassified": (
         setting("document_number", "classification", "restricted"),
-        "payments: payments.document_number is no longer classified personal, which no version",
+        "is classified restricted",
+        ["1.0.0", "2.0.0"],
     ),
     "a personal column renamed without its classification": (
         both(rename("vendor_person_key", "payee_ref"), unsetting("payee_ref", "classification")),
-        "payments.vendor_person_key, classified personal, is gone while payments.payee_ref"
-        " is added without that classification",
+        f"payments.vendor_person_key, which {IN} classifies personal, is described nowhere while"
+        " payments's payments.payee_ref (payments.payee_ref) is added without that classification",
+        ["2.0.0"],
     ),
     "a personal column removed beside an added column not classified personal": (
         both(drop("vendor_name"), add("department")),
-        "payments.vendor_name, classified personal, is gone while payments.department",
+        f"payments.vendor_name, which {IN} classifies personal, is described nowhere while"
+        " payments's payments.department",
+        ["2.0.0"],
     ),
-    "the schema renamed": (rename_schema("payments_v2"), "schema payments is gone or renamed"),
-    "the schema renamed with every classification dropped": (
-        both(rename_schema("payments_v2"), declassify_all),
+    "the schema renamed": (
+        rename_schema("payments_v2"),
         "schema payments is gone or renamed",
+        ["2.0.0"],
     ),
     "the schema renamed with every type changed": (
         both(rename_schema("payments_v2"), bigquery_types),
         "schema payments is gone or renamed",
+        ["2.0.0"],
     ),
-    "the published table under a new schema": (
-        table_under_a_new_schema,
-        "table payments of schema payments is now under schema payments_v2",
+    "a table under a schema no server names": (
+        schema_table("other.payments"),
+        "schema payments's table name cannot be normalised",
+        ["2.0.0"],
     ),
-    "a field nested in a column": (nest_a_field, "payments.payee nests properties"),
+    "a table name of three parts": (
+        schema_table("db.main.payments"),
+        "schema payments's table name cannot be normalised",
+        ["2.0.0"],
+    ),
+    "a table name holding a quote": (
+        schema_table('pay"ments'),
+        "schema payments's table name cannot be normalised",
+        ["2.0.0"],
+    ),
+    "a column name holding a dot": (
+        setting("amount", "physicalName", "payments.amount"),
+        "payments.amount's column name cannot be normalised",
+        ["2.0.0"],
+    ),
     "a contract the CLI cannot read": (
         setting("payment_key", "required", "maybe"),
         "contract payments is unreadable",
+        ["2.0.0"],
+    ),
+}
+CASES = [
+    (name, version) for name, (_, _, versions) in REFUSED_BY_VERSION.items() for version in versions
+]
+
+
+@pytest.mark.parametrize(("name", "version"), CASES)
+def test_no_version_passes_a_shape_the_gate_cannot_compare_or_a_personal_column_unclassified(
+    published_repo: Path, name: str, version: str
+) -> None:
+    change, says, _ = REFUSED_BY_VERSION[name]
+    ok, report = gate.check(with_files(published_repo, {PATH: declared(change, version)}))
+    assert not ok, report
+    assert says in report, report
+    for other in ["(not listed", "did not happen", "no break can be declared"]:
+        assert other not in report, report
+
+
+def test_a_refusal_listed_verbatim_still_fails(published_repo: Path) -> None:
+    change = unsetting("vendor_name", "classification")
+    after = committed()
+    change(after)
+    refused = gate.refusals({"payments": committed()}, {"payments": after})["payments"]
+    assert refused
+    ok, report = gate.check(with_files(published_repo, {PATH: at_two(change, refused)}))
+    assert not ok
+    assert refused[0] in report
+    assert "(not listed" not in report and "did not happen" not in report
+
+
+def contract(cid: str, schemas: list[dict[str, Any]]) -> str:
+    """A new contract of `schemas`, each `{name: ..., physicalName: ..., properties: [...]}`."""
+    body = {"apiVersion": "v3.2.0", "kind": "DataContract", "id": cid, "version": "1.0.0"}
+    body |= {"status": "active", "servers": committed()["servers"], "schema": schemas}
+    return yaml.safe_dump(body, sort_keys=False)
+
+
+def schema(
+    name: str, table: str, *columns: str, classification: str | None = None
+) -> dict[str, Any]:
+    props = [{"name": c, "logicalType": "string", "physicalType": "VARCHAR"} for c in columns]
+    if classification:
+        for p in props:
+            p["classification"] = classification
+    return {"name": name, "physicalName": table, "properties": props}
+
+
+NEW = "models/contracts/payees.odcs.yaml"
+WITHOUT_PAYEE = declared(drop("vendor_name"), "2.0.0")
+ACROSS: dict[str, tuple[dict[str, str], str]] = {
+    "the personal column moved to a new contract without its classification": (
+        {PATH: WITHOUT_PAYEE, NEW: contract("payees", [schema("payees", "payees", "vendor_name")])},
+        f"payments.vendor_name, which {IN} classifies personal, is described nowhere while"
+        " payees's payees.vendor_name (payees.vendor_name) is added without that classification",
+    ),
+    "a new contract over the published table without its classification": (
+        {
+            PATH: CONTRACT.read_text(),
+            NEW: contract("payees", [schema("payees", "payments", "vendor_name")]),
+        },
+        "payees's payees.vendor_name (payments.vendor_name) describes a column origin/main"
+        " classifies personal and is classified nothing",
+    ),
+    "a new contract over the published table named in capitals": (
+        {PATH: CONTRACT.read_text(), NEW: contract("payees", [schema("payees", "PAYMENTS", "x")])},
+        "table payments is described by both payees's schema payees and payments's schema payments",
+    ),
+    "a new contract with two schemas over one table": (
+        {
+            PATH: CONTRACT.read_text(),
+            NEW: contract(
+                "payees", [schema("payees", "payees", "a"), schema("view", "Payees", "a")]
+            ),
+        },
+        "table payees is described by both payees's schema payees and payees's schema view",
+    ),
+    "a new contract with two schemas of one name": (
+        {
+            PATH: CONTRACT.read_text(),
+            NEW: contract(
+                "payees", [schema("payees", "payees", "a"), schema("payees", "other", "a")]
+            ),
+        },
+        "payees: two schema entries are named payees",
     ),
 }
 
 
-@pytest.mark.parametrize("name", list(REFUSED_BY_VERSION))
-def test_no_version_declares_a_lowered_classification_a_gone_schema_or_an_unreadable_contract(
+@pytest.mark.parametrize("name", list(ACROSS))
+def test_the_rules_hold_across_the_contracts_of_the_tree_new_ones_included(
     published_repo: Path, name: str
 ) -> None:
-    change, says = REFUSED_BY_VERSION[name]
-    ok, report = gate.check(with_files(published_repo, {PATH: everything_declared(change)}))
-    assert not ok, report
-    assert says in report
-    assert "(not listed" not in report and "did not happen" not in report, report
-
-
-GONE = f"contract payments ({PATH} on origin/main) is gone or has a new id"
-REFUSED: dict[str, tuple[dict[str, str], str]] = {
-    "the contract's id changed": (
-        {PATH: at_two(lambda c: c.update(id="payments-v2"), [GONE])},
-        GONE,
-    ),
-    "the contract retired": ({}, GONE),
-    "the unchanged contract beside a broken copy with its id at models/contracts/a.odcs.yaml": (
-        {PATH: CONTRACT.read_text(), "models/contracts/a.odcs.yaml": changed(drop("amount"))},
-        "contract payments is in both ",
-    ),
-    "the unchanged contract beside a broken copy with its id at models/contracts/zz.odcs.yaml": (
-        {PATH: CONTRACT.read_text(), "models/contracts/zz.odcs.yaml": changed(drop("amount"))},
-        "contract payments is in both ",
-    ),
-}
-
-
-@pytest.mark.parametrize("name", list(REFUSED))
-def test_no_version_declares_a_contract_gone_or_doubled(published_repo: Path, name: str) -> None:
-    files, says = REFUSED[name]
+    files, says = ACROSS[name]
     ok, report = gate.check(with_files(published_repo, files))
     assert not ok, report
-    assert says in report
+    assert says in report, report
+    assert "(not listed" not in report and "no break can be declared" not in report, report
 
 
-def test_no_version_declares_an_unreadable_contract(published_repo: Path) -> None:
-    text = at_two(remove_the_payee_name, BREAKS) + "schema: [\n"
-    ok, report = gate.check(with_files(published_repo, {PATH: text}))
-    assert not ok
-    assert f"{gate.CONTRACT} is unreadable" in report
+def test_a_personal_column_moved_to_a_new_contract_with_its_classification_passes(
+    published_repo: Path,
+) -> None:
+    payees = contract(
+        "payees", [schema("payees", "payees", "vendor_name", classification="personal")]
+    )
+    ok, report = gate.check(with_files(published_repo, {PATH: WITHOUT_PAYEE, NEW: payees}))
+    assert ok, report
+
+
+def test_a_published_contract_of_two_schemas_over_one_table_fails_until_fixed(
+    tmp_path: Path,
+) -> None:
+    doubled = changed(twin("payments_view", "payments"))
+    repo = git_repo(tmp_path, {PATH: doubled})
+    for text in [
+        doubled,
+        changed(both(twin("payments_view", "payments"), lambda c: c.update(name="P"))),
+    ]:
+        ok, report = gate.check(with_files(repo, {PATH: text}))
+        assert not ok
+        assert "table payments is described by both payments's schema payments and" in report
+        assert "now under" not in report and "describes table" not in report, report
+
+
+@pytest.mark.parametrize(
+    "path", ["models/contracts/zahlungen-ü.odcs.yaml", 'models/contracts/a "quoted" b.odcs.yaml']
+)
+def test_a_contract_at_a_path_git_quotes_is_compared(tmp_path: Path, path: str) -> None:
+    repo = git_repo(tmp_path, {path: CONTRACT.read_text()})
+    ok, report = gate.check(with_files(repo, {path: changed(both(declassify_all, drop("amount")))}))
+    assert not ok, report
+    assert "Removed property amount" in report
+    assert "classifies personal and is classified nothing" in report
 
 
 def test_a_schema_rename_hides_no_break_and_in_place_each_needs_its_line(
@@ -411,7 +653,7 @@ def test_a_schema_rename_hides_no_break_and_in_place_each_needs_its_line(
     assert not ok
     assert f"payments: {retyped[0]} (not listed in {gate.DECLARED})" in report
     renamed = both(rename_schema("payments_v2"), bigquery_types)
-    ok, report = gate.check(with_files(published_repo, {PATH: everything_declared(renamed)}))
+    ok, report = gate.check(with_files(published_repo, {PATH: declared(renamed, "2.0.0")}))
     assert not ok
     assert "schema payments is gone or renamed, which no version can declare" in report
 

@@ -54,6 +54,7 @@ pass, and the gate says so.
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +70,7 @@ SUFFIX = ".odcs.yaml"
 WORDING = {"description", "name"}
 # The contract's own custom property that lists the breaks of a new major version.
 DECLARED = "breakingChanges"
+NEVER = "which no version can declare"
 SEMVER = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 Contract = dict[str, Any]
 
@@ -94,11 +96,11 @@ def published(repo: Path, base: str = BASE) -> dict[str, str]:
             f"{base} is not in this clone, so the contracts cannot be compared with it:"
             f" run `git fetch origin main` and try again"
         )
-    tree = git(repo, "ls-tree", "-r", "--name-only", base)
+    tree = git(repo, "ls-tree", "-r", "-z", "--name-only", base)
     if tree.returncode != 0:
         raise GateError(f"{base}'s tree cannot be read: {tree.stderr.strip()}")
     texts: dict[str, str] = {}
-    for path in tree.stdout.splitlines():
+    for path in tree.stdout.split("\0"):
         if path.endswith(SUFFIX):
             shown = git(repo, "show", f"{base}:{path}")
             if shown.returncode != 0:
@@ -109,8 +111,8 @@ def published(repo: Path, base: str = BASE) -> dict[str, str]:
 
 def working(repo: Path) -> dict[str, str]:
     """Every contract file of the working tree, tracked or new, by path, with its text."""
-    listed = git(repo, "ls-files", "--cached", "--others", "--exclude-standard").stdout
-    paths = [p for p in listed.splitlines() if p.endswith(SUFFIX) and (repo / p).is_file()]
+    listed = git(repo, "ls-files", "-z", "--cached", "--others", "--exclude-standard").stdout
+    paths = [p for p in listed.split("\0") if p.endswith(SUFFIX) and (repo / p).is_file()]
     return {p: (repo / p).read_text() for p in paths}
 
 
@@ -136,23 +138,6 @@ def rules(contract: Contract) -> dict[str, dict[str, Any]]:
             for n, rule in enumerate(owner.get("quality") or []):
                 found[f"{place}/{rule.get('id') or f'#{n} (no id)'}"] = rule
     return found
-
-
-def personal(contract: Contract) -> set[str]:
-    return {
-        f"{schema['name']}.{p['name']}"
-        for schema in contract.get("schema") or []
-        for p in schema.get("properties") or []
-        if p.get("classification") == "personal"
-    }
-
-
-def columns(contract: Contract) -> set[str]:
-    return {
-        f"{schema['name']}.{p['name']}"
-        for schema in contract.get("schema") or []
-        for p in schema.get("properties") or []
-    }
 
 
 def breaks(before: Contract, after: Contract) -> tuple[list[str], list[str]]:
@@ -182,47 +167,187 @@ def breaks(before: Contract, after: Contract) -> tuple[list[str], list[str]]:
             k: v for k, v in new[key].items() if k not in WORDING
         }:
             found.append(f"quality rule {key} is changed beyond its wording")
-    return found, refused(before, after)
+    gone = [
+        f"schema {name} is gone or renamed, {NEVER}"
+        for name in schema_names(before)
+        if name not in schema_names(after)
+    ]
+    return found, gone
 
 
-def refused(before: Contract, after: Contract) -> list[str]:
-    """What in `after` breaks a consumer of `before` whatever its version, each as one line."""
-    never = "which no version can declare"
-    found = [
-        f"{col} nests properties, which this gate does not read, {never}" for col in nested(after)
-    ]
-    old = {s["name"]: s.get("physicalName") or s["name"] for s in before.get("schema") or []}
-    new = {s["name"]: s.get("physicalName") or s["name"] for s in after.get("schema") or []}
-    found += [f"schema {name} is gone or renamed, {never}" for name in old if name not in new]
-    found += [
-        f"table {table} of schema {name} is now under schema {other}, {never}"
-        for name, table in old.items()
-        for other, moved in new.items()
-        if moved == table and other != name
-    ]
-    found += [
-        f"{col} is no longer classified personal, {never}"
-        for col in sorted(personal(before) & columns(after) - personal(after))
-    ]
-    gone = sorted(personal(before) - columns(after))
-    unclassified = sorted(columns(after) - columns(before) - personal(after))
-    found += [
-        f"{col}, classified personal, is gone while {added} is added without that classification,"
-        f" {never}: a rename cannot be told from a removal and an addition"
-        for col in gone
-        for added in unclassified
-    ]
-    return found
-
-
-def nested(contract: Contract) -> list[str]:
-    """Every column that holds properties of its own (an object's or an array's items)."""
+def schema_names(contract: Contract) -> list[str]:
     return [
-        f"{schema['name']}.{p['name']}"
-        for schema in contract.get("schema") or []
-        for p in schema.get("properties") or []
-        if "properties" in p or "items" in p
+        s["name"]
+        for s in contract.get("schema") or []
+        if isinstance(s, dict) and isinstance(s.get("name"), str)
     ]
+
+
+def identifier(part: str) -> str | None:
+    """One part of a name, lower-cased, without the double quotes that may wrap it whole; None
+    when it is empty or holds any other quote or white space."""
+    if len(part) >= 2 and part[0] == part[-1] == '"':
+        part = part[1:-1]
+    if not part or any(ch in "\"'`" or ch.isspace() for ch in part):
+        return None
+    return part.lower()
+
+
+def table_name(contract: Contract, schema: dict[str, Any]) -> str | None:
+    """The table a schema entry describes: its `physicalName`, else its name, as `table` or
+    `<server schema>.table`, each part an identifier, the prefix one a server of the contract
+    names; None when the name cannot be put in that form."""
+    name = schema.get("physicalName") or schema.get("name")
+    if not isinstance(name, str):
+        return None
+    parts = [identifier(part) for part in name.split(".")]
+    if len(parts) > 2 or None in parts:
+        return None
+    prefixes = {
+        identifier(server["schema"])
+        for server in contract.get("servers") or []
+        if isinstance(server, dict) and isinstance(server.get("schema"), str)
+    }
+    if len(parts) == 2 and parts[0] not in prefixes:
+        return None
+    return parts[-1]
+
+
+def column_name(prop: dict[str, Any]) -> str | None:
+    """The physical column a property describes: its `physicalName`, else its name, an
+    identifier with no dot; None otherwise."""
+    name = prop.get("physicalName") or prop.get("name")
+    found = identifier(name) if isinstance(name, str) else None
+    return None if found is None or "." in found else found
+
+
+@dataclass(frozen=True)
+class Described:
+    """One property of a contract, by its logical names and the table and column it describes."""
+
+    contract: str
+    schema: str
+    name: str
+    table: str
+    column: str
+    classification: object
+
+    @property
+    def where(self) -> tuple[str, str]:
+        return self.table, self.column
+
+    def __str__(self) -> str:
+        return f"{self.contract}'s {self.schema}.{self.name} ({self.table}.{self.column})"
+
+
+def normalised(contract: Contract, strict: bool) -> tuple[list[Described], list[str]]:
+    """Every property of the contract, and, when `strict`, what keeps its shape from being read
+    as one property per physical column of one table per schema entry. Not strict (a contract
+    already on origin/main), a name that cannot be normalised is only lower-cased."""
+    found: list[Described] = []
+    wrong: list[str] = []
+    cid = str(contract["id"])
+    names: set[str] = set()
+    for schema in contract.get("schema") or []:
+        if not isinstance(schema, dict) or not isinstance(schema.get("name"), str):
+            wrong.append(f"a schema entry has no name, {NEVER}")
+            continue
+        sname: str = schema["name"]
+        table = table_name(contract, schema)
+        if table is None:
+            wrong.append(f"schema {sname}'s table name cannot be normalised, {NEVER}")
+            table = str(schema.get("physicalName") or sname).lower()
+        if sname.lower() in names:
+            wrong.append(f"two schema entries are named {sname}, {NEVER}")
+        names.add(sname.lower())
+        props: set[str] = set()
+        columns: set[str] = set()
+        for prop in schema.get("properties") or []:
+            if not isinstance(prop, dict) or not isinstance(prop.get("name"), str):
+                wrong.append(f"a property of schema {sname} has no name, {NEVER}")
+                continue
+            pname: str = prop["name"]
+            if "properties" in prop or "items" in prop:
+                wrong.append(
+                    f"{sname}.{pname} nests properties, which this gate does not read, {NEVER}"
+                )
+            column = column_name(prop)
+            if column is None:
+                wrong.append(f"{sname}.{pname}'s column name cannot be normalised, {NEVER}")
+                column = str(prop.get("physicalName") or pname).lower()
+            if pname.lower() in props:
+                wrong.append(f"schema {sname} has two properties named {pname}, {NEVER}")
+            if column in columns:
+                wrong.append(f"schema {sname} has two properties over column {column}, {NEVER}")
+            props.add(pname.lower())
+            columns.add(column)
+            found.append(Described(cid, sname, pname, table, column, prop.get("classification")))
+    return found, wrong if strict else []
+
+
+def refusals(before: dict[str, Contract], after: dict[str, Contract]) -> dict[str, list[str]]:
+    """What in the working tree's contracts `after` breaks a consumer of `origin/main`'s
+    `before` whatever their versions, by contract id, compared by normalised table and column."""
+    found: dict[str, list[str]] = {cid: [] for cid in after}
+    old: list[Described] = []
+    for contract in before.values():
+        old += normalised(contract, strict=False)[0]
+    new: list[Described] = []
+    tables: dict[str, list[tuple[str, str]]] = {}
+    for cid, contract in after.items():
+        described, wrong = normalised(contract, strict=True)
+        found[cid] += wrong
+        new += described
+        for schema in contract.get("schema") or []:
+            if isinstance(schema, dict) and isinstance(schema.get("name"), str):
+                table = table_name(contract, schema)
+                if table is not None:
+                    tables.setdefault(table, []).append((cid, schema["name"]))
+    for table, owners in tables.items():
+        if len(owners) > 1:
+            names = " and ".join(f"{cid}'s schema {name}" for cid, name in sorted(owners))
+            for cid in dict.fromkeys(cid for cid, _ in owners):
+                found[cid].append(f"table {table} is described by both {names}, {NEVER}")
+    was_table = {(d.table): set[tuple[str, str]]() for d in old}
+    was_column = {d.where: set[tuple[str, str, str]]() for d in old}
+    for d in old:
+        was_table[d.table].add((d.contract, d.schema))
+        was_column[d.where].add((d.contract, d.schema, d.name))
+    personal = {d.where for d in old if d.classification == "personal"}
+    moved: set[tuple[str, str]] = set()
+    for d in new:
+        if (d.contract, d.schema) in moved:
+            pass  # said once for the schema
+        elif d.table in was_table and (d.contract, d.schema) not in was_table[d.table]:
+            moved.add((d.contract, d.schema))
+            names = ", ".join(f"{c}'s schema {s}" for c, s in sorted(was_table[d.table]))
+            found[d.contract].append(
+                f"{d.contract}'s schema {d.schema} describes table {d.table}, which {BASE}"
+                f" describes as {names}, {NEVER}:"
+                " a table keeps its contract and schema name while it is described"
+            )
+        elif d.where in was_column and (d.contract, d.schema, d.name) not in was_column[d.where]:
+            names = ", ".join(f"{c}'s {s}.{n}" for c, s, n in sorted(was_column[d.where]))
+            found[d.contract].append(
+                f"{d} describes a column {BASE} describes as {names}, {NEVER}:"
+                " a column keeps its property name while it is described"
+            )
+        if d.where in personal and d.classification != "personal":
+            found[d.contract].append(
+                f"{d} describes a column {BASE} classifies personal and is classified"
+                f" {d.classification or 'nothing'}, {NEVER}"
+            )
+    described = {d.where for d in new}
+    olds = {d.where for d in old}
+    unclassified = [d for d in new if d.where not in olds and d.classification != "personal"]
+    for table, column in sorted(personal - described):
+        for d in unclassified:
+            found[d.contract].append(
+                f"{table}.{column}, which {BASE} classifies personal, is described nowhere while"
+                f" {d} is added without that classification, {NEVER}: within one change a"
+                " rename cannot be told from a removal and an addition"
+            )
+    return found
 
 
 def major(contract: Contract) -> int | None:
@@ -298,17 +423,23 @@ def compare(before: dict[str, str], after: dict[str, str], base: str = BASE) -> 
             found.append(f"contract {contract['id']} is in both {where[contract['id']]} and {path}")
         else:
             current[contract["id"]], where[contract["id"]] = contract, path
+    published: dict[str, tuple[str, Contract]] = {}
     for path, text in before.items():
         contract = parsed(path, text)
         if isinstance(contract, str):
             raise GateError(f"{base}'s {contract}")
-        if contract["id"] not in current:
-            found.append(f"contract {contract['id']} ({path} on {base}) is gone or has a new id")
+        published[contract["id"]] = path, contract
+    whatever = refusals({cid: c for cid, (_, c) in published.items()}, current)
+    for cid, (path, contract) in published.items():
+        if cid not in current:
+            found.append(f"contract {cid} ({path} on {base}) is gone or has a new id")
             continue
-        now = current[contract["id"]]
+        now = current[cid]
         declarable, never = breaks(contract, now)
+        never += whatever.pop(cid, [])
         lines = never + undeclared(contract, now, declarable, never)
-        found += [f"{contract['id']}: {line}" for line in lines]
+        found += [f"{cid}: {line}" for line in lines]
+    found += [f"{cid}: {line}" for cid, lines in whatever.items() for line in lines]
     if not found:
         return True, f"contract: no change breaks a consumer of {base}'s contracts"
     lines = "\n".join(f"- {line}" for line in found)
