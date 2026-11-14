@@ -26,7 +26,7 @@ from ingest.fetch import landing_path
 from tests.models.dbt_build import DBT, PROJECT, Build, built, query
 from tests.models.test_group_totals import worked_out
 from tests.semantics.metric_cli import MF, manifest, mf, mf_env, mf_query
-from tests.semantics.no_network.sitecustomize import REFUSED
+from tests.semantics.no_network.refusal import REFUSED
 
 SEEDS = PROJECT / "seeds" / "staging" / "chicago"
 SEMANTICS = PROJECT.parent / "semantics"
