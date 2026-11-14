@@ -71,6 +71,17 @@ controls:
     asserts: Answers are scored by executing their queries against a golden set, and a metric change that moves the score is reported.
     proven_by: [tests/agent/test_evaluation.py::test_metric_change_shows_as_drift]
     status: not-implemented
+  - id: landed-file-breaks-fail-its-quality-suite
+    layer: Evaluation and monitoring
+    owner: group-controller
+    asserts: python -m ingest.quality <source> runs the landed file's GX Core suite and exits non-zero when the file breaks its schema, has a null key, holds a value out of its range or moves a known-mess count from the value measured on the pinned file; each suite passes on a fixture of its source and fails on that fixture with one planted break of each kind; and a broken rule on a column that can hold a name reports a count, never the name.
+    proven_by:
+      - tests/ingest/test_quality.py::test_each_suite_passes_on_its_fixture
+      - tests/ingest/test_quality.py::test_each_suite_fails_on_its_fixture_with_one_planted_break
+      - tests/ingest/test_quality.py::test_the_command_exits_non_zero_on_a_break_and_names_each_landed_file_of_a_set
+      - tests/ingest/test_quality.py::test_a_break_in_a_name_column_reports_counts_and_never_the_name
+      - tests/ingest/test_quality.py::test_a_column_that_can_hold_a_name_carries_only_rules_whose_result_is_a_count
+    status: implemented
   - id: release-ships-as-one-unit
     layer: Change management
     owner: approver

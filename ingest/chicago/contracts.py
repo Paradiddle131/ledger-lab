@@ -68,8 +68,6 @@ class Profile(TypedDict):
     non_numeric_revisions: int
     vendors_hashed: int
     hashed_rows: int
-    hashed_rows_with_contract_number: int
-    hashed_rows_with_specification_number: int
     order_number_formats: dict[str, int]
 
 
@@ -101,11 +99,5 @@ def profile(path: Path) -> Profile:
             "SELECT count(DISTINCT vendor_name) FROM t WHERE vendor_name LIKE 'person:%'"
         ),
         hashed_rows=one(f"SELECT count(*) FROM t WHERE {HASHED}"),  # noqa: S608
-        hashed_rows_with_contract_number=one(
-            f"SELECT count(purchase_order_contract_number) FROM t WHERE {HASHED}"  # noqa: S608
-        ),
-        hashed_rows_with_specification_number=one(
-            f"SELECT count(specification_number) FROM t WHERE {HASHED}"  # noqa: S608
-        ),
         order_number_formats={str(k): int(v) for k, v in shapes},
     )

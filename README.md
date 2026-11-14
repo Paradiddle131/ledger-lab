@@ -57,7 +57,8 @@ uv run python -m ingest.fetch ecb-rates           # lands landing/ecb-rates as P
 uv run python -m ingest.fetch nl-government-budget  # lands landing/nl-government-budget as Parquet
 uv run python -m ingest.fetch uk-transport-spend-2025  # lands April 2025 to March 2026 as one Parquet set
 uv run python -m ingest.fetch sec-annual-filings  # lands the listed companies' annual-report revenue from four quarters as Parquet
-uv run pytest -m landed                          # profiles what is landed and checks it for hashed names left in clear
+uv run python -m ingest.quality <source>         # checks a landed file against its GX Core suite; a set's name checks each of its files
+uv run pytest -m landed                          # runs every quality suite on what is landed and checks it for hashed names left in clear
 uv run pytest -m pages                           # fails once GOV.UK lists another file or a change note for a pinned month
 ```
 

@@ -144,6 +144,4 @@ def test_the_profile_counts_revisions_negative_awards_and_formats(tmp_path: Path
     assert counts["non_numeric_revisions"] == 1
     assert counts["vendors_hashed"] == 1
     assert counts["hashed_rows"] == 1
-    assert counts["hashed_rows_with_contract_number"] == 1
-    assert counts["hashed_rows_with_specification_number"] == 0
     assert counts["order_number_formats"] == {"A999999": 3}
