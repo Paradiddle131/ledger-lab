@@ -468,9 +468,31 @@ def read_from_a_seed(files: dict[str, str]) -> None:
     replaced(
         CALENDARS,
         "  - name: period_status\n",
-        "  - name: period_status\n"
-        "    config: {alias: \"{{ env_var('ANY', 'period_status') }}\"}\n",
+        "  - name: period_status\n    config: {alias: \"{{ env_var('ANY', 'period_status') }}\"}\n",
     )(files)
+
+
+SNAPSHOT = """
+snapshots:
+  - name: period_status_history
+    relation: ref('period_status')
+    config:
+      unique_key: entity_id || fiscal_year || fiscal_period
+      strategy: check
+      check_cols: all
+      alias: "{{ env_var('ANY', 'period_status_history') }}"
+"""
+
+
+def read_from_a_snapshot(files: dict[str, str]) -> None:
+    """A semantic model on a snapshot, invented for the test, whose entry reads the environment."""
+    files["models/snapshots/history.yml"] = SNAPSHOT
+    files[f"{FOLDER}/snapshots.yml"] = (
+        SEED_READER.replace("period_statuses", "period_history")
+        .replace("ref('period_status')", "ref('period_status_history')")
+        .replace("period_status_row", "period_history_row")
+        .replace("closed_periods", "closed_history")
+    )
 
 
 REFUSED: dict[str, tuple[Edit, list[str]]] = {
@@ -508,6 +530,7 @@ REFUSED: dict[str, tuple[Edit, list[str]]] = {
                 "  - name: payments\n    config: {meta: {read: \"{{ env_var('ANY', '') }}\"}}\n",
             ),
             read_from_a_seed,
+            read_from_a_snapshot,
             lambda files: files.update({"models/macros/generate_alias_name.sql": ALIAS_MACRO}),
         ),
         [
@@ -524,6 +547,8 @@ REFUSED: dict[str, tuple[Edit, list[str]]] = {
             "semantics/metricflow/contracts.yml: semantic_models chicago_contracts holds dbt Jinja"
             " at config.meta.filter",
             "models/models/calendars/calendars.yml: seeds period_status holds dbt Jinja at"
+            " config.alias",
+            "models/snapshots/history.yml: snapshots period_status_history holds dbt Jinja at"
             " config.alias",
             "models/macros/generate_alias_name.sql: macro generate_alias_name decides relation"
             " names, which the gate does not compare",
