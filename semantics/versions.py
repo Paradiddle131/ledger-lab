@@ -2,68 +2,73 @@
 same version, or a metric loses its version or its owner.
 
 Every metric carries `version` in its `config.meta`, beside its owner, term and role: an integer
-from 1 that only goes up. The definitions compared are dbt's own reading of each tree: the gate
-exports `origin/main`'s tree (`git archive`) and the working tree (its tracked and new files, not
-the ignored ones) into temporary folders and runs `dbt parse` on the dbt project at
-`models/dbt_project.yml` of each, on the local target, with no network and under one fixed
-environment the gate sets, the same for both. So every path dbt reads metric YAML from, the
-`.dbtignore` it honours, the project's configuration (`+enabled` and the rest), the newer spec of
-metrics on a model's own entry and the project's time spines are dbt's, and the definitions are
-built from the semantic manifest dbt writes. A metric's definition, which its version names, is:
+from 1 that only goes up. The gate compares dbt's own parse of two trees:
 
-- its own entry of the semantic manifest, all but its version and its owner;
-- every metric it is built from, transitively: every metric input anywhere in its type parameters
-  (a ratio's numerator and denominator, a derived metric's inputs, and any other kind's) and every
-  metric a filter anywhere in it reads (`{{ Metric('x', ...) }}`), each found by MetricFlow's own
-  model of the manifest and parser of filters;
+- `origin/main`'s tree, read from git's objects as stored (`git ls-tree` and `git cat-file`, so no
+  export attribute leaves a file out or rewrites one);
+- the working tree's tracked and new files, not the ignored ones;
+
+of each, only the dbt project folder (`models/`) and the folders its project file's `*-paths`
+settings name are copied into a temporary folder and parsed with `dbt parse` on the local target,
+with the network refused, under the same fixed environment for both but for the paths of each
+parse's own temporary folder (nothing of the caller's environment but `PATH`).
+
+A metric's definition, which its version names, is built from the semantic manifest dbt writes and
+the project file's `vars` as dbt loads them:
+
+- its own entry, all but its version and its owner;
+- every metric it is built from, transitively: every metric input in its type parameters (a
+  ratio's numerator and denominator, a derived metric's inputs, and any other kind's) and every
+  metric a filter in it reads (`{{ Metric('x', ...) }}`), found by MetricFlow's own model of the
+  manifest and parser of filters;
 - the semantic model of each measure those metrics resolve to and of each semantic model a metric
-  aggregates directly, with the semantic models they can join through a shared entity name: their
-  dbt relation, entities, dimensions, defaults and every other key, and of their measures only the
-  ones resolved to;
-- the project's time spines.
+  aggregates directly, with the semantic models they join through a shared entity name: their
+  relation, entities, dimensions, defaults and other keys, and of their measures only the ones
+  resolved to;
+- the project's time spines;
+- the project file's whole `vars` block, so a var changed means every metric's version goes up.
 
-What a metric is built from counts for what can change its number: the wording of a component (the
-`description` and `label` of an input metric, a measure, a dimension, an entity or a semantic
-model) and an input metric's `meta` are left out, since the metric's own label and description are
-what a reader is shown of its meaning. Where dbt records the file and lines an entry came from,
-that is left out too, and each string is compared without the whitespace at its ends, so moving a
-definition, a comment, key order, quoting or line folding is no change.
+Left out of it: the wording of a component (the `description` and `label` of an input metric, a
+measure, a dimension, an entity or a semantic model), an input metric's `meta`, and the file and
+lines dbt records an entry came from; each string is compared without the whitespace at its ends.
 
-A definition that could differ for a consumer while both trees read the same is refused: dbt Jinja
-in a semantic model or metric entry, or in the entry of a model a semantic model reads or a time
-spine is (but in a filter, which MetricFlow renders itself, and in a description of a model's entry
-outside its metrics, wording no definition holds), and any Jinja in the project file. dbt renders
-that Jinja with the environment (`env_var`), command-line variables (`var`), the clock and the run,
-none of which is in the tree. A symbolic link in either tree, and a file dbt reads outside the
-tree, are refused too.
+Outside the definition, so a change there is not seen by the gate:
 
-Two things are outside the definition. The SQL of the dbt model a semantic model reads: the
-semantic layer cannot see it, so a change there that moves a number is caught, if at all, by the
-model's own tests, the payments data contract's gate (`models/contracts/gate.py`) and the values
-pinned over the landed build (`make reconcile-landed`). And the relation names the profile gives on
-another target or environment: the gate reads them on the local target under its own environment.
+- the SQL of the dbt models a semantic model reads (caught, if at all, by the models' tests, the
+  payments data contract's gate and the values pinned over the landed build);
+- command-line `--vars` a consumer passes to dbt;
+- relation names decided by the profile, by a model's SQL `config()`, or on a target other than
+  the local one: the gate compares the local target's parse;
+- dbt packages, which the gate refuses rather than reads.
 
-The gate fails when, against `origin/main`:
+The gate fails when:
 
-- the clone holds no `origin/main`, or HEAD does not contain it (merge it first: a branch is gated
-  against the newest `origin/main` it holds, so of two branches that bump one metric to the same
-  version, the second must merge the first and is then compared with it);
-- `origin/main`'s tree cannot be exported, or its project cannot be parsed: never a pass on
-  something it could not read;
-- the working tree's project cannot be parsed, holds what is refused above, or is gone;
-- a metric `origin/main` defines is gone from the working tree or renamed (no metric is retired
-  this way: its consumers cite it by name and version);
+- the clone holds no `origin/main`, or HEAD does not contain it (merge it first, so of two
+  branches that bump one metric to the same version, the second is compared with the first);
+- git cannot read `origin/main`'s files (an object a partial clone cannot fetch, or any other
+  failed `ls-tree` or `cat-file`);
+- either tree has its dbt project file somewhere other than `models/dbt_project.yml`;
+- either tree holds, in what dbt reads, a symbolic link or a submodule; declares dbt packages
+  (`packages.yml`, `dependencies.yml`); has a project file holding Jinja, or a path setting that is
+  absolute or outside the tree; defines `generate_alias_name`, `generate_schema_name` or
+  `generate_database_name`; holds dbt Jinja where dbt renders it in a semantic model or metric
+  entry, or in the entry of a model, seed or snapshot a semantic model reads or a time spine is
+  (dbt renders that Jinja with the environment, command-line variables and the clock);
+- dbt cannot parse either tree: the message names the tree and dbt's error class, never dbt's own
+  output;
+- a metric `origin/main` defines is gone from the working tree or renamed;
 - a metric's definition changed and its version did not go up, or its version went down;
 - a metric has no version that is an integer from 1 to 2^53 - 1, or no owner.
 
 It passes a new metric, an unchanged one, a changed one with a higher version, a higher version
 alone, and an owner changed alone. A metric `origin/main` defines without a version counts as
-version 0 there, so the first versions pass; while `origin/main` has no dbt project anywhere in its
-tree, the first metrics pass.
+version 0 there, so the first versions pass; while `origin/main` holds no `dbt_project.yml` at all,
+the first metrics pass.
 
 The comparison reads `origin/main` from the clone, with no network, so it compares with the
 `origin/main` last fetched: a stale one cannot be told apart offline, which is why the gates record
-of a change is taken after merging the newest default branch into it.
+of a change is taken after merging the newest default branch into it. A termination signal ends a
+run as an exit does, removing its temporary folders.
 """
 
 import hashlib
@@ -421,6 +426,7 @@ def parse_and_refuse(project: Path, report: Path) -> int:
         if found_at.is_relative_to(installed):
             continue
         if not found_at.is_relative_to(tree):
+            # A second guard: the path settings checked before the parse keep dbt in the tree.
             refused.append("dbt read a file outside the tree")
             continue
         if not isinstance(file, SchemaSourceFile):
