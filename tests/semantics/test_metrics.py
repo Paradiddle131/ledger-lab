@@ -1,10 +1,11 @@
 """The governed finance metrics: defined once in MetricFlow, each owned and named in the glossary.
 
 `mf validate-configs` and `mf query` run over the sample build with the command's own arguments,
-through `offline_mf.py`, which refuses every network call. Each metric's value is worked out again:
-the Chicago metrics from the served rows themselves (the committed seeds, or the landed files) by
-this file's own arithmetic, and constant-currency spend from the group totals' own worked-out
-figures (`tests/models/test_group_totals.py`). The landed test pins each metric's real value.
+through `semantics/offline/offline_mf.py`, which refuses every network call. Each metric's value is
+worked out again: the Chicago metrics from the served rows themselves (the committed seeds, or the
+landed files) by this file's own arithmetic, the contract metrics also over invented contracts
+labelled as such, and constant-currency spend from the group totals' own worked-out figures
+(`tests/models/test_group_totals.py`). The landed test pins each metric's real value.
 """
 
 import csv
@@ -21,17 +22,17 @@ from typing import Any
 
 import duckdb
 import pytest
+from conftest import load_checked
 
 from ingest.fetch import landing_path
+from semantics.offline.refusal import REFUSED
 from tests.models.dbt_build import DBT, PROJECT, Build, built, query
 from tests.models.test_group_totals import worked_out
 from tests.semantics.metric_cli import MF, manifest, mf, mf_env, mf_query
-from semantics.offline.refusal import REFUSED
 
 SEEDS = PROJECT / "seeds" / "staging" / "chicago"
 SEMANTICS = PROJECT.parent / "semantics"
-# The metrics a consumer reads, and the inputs they are built from, which carry an owner and a
-# term like any other. Days to pay is not among them: every public file serves one date a payment.
+# Every metric, headline and input alike, each carrying an owner, a term and a role.
 METRICS = {
     "spend_against_award",
     "remaining_commitment",
@@ -45,8 +46,10 @@ METRICS = {
     "chicago_payment_amount",
     "chicago_repeat_amount",
     "constant_currency_spend",
-    "spend_at_constant_rates",
-    "spend_bases",
+    "spend_in_periods",
+    "spend_in_years",
+    "spend_bases_in_periods",
+    "spend_bases_in_years",
 }
 CHICAGO_METRICS = [
     "spend_against_award",
@@ -61,20 +64,36 @@ CHICAGO_METRICS = [
     "chicago_payment_amount",
     "chicago_repeat_amount",
 ]
+CONTRACT_METRICS = [
+    "spend_against_award",
+    "remaining_commitment",
+    "paid_over_award",
+    "fixed_award",
+    "paid_against_fixed_award",
+]
+ROLES = {"headline", "input"}
+# The five finance metrics the platform promises, by id in `semantics/finance_metrics.yaml`.
+PROMISED = {
+    "spend-against-award",
+    "remaining-commitment",
+    "days-to-pay",
+    "duplicate-payment-rate",
+    "constant-currency-spend",
+}
 
 
 def ownership_problems(
     metrics: list[dict[str, Any]], access: dict[str, Any], glossary: dict[str, Any]
 ) -> list[str]:
-    """Every metric whose MetricFlow meta lacks an owner who is a human persona, or a term the
-    glossary holds."""
+    """Every metric whose MetricFlow meta lacks an owner who is a human persona and the owner of
+    its glossary term, a term the glossary holds, or a role (headline or input)."""
     kinds = {p["id"]: p["kind"] for p in access["personas"]}
-    terms = {t["id"] for t in glossary["terms"]}
+    term_owners = {t["id"]: t.get("owner") for t in glossary["terms"]}
     found = []
     for metric in metrics:
         name = metric["name"]
         meta = (metric.get("config") or {}).get("meta") or {}
-        owner, term = meta.get("owner"), meta.get("term")
+        owner, term, role = meta.get("owner"), meta.get("term"), meta.get("role")
         if owner is None:
             found.append(f"{name}: no owner")
         elif owner not in kinds:
@@ -83,8 +102,12 @@ def ownership_problems(
             found.append(f"{name}: owner {owner} is not a human persona")
         if term is None:
             found.append(f"{name}: no glossary term")
-        elif term not in terms:
+        elif term not in term_owners:
             found.append(f"{name}: term {term} is not in the glossary")
+        elif kinds.get(owner) == "human" and owner != term_owners[term]:
+            found.append(f"{name}: owner {owner} does not own term {term}")
+        if role not in ROLES:
+            found.append(f"{name}: no role")
     return found
 
 
@@ -108,22 +131,59 @@ def test_every_metric_has_a_human_owner_and_a_glossary_term(
     assert ownership_problems(manifest(build)["metrics"], access, glossary) == []
 
 
-PLANTED = "      meta: {owner: metric-owner, term: spend-against-award}\n"
+def test_dbt_parses_only_the_metricflow_folder_of_semantics(build: Build) -> None:
+    files = {m["original_file_path"] for m in manifest_nodes(build)}
+    names = ("contracts", "payments", "group_totals")
+    assert files == {f"../semantics/metricflow/{n}.yml" for n in names}
+
+
+def manifest_nodes(build: Build) -> list[dict[str, Any]]:
+    """Every node dbt parsed from outside `models/`."""
+    nodes = json.loads((build.cwd / "target" / "manifest.json").read_text())
+    found = []
+    for kind in ("nodes", "semantic_models", "metrics", "sources", "exposures", "saved_queries"):
+        found += [n for n in nodes.get(kind, {}).values() if "semantics" in n["original_file_path"]]
+    return found
+
+
+def test_the_promised_metrics_map_to_headline_metrics(
+    build: Build, glossary: dict[str, Any]
+) -> None:
+    promised = load_checked(
+        SEMANTICS / "finance_metrics.yaml", SEMANTICS / "finance_metrics.schema.json"
+    )["finance_metrics"]
+    assert {p["id"] for p in promised} == PROMISED
+    roles = {m["name"]: m["config"]["meta"]["role"] for m in manifest(build)["metrics"]}
+    listed = [name for p in promised for name in p.get("metrics", [])]
+    assert len(listed) == len(set(listed))
+    assert set(listed) == {name for name, role in roles.items() if role == "headline"}
+    assert {p["id"] for p in promised if "not_definable" in p} == {"days-to-pay"}
+    terms = {t["id"] for t in glossary["terms"]}
+    assert {p["term"] for p in promised} <= terms
+
+
+def test_every_input_says_it_is_not_for_direct_use(build: Build) -> None:
+    for metric in manifest(build)["metrics"]:
+        says = metric["description"].strip().startswith("Not for direct use")
+        assert says == (metric["config"]["meta"]["role"] == "input"), metric["name"]
+
+
+PLANTED = "      meta: {owner: payables-clerk, term: spend-against-award, role: headline}\n"
 
 
 def parsed_with(tmp_path: Path, meta: str | None) -> dict[str, Any]:
     """The semantic manifest `dbt parse` writes for a copy of the project whose
     `spend_against_award` carries `meta` in place of its own (none at all when `meta` is None)."""
     copied = tmp_path / "project"
-    ignore = shutil.ignore_patterns("target", "logs", "dbt_packages")
+    ignore = shutil.ignore_patterns("target", "logs", "dbt_packages", "__pycache__")
     shutil.copytree(PROJECT, copied / PROJECT.name, ignore=ignore)
     shutil.copytree(SEMANTICS, copied / SEMANTICS.name, ignore=ignore)
-    contracts = copied / SEMANTICS.name / "contracts.yml"
+    contracts = copied / SEMANTICS.name / "metricflow" / "contracts.yml"
     source = contracts.read_text()
-    assert source.count(PLANTED) == 2, "spend_against_award's meta moved: update PLANTED"
+    assert source.count(PLANTED) == 1, "spend_against_award's meta moved: update PLANTED"
     planted = "    config:\n" + PLANTED
     replacement = "" if meta is None else f"    config:\n      meta: {meta}\n"
-    contracts.write_text(source.replace(planted, replacement, 1))
+    contracts.write_text(source.replace(planted, replacement))
     env = {k: v for k, v in os.environ.items() if k != "LEDGER_LAB_GCP_PROJECT"}
     env |= {
         "LEDGER_LAB_DUCKDB_PATH": str(tmp_path / "unused.duckdb"),
@@ -147,12 +207,27 @@ def parsed_with(tmp_path: Path, meta: str | None) -> dict[str, Any]:
 @pytest.mark.parametrize(
     ("meta", "expected"),
     [
-        ("{term: award}", ["no owner"]),
-        ("{owner: proposer, term: award}", ["owner proposer is not a human persona"]),
-        ("{owner: someone-else, term: award}", ["owner someone-else is no persona"]),
-        ("{owner: metric-owner}", ["no glossary term"]),
-        ("{owner: metric-owner, term: made-up}", ["term made-up is not in the glossary"]),
-        (None, ["no owner", "no glossary term"]),
+        ("{term: award, role: input}", ["no owner"]),
+        ("{owner: proposer, term: award, role: input}", ["owner proposer is not a human persona"]),
+        (
+            "{owner: someone-else, term: award, role: input}",
+            ["owner someone-else is no persona"],
+        ),
+        ("{owner: payables-clerk, role: input}", ["no glossary term"]),
+        (
+            "{owner: payables-clerk, term: made-up, role: input}",
+            ["term made-up is not in the glossary"],
+        ),
+        (
+            "{owner: metric-owner, term: spend-against-award, role: headline}",
+            ["owner metric-owner does not own term spend-against-award"],
+        ),
+        ("{owner: payables-clerk, term: spend-against-award}", ["no role"]),
+        (
+            "{owner: payables-clerk, term: spend-against-award, role: other}",
+            ["no role"],
+        ),
+        (None, ["no owner", "no glossary term", "no role"]),
     ],
 )
 def test_a_metric_without_a_human_owner_or_a_known_term_is_refused(
@@ -360,37 +435,115 @@ def amounts(rows: list[dict[str, str]], key: str, metric: str) -> dict[str, Deci
 
 def assert_constant_currency_spend_is_worked_out(build: Build) -> dict[str, set[str]]:
     """`constant_currency_spend` against the group totals worked out again: by basis, the sum of
-    each basis's figures at constant rates; by entity, an entity's sum where it has one basis and
-    no figure where it has several; over the whole group, no figure. Returns each entity's bases."""
+    each basis's figures at constant rates; by basis and calendar year of the span's start, the
+    same split by year; by entity, an entity's sum where it has one basis and no figure where it
+    has several; over the whole group, no figure. A query by month is refused, and by the period
+    start's month a whole year's figure has no month. Returns each entity's bases."""
     totals, _ = worked_out(build)
+    starts = {
+        (entity, year, period, basis): start
+        for entity, year, period, basis, start in query(
+            build,
+            "select entity_id, fiscal_year, fiscal_period, basis, period_start from group_totals",
+        )
+    }
     by_basis: dict[str, Decimal] = defaultdict(Decimal)
+    by_year: dict[tuple[str, str], Decimal] = defaultdict(Decimal)
     by_entity: dict[str, Decimal] = defaultdict(Decimal)
+    in_years = Decimal(0)
     bases: dict[str, set[str]] = defaultdict(set)
-    for (entity, _, _, basis), total in totals.items():
+    for key, total in totals.items():
+        entity, _, period, basis = key
         by_basis[basis] += total.constant
+        by_year[basis, f"{starts[key].year}-01-01 00:00:00"] += total.constant
         by_entity[entity] += total.constant
         bases[entity].add(basis)
+        if period is None:
+            in_years += total.constant
 
     rows = mf_query(build, ["constant_currency_spend"], ["group_total__basis"])
     assert amounts(rows, "group_total__basis", "constant_currency_spend") == by_basis
-    rows = mf_query(
-        build, ["constant_currency_spend", "spend_at_constant_rates"], ["group_total__entity_id"]
-    )
+    rows = mf_query(build, ["constant_currency_spend"], ["group_total__basis", "metric_time__year"])
+    assert {
+        (r["group_total__basis"], r["metric_time__year"]): Decimal(r["constant_currency_spend"])
+        for r in rows
+    } == by_year
+    rows = mf_query(build, ["constant_currency_spend"], ["group_total__entity_id"])
     assert amounts(rows, "group_total__entity_id", "constant_currency_spend") == {
         e: (total if len(bases[e]) == 1 else None) for e, total in by_entity.items()
     }
-    assert amounts(rows, "group_total__entity_id", "spend_at_constant_rates") == by_entity
-    (whole,) = mf_query(build, ["constant_currency_spend", "spend_at_constant_rates"])
+    (whole,) = mf_query(build, ["constant_currency_spend"])
     assert whole["constant_currency_spend"] == ""
-    assert Decimal(whole["spend_at_constant_rates"]) == sum(by_entity.values())
+
+    refused = mf(
+        build, "query", "--metrics", "constant_currency_spend", "--group-by", "metric_time__month"
+    )
+    assert refused.returncode != 0
+    assert "does not match any of the available group-by-items" in refused.stdout + refused.stderr
+    rows = mf_query(
+        build,
+        ["constant_currency_spend"],
+        ["group_total__basis", "group_total__period_start__month"],
+    )
+    no_month = [r for r in rows if not r["group_total__period_start__month"]]
+    assert sum((Decimal(r["constant_currency_spend"]) for r in no_month), Decimal(0)) == in_years
     return dict(bases)
 
 
 def test_constant_currency_spend_over_the_samples(build: Build) -> None:
     # Over the samples Chicago has two bases in March 2026 and the UK one, so the entity query
-    # holds a figure and a refusal.
+    # holds a figure and a refusal; no whole year has rates.
     bases = assert_constant_currency_spend_is_worked_out(build)
     assert {e: len(b) for e, b in bases.items()} == {"chicago": 2, "uk-transport": 1}
+
+
+# Invented contracts, labelled as invented, in the reconciliation's columns: the award held to,
+# the award after revisions, what was paid, the difference and the class. The samples hold no
+# contract paid over a fixed award, none held to an award other than its award after revisions
+# and no negative award, so these are what prove the contract metrics' rules.
+INVENTED = [
+    ("UNDER", 1000, 1000, 300.25, "unspent"),
+    ("OVER", 500, 500, 650, "unexplained"),
+    ("NETZERO", 800, 0, 900, "unexplained"),
+    ("NETZEROUNDER", 400, 0, 100, "unspent"),
+    ("BLANKET", 0, 0, 40, "no_fixed_award"),
+    ("NEVERFIXED", 0, 0, 10, "unexplained"),
+    ("NEGATIVE", -20, -20, 10, "negative_award"),
+    ("NOTFOUND", None, None, 99, "contract_not_found"),
+]
+
+
+def test_the_contract_metrics_over_invented_contracts(build: Build, tmp_path: Path) -> None:
+    """Over the invented contracts: only an award held to above 0 is fixed (held to, not the award
+    after revisions), the unpaid part and the part paid over are each floored at 0 per contract
+    and never netted, and a blanket, a negative award, an award never above 0 and a number the
+    contracts table lacks stay out."""
+    (tmp_path / "target").mkdir()
+    shutil.copy(build.cwd / "target" / "semantic_manifest.json", tmp_path / "target")
+    database = tmp_path / "ledger_lab.duckdb"
+    with duckdb.connect(str(database)) as db:
+        db.execute(
+            "create table chicago_contract_reconciliation (contract_number varchar,"
+            " award_held_to decimal(18, 2), award_after_revisions decimal(18, 2),"
+            " paid decimal(18, 2), difference decimal(18, 2), break_class varchar,"
+            " is_break boolean, is_term_agreement boolean, in_contracts_table boolean,"
+            " first_approved_on date, last_ends_on date)"
+        )
+        db.executemany(
+            "insert into chicago_contract_reconciliation values"
+            " (?, ?, ?, ?, ? - ?, ?, false, false, ? is not null, date '2020-01-02', null)",
+            [(c, h, a, p, p, h, k, h) for c, h, a, p, k in INVENTED],
+        )
+    invented = Build(
+        "", database, {}, build.env | {"LEDGER_LAB_DUCKDB_PATH": str(database)}, tmp_path
+    )
+    (row,) = mf_query(invented, CONTRACT_METRICS)
+    got = {k: Decimal(v) for k, v in row.items()}
+    assert got["fixed_award"] == Decimal("2700")
+    assert got["paid_against_fixed_award"] == Decimal("1950.25")
+    assert got["remaining_commitment"] == Decimal("999.75")
+    assert got["paid_over_award"] == Decimal("250")
+    assert abs(got["spend_against_award"] - Decimal("1950.25") / 2700) < Decimal("1e-12")
 
 
 def test_a_process_on_the_mf_path_refuses_a_network_call_before_it_is_made(
@@ -451,6 +604,9 @@ LANDED_BY_CLASS = {
     "unpaid": ("0.00", "19780804494.40"),
     "unspent": ("0.00", "51598422165.61"),
 }
+# Remaining commitment by the contract's latest end date against the files' cut-off.
+LANDED_LIVE = "28601363714.34"
+LANDED_NO_END = "10980642673.62"
 # Constant-currency spend in euros at the rates of 29 December 2023, by basis and by entity
 # (Chicago, split by basis, gives none).
 LANDED_BY_BASIS = {
@@ -510,6 +666,13 @@ def test_the_metrics_over_the_landed_files(tmp_path: Path) -> None:
         " where break_class = 'unexplained' and award_held_to <= 0",
     )
     assert (held_to_zero, f"{excess:.2f}") == (24, "1800918.54")
+    ends = "{{ TimeDimension('contract__last_ends_on', 'day') }}"
+    (live,) = mf_query(build, ["remaining_commitment"], where=f"{ends} >= '2026-10-31'")
+    (no_end,) = mf_query(build, ["remaining_commitment"], where=f"{ends} is null")
+    assert (live["remaining_commitment"], no_end["remaining_commitment"]) == (
+        LANDED_LIVE,
+        LANDED_NO_END,
+    )
 
     assert_constant_currency_spend_is_worked_out(build)
     by_basis = mf_query(build, ["constant_currency_spend"], ["group_total__basis"])

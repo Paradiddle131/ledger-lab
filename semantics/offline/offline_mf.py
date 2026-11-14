@@ -6,7 +6,8 @@ runner replaces the check with none. Run it isolated (`python -I`), so nothing i
 run from can stand in for a module of MetricFlow's; it installs the refusal of `refusal.py`
 beside it before anything else is imported.
 
-    DBT_PROJECT_DIR=models DBT_PROFILES_DIR=models uv run python -I semantics/offline/offline_mf.py <mf arguments>
+    DBT_PROJECT_DIR=models DBT_PROFILES_DIR=models \
+        uv run python -I semantics/offline/offline_mf.py <mf arguments>
 """
 
 import sys

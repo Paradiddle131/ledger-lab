@@ -2,10 +2,10 @@
 
 `mf` reads the semantic manifest dbt writes at parse time from `<project>/target/`, whatever
 `DBT_TARGET_PATH` says, so each build gets a project folder of its own beside it: the project and
-profile files and that build's manifest. Every run goes through `semantics/offline/offline_mf.py`, which turns the
-command's update check off and refuses any network call, and reads the build's database through
-the build's environment; a run that bypassed the runner would still refuse the network, through
-`semantics/offline/sitecustomize.py`.
+profile files and that build's manifest. Every run goes through
+`semantics/offline/offline_mf.py`, which turns the command's update check off and refuses any
+network call, and reads the build's database through the build's environment; a run that
+bypassed the runner would still refuse the network, through `semantics/offline/sitecustomize.py`.
 """
 
 import csv
