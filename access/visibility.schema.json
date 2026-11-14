@@ -3,7 +3,7 @@
   "title": "The visibility matrix: what each persona must see and do",
   "type": "object",
   "additionalProperties": false,
-  "required": ["personas"],
+  "required": ["tagged_products", "personas"],
   "$defs": {
     "slug": {"type": "string", "pattern": "^[a-z][a-z0-9-]*[a-z0-9]$"},
     "product_cell": {"enum": ["clear", "aggregate", "edit", "draft", "post", "denied"]},
@@ -41,6 +41,12 @@
     }
   },
   "properties": {
+    "tagged_products": {
+      "description": "The data products that can carry a column a policy tag marks.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/slug"}
+    },
     "personas": {
       "type": "object",
       "minProperties": 1,
