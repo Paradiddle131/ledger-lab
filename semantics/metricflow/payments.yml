@@ -55,7 +55,7 @@ metrics:
       numerator: chicago_repeat_rows
       denominator: chicago_payment_rows
     config:
-      meta: {owner: metric-owner, term: duplicate-payment-rate}
+      meta: {owner: payables-clerk, term: duplicate-payment-rate, role: headline}
 
   - name: duplicate_payment_amount_rate
     label: Duplicate-payment rate by amount
@@ -68,44 +68,52 @@ metrics:
       numerator: chicago_repeat_amount
       denominator: chicago_payment_amount
     config:
-      meta: {owner: metric-owner, term: duplicate-payment-rate}
+      meta: {owner: payables-clerk, term: duplicate-payment-rate, role: headline}
 
   - name: chicago_payment_rows
     label: Chicago payment rows served
-    description: The City of Chicago's payment rows as served, repeats included.
+    description: >
+      Not for direct use: an input of `duplicate_payment_rate`. The City of Chicago's payment
+      rows as served, repeats included.
     type: simple
     type_params:
       measure: payment_rows
     filter: "{{ Dimension('payment__entity_id') }} = 'chicago'"
     config:
-      meta: {owner: metric-owner, term: duplicate-payment-rate}
+      meta: {owner: payables-clerk, term: duplicate-payment-rate, role: input}
 
   - name: chicago_repeat_rows
     label: Chicago payment rows served again
-    description: The City of Chicago's payment rows that repeat another served row.
+    description: >
+      Not for direct use: an input of `duplicate_payment_rate`. The City of Chicago's payment
+      rows that repeat another served row.
     type: simple
     type_params:
       measure: repeat_rows
     filter: "{{ Dimension('payment__entity_id') }} = 'chicago'"
     config:
-      meta: {owner: metric-owner, term: duplicate-payment-rate}
+      meta: {owner: payables-clerk, term: duplicate-payment-rate, role: input}
 
   - name: chicago_payment_amount
     label: Chicago payments served, in dollars
-    description: The US dollars of the City of Chicago's payment rows as served, repeats included.
+    description: >
+      Not for direct use: an input of `duplicate_payment_amount_rate`. The US dollars of the
+      City of Chicago's payment rows as served, repeats included.
     type: simple
     type_params:
       measure: payment_amount
     filter: "{{ Dimension('payment__entity_id') }} = 'chicago'"
     config:
-      meta: {owner: metric-owner, term: duplicate-payment-rate}
+      meta: {owner: payables-clerk, term: duplicate-payment-rate, role: input}
 
   - name: chicago_repeat_amount
     label: Chicago payments served again, in dollars
-    description: The US dollars of the City of Chicago's payment rows that repeat another served row.
+    description: >
+      Not for direct use: an input of `duplicate_payment_amount_rate`. The US dollars of the
+      City of Chicago's payment rows that repeat another served row.
     type: simple
     type_params:
       measure: repeat_amount
     filter: "{{ Dimension('payment__entity_id') }} = 'chicago'"
     config:
-      meta: {owner: metric-owner, term: duplicate-payment-rate}
+      meta: {owner: payables-clerk, term: duplicate-payment-rate, role: input}

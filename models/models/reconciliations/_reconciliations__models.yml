@@ -42,9 +42,13 @@ models:
         description: The revisions the award sums, its original award included; 0 where the number is not found.
       - name: first_approved_on
         description: >
-          The day the contract's first revision was approved (`int_chicago__contracts`), the
-          day the metrics in `semantics/contracts.yml` place a contract in time; null where the
-          number is not found.
+          The day the contract's first revision was approved (`int_chicago__contracts`): the
+          approval cohort the metrics in `semantics/metricflow/contracts.yml` place a contract
+          in; null where the number is not found.
+      - name: last_ends_on
+        description: >
+          The latest end date any row of the contract serves (`int_chicago__contracts`), as
+          served, some far ahead; null where none serves one or the number is not found.
       - name: is_term_agreement
         description: >
           A tag, true on a term agreement: a contract typed `Term Agreement` on any of its rows,

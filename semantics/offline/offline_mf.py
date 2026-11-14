@@ -2,16 +2,17 @@
 
 The command asks PyPI for a newer release of itself on every run (the `update_checker` package
 sends one request to pypi.org for the package's JSON) and offers no way to turn that off, so this
-runner replaces the check with none. It runs isolated (`python -I`), which skips `PYTHONPATH`, so
-it installs the refusal of `no_network/refusal.py` itself before anything else is imported.
+runner replaces the check with none. Run it isolated (`python -I`), so nothing in the folder you
+run from can stand in for a module of MetricFlow's; it installs the refusal of `refusal.py`
+beside it before anything else is imported.
 
-    python -I tests/semantics/offline_mf.py <mf arguments>
+    DBT_PROJECT_DIR=models DBT_PROFILES_DIR=models uv run python -I semantics/offline/offline_mf.py <mf arguments>
 """
 
 import sys
 from pathlib import Path
 
-NO_NETWORK = Path(__file__).with_name("no_network")
+HERE = Path(__file__).resolve().parent
 
 
 def no_newer_release(*_: object, **__: object) -> None:
@@ -19,8 +20,8 @@ def no_newer_release(*_: object, **__: object) -> None:
 
 
 def main() -> None:
-    sys.path.insert(0, str(NO_NETWORK))
-    from refusal import refuse_the_network  # pyright: ignore[reportMissingImports]  (on the path above)
+    sys.path.insert(0, str(HERE))
+    from refusal import refuse_the_network  # pyright: ignore[reportMissingImports]
 
     sys.addaudithook(refuse_the_network)
     import update_checker

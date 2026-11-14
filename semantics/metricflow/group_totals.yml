@@ -1,0 +1,142 @@
+semantic_models:
+  - name: group_totals
+    description: >
+      One row per entity, span and basis of the group totals, in the reporting currency at
+      constant rates; the basis says what each figure is, and unlike bases never add up. A span
+      is a fiscal period or a whole fiscal year (`span`), and a whole year's figure is placed in
+      time only by its year, never in a month.
+    model: ref('group_totals')
+    defaults:
+      agg_time_dimension: period_start
+    entities:
+      - name: group_total
+        type: primary
+        expr: group_total_key
+    dimensions:
+      - name: period_start
+        description: >
+          The first day of a fiscal period, by month; none on a whole fiscal year's row, which has
+          no month.
+        type: time
+        expr: case when fiscal_period is not null then period_start end
+        type_params:
+          time_granularity: month
+      - name: year_start
+        description: >
+          The first day of the span, by year only: the time a whole fiscal year's figure is
+          placed in.
+        type: time
+        expr: period_start
+        type_params:
+          time_granularity: year
+      - name: span
+        description: "`period` for a fiscal period's row, `year` for a whole fiscal year's."
+        type: categorical
+        expr: case when fiscal_period is null then 'year' else 'period' end
+      - name: entity_id
+        type: categorical
+      - name: basis
+        type: categorical
+      - name: fiscal_year
+        type: categorical
+      - name: fiscal_period
+        type: categorical
+      - name: reporting_currency
+        type: categorical
+      - name: constant_rates_on
+        type: categorical
+    measures:
+      - name: period_amount_at_constant_rates
+        description: The fiscal periods' figures in the reporting currency at constant rates.
+        agg: sum
+        expr: case when fiscal_period is not null then amount_at_constant_rates end
+      - name: year_amount_at_constant_rates
+        description: The whole fiscal years' figures in the reporting currency at constant rates.
+        agg: sum
+        expr: case when fiscal_period is null then amount_at_constant_rates end
+        agg_time_dimension: year_start
+      - name: period_bases
+        description: How many different bases the fiscal periods' rows hold.
+        agg: count_distinct
+        expr: case when fiscal_period is not null then basis end
+      - name: year_bases
+        description: >
+          How many different bases the whole fiscal years' rows hold (no basis has both kinds of
+          row, so the two counts add up).
+        agg: count_distinct
+        expr: case when fiscal_period is null then basis end
+        agg_time_dimension: year_start
+
+metrics:
+  - name: constant_currency_spend
+    label: Constant-currency spend
+    description: >
+      What the entities spent, in the reporting currency (EUR) at the ECB rates of one fixed day
+      (the group totals' `constant_rates_on`), so a change between spans shows spending moving and
+      not the rates: the group totals' figures, with what they leave out (`group_totals_left_out`)
+      left out here too. It is a figure only where every row it sums has one basis, so group by
+      `group_total__basis` (or by an entity with a single basis); a query that would add unlike
+      bases, such as the Dutch cash outturn and Chicago's payments, returns no figure. A whole
+      fiscal year's figure (the Dutch outturn, Chicago's yearly roll-ups) has no month: by
+      `metric_time` the metric groups by year or coarser, and a query by month or day is refused;
+      by `group_total__period_start` a whole year's row has no month and stands apart. For months,
+      group by `group_total__fiscal_year` and `group_total__fiscal_period` (no period on a whole
+      year's row); `group_total__span` tells the two kinds of row apart.
+    type: derived
+    type_params:
+      expr: >
+        case when coalesce(spend_bases_in_periods, 0) + coalesce(spend_bases_in_years, 0) = 1
+        then coalesce(spend_in_periods, 0) + coalesce(spend_in_years, 0) end
+      metrics:
+        - name: spend_in_periods
+        - name: spend_in_years
+        - name: spend_bases_in_periods
+        - name: spend_bases_in_years
+    config:
+      meta: {owner: group-controller, term: constant-currency, role: headline}
+
+  - name: spend_in_periods
+    label: Spend at constant rates in fiscal periods, any basis
+    description: >
+      Not for direct use: an input of `constant_currency_spend`, which is the figure to read. The
+      fiscal periods' figures at constant rates summed whatever their basis, so on its own it
+      adds unlike bases.
+    type: simple
+    type_params:
+      measure: period_amount_at_constant_rates
+    config:
+      meta: {owner: group-controller, term: constant-currency, role: input}
+
+  - name: spend_in_years
+    label: Spend at constant rates in whole fiscal years, any basis
+    description: >
+      Not for direct use: an input of `constant_currency_spend`, which is the figure to read. The
+      whole fiscal years' figures at constant rates summed whatever their basis, so on its own it
+      adds unlike bases.
+    type: simple
+    type_params:
+      measure: year_amount_at_constant_rates
+    config:
+      meta: {owner: group-controller, term: constant-currency, role: input}
+
+  - name: spend_bases_in_periods
+    label: Bases summed in fiscal periods
+    description: >
+      Not for direct use: an input of `constant_currency_spend`. How many different bases the
+      summed fiscal periods' rows hold.
+    type: simple
+    type_params:
+      measure: period_bases
+    config:
+      meta: {owner: group-controller, term: constant-currency, role: input}
+
+  - name: spend_bases_in_years
+    label: Bases summed in whole fiscal years
+    description: >
+      Not for direct use: an input of `constant_currency_spend`. How many different bases the
+      summed whole fiscal years' rows hold.
+    type: simple
+    type_params:
+      measure: year_bases
+    config:
+      meta: {owner: group-controller, term: constant-currency, role: input}

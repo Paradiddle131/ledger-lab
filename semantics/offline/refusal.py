@@ -2,7 +2,7 @@
 
 A connection to a host or a name lookup ends the process at once with `REFUSED`, so no library
 can catch the refusal and carry on. A socket to a local file (a Unix socket) is allowed.
-Importing this module installs nothing; `sitecustomize.py` beside it and `offline_mf.py` do.
+Importing this module installs nothing; `sitecustomize.py` and `offline_mf.py` beside it do.
 """
 
 import os
@@ -20,5 +20,5 @@ def refuse_the_network(event: str, args: tuple[object, ...]) -> None:
     if event == "socket.connect" and getattr(args[0], "family", None) == socket.AF_UNIX:
         return
     where = tuple(a for a in args if not isinstance(a, socket.socket))
-    os.write(2, f"no_network: refused a network call: {event} {where!r}\n".encode())
+    os.write(2, f"offline: refused a network call: {event} {where!r}\n".encode())
     os._exit(REFUSED)

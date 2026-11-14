@@ -2,10 +2,10 @@
 
 `mf` reads the semantic manifest dbt writes at parse time from `<project>/target/`, whatever
 `DBT_TARGET_PATH` says, so each build gets a project folder of its own beside it: the project and
-profile files and that build's manifest. Every run goes through `offline_mf.py`, which turns the
+profile files and that build's manifest. Every run goes through `semantics/offline/offline_mf.py`, which turns the
 command's update check off and refuses any network call, and reads the build's database through
 the build's environment; a run that bypassed the runner would still refuse the network, through
-`no_network/sitecustomize.py`.
+`semantics/offline/sitecustomize.py`.
 """
 
 import csv
@@ -18,8 +18,8 @@ from typing import Any
 
 from tests.models.dbt_build import PROJECT, Build
 
-RUNNER = Path(__file__).with_name("offline_mf.py")
-NO_NETWORK = Path(__file__).with_name("no_network")
+NO_NETWORK = PROJECT.parent / "semantics" / "offline"
+RUNNER = NO_NETWORK / "offline_mf.py"
 MF = Path(sys.executable).with_name("mf")
 
 
@@ -39,7 +39,7 @@ def project(build: Build) -> Path:
 
 
 def mf_env(build: Build) -> dict[str, str]:
-    """The build's environment for a MetricFlow run: its project folder, `no_network` on the
+    """The build's environment for a MetricFlow run: its project folder, the offline folder on the
     import path, so any Python process started with it refuses the network even without the
     runner, and a temporary folder of its own, so no cached update check from an earlier run can
     hide a request."""

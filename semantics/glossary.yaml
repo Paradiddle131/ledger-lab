@@ -38,6 +38,11 @@ terms:
     definition: The part of a contract's award not yet paid, which the award still allows to be spent; never below zero, since paying over an award leaves nothing to commit.
     owner: payables-clerk
     see_also: [award, commitment, spend-against-award]
+  - id: paid-over-award
+    term: Paid over award
+    definition: What was paid on a contract beyond the award it is held to; never below zero, and never netted against what other contracts leave unpaid.
+    owner: payables-clerk
+    see_also: [award, remaining-commitment]
   - id: days-to-pay
     term: Days to pay
     definition: The days from the date an invoice or voucher is entered to the date it is paid; it needs both dates for each payment.
