@@ -2,9 +2,10 @@
 -- own-currency total or currency in the mart differs from the total worked out here straight
 -- from the entity marts, or that only one side has: the payments mart's payments that are not
 -- repeats, by the fiscal period their day falls in or, without a day, by their fiscal year, and
--- the Dutch cash-expenditure outturn by year. A span the ECB rates do not cover (its currency's or
--- the reporting currency's rates first published more than four days after its start or last
--- more than four days before its end) is left out of both.
+-- the Dutch cash-expenditure outturn by year. An entity's span the ECB rates do not cover (its
+-- currency's or the reporting currency's rates first published more than four days after its
+-- start or last more than four days before its end, or one of its dated payments before the
+-- first publication or after the last) is left out of both.
 {%- set reporting = "'" ~ var('group_totals').reporting_currency ~ "'" %}
 
 with periods as (
@@ -26,7 +27,8 @@ figures as (
         coalesce(periods.period_start, years.period_start) as period_start,
         coalesce(periods.period_end, years.period_end) as period_end,
         payments.currency,
-        payments.amount
+        payments.amount,
+        payments.payment_date
     from {{ ref('payments') }} as payments
     left join periods
         on
@@ -48,11 +50,33 @@ figures as (
         years.period_start,
         years.period_end,
         lines.currency,
-        lines.outturn_eur
+        lines.outturn_eur,
+        cast(null as date)
     from {{ ref('budget_against_outturn') }} as lines
     inner join years
         on lines.entity_id = years.entity_id and lines.fiscal_year = years.fiscal_year
     where lines.kind = 'U' and lines.outturn_eur is not null
+),
+
+bounds as (
+    select currency, min(published_on) as first_on, max(published_on) as last_on
+    from {{ ref('fx_published_rates') }}
+    group by currency
+),
+
+beyond_the_rates as (
+    select distinct figures.entity_id, figures.period_start, figures.period_end
+    from figures
+    left join bounds as from_bounds on figures.currency = from_bounds.currency
+    left join bounds as to_bounds on to_bounds.currency = {{ reporting }}
+    where
+        figures.payment_date is not null
+        and (
+            from_bounds.currency is null
+            or to_bounds.currency is null
+            or figures.payment_date not between from_bounds.first_on and from_bounds.last_on
+            or figures.payment_date not between to_bounds.first_on and to_bounds.last_on
+        )
 ),
 
 span_rates as (
@@ -95,12 +119,20 @@ worked_out as (
             figures.period_start = to_rates.period_start
             and figures.period_end = to_rates.period_end
             and to_rates.currency = {{ reporting }}
+    left join beyond_the_rates
+        on
+            figures.entity_id = beyond_the_rates.entity_id
+            and figures.period_start = beyond_the_rates.period_start
+            and figures.period_end = beyond_the_rates.period_end
+    where beyond_the_rates.entity_id is null
     group by figures.entity_id, figures.fiscal_year, figures.fiscal_period
 ),
 
 group_totals as (
-    select entity_id, fiscal_year, fiscal_period, currency, amount
+    select entity_id, fiscal_year, fiscal_period, min(currency) as currency, sum(amount) as amount
     from {{ ref('group_totals') }}
+    group by entity_id, fiscal_year, fiscal_period
+    having min(currency) = max(currency)
 )
 
 select

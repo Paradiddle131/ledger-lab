@@ -1,7 +1,8 @@
 -- Fails on every entity whose figures the group totals and the rules leaving figures out do not
 -- account for exactly once: the rows and the own-currency amount of the payments mart and of the
 -- Dutch cash-expenditure lines must equal those the group totals count plus those a rule leaves
--- out, so a figure dropped or counted twice on the way, by a join or a rule, fails here.
+-- out (`group_totals_left_out`), so a figure dropped or counted twice on the way, by a join or a
+-- rule, fails here.
 with served as (
     select entity_id, count(*) as figures, sum(amount) as amount
     from {{ ref('payments') }}
@@ -20,9 +21,7 @@ accounted as (
     from (
         select entity_id, figures, amount from {{ ref('group_totals') }}
         union all
-        select entity_id, 1, amount
-        from {{ ref('group_totals_figures') }}
-        where left_out_by is not null
+        select entity_id, figures, amount from {{ ref('group_totals_left_out') }}
     ) as both_sides
     group by entity_id
 )
