@@ -247,6 +247,12 @@ ALTERED = {
         ["create view main.close as select * from group_close.payments"],
         "main.close, which no purpose",
     ),
+    "hold-an-aggregate-group-twice": (
+        # Every group the metric owner's payments aggregate keeps, written a second time.
+        "metric-owner",
+        ["insert into main.payments_by_period select * from main.payments_by_period"],
+        "main.payments_by_period as no aggregate: a group held twice",
+    ),
     "add-a-column-under-a-new-name": (
         "group-controller",
         [
