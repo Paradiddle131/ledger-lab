@@ -168,7 +168,7 @@ def test_every_input_says_it_is_not_for_direct_use(build: Build) -> None:
         assert says == (metric["config"]["meta"]["role"] == "input"), metric["name"]
 
 
-PLANTED = "      meta: {owner: payables-clerk, term: spend-against-award, role: headline}\n"
+PLANTED = "      meta: {owner: payables-clerk, term: spend-against-award, role: headline, version: 1}\n"
 
 
 def parsed_with(tmp_path: Path, meta: str | None) -> dict[str, Any]:

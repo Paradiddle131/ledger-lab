@@ -113,6 +113,17 @@ controls:
       - tests/models/test_payments_contract.py::test_the_gate_matches_contracts_by_id_wherever_they_are
       - tests/models/test_payments_contract.py::test_a_clone_without_main_fails_and_says_how_to_fetch_it
     status: implemented
+  - id: metric-definition-changes-only-under-a-new-version
+    layer: Change management
+    owner: metric-owner
+    asserts: make check fails when a MetricFlow metric's definition (its own block but its version and owner, the metrics it is built from transitively, and the measures and semantic models it resolves to, compared as parsed YAML) differs from origin/main's under the same version, when a version goes down, is missing or is not an integer of at least 1, when a metric has no owner, when a metric origin/main defines is gone or renamed, when a definition cannot be read or resolved, and when origin/main is not in the clone to compare with; each tree's metrics are read by its own dbt project's model paths, so moving the files or the project cannot hide one.
+    proven_by:
+      - tests/semantics/test_metric_versions.py::test_a_changed_definition_under_the_same_version_fails_the_gate
+      - tests/semantics/test_metric_versions.py::test_a_metric_without_a_version_an_owner_or_its_definition_fails_the_gate
+      - tests/semantics/test_metric_versions.py::test_a_version_that_goes_down_fails_the_gate
+      - tests/semantics/test_metric_versions.py::test_a_change_that_keeps_every_version_passes_the_gate
+      - tests/semantics/test_metric_versions.py::test_a_clone_without_main_fails_and_says_how_to_fetch_it
+    status: implemented
   - id: unowned-metric-cannot-ship
     layer: Accountability
     owner: metric-owner

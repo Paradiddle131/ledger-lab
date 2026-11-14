@@ -4,9 +4,9 @@
 LOADOUT ?= $(or $(shell sed -n 's/^The collection .* is cloned at `\([^`]*\)`.*/\1/p' $(HOME)/.claude/CLAUDE.md 2>/dev/null),../loadout)
 GUARDS := $(LOADOUT)/cloud/githooks
 
-.PHONY: check sync lint typecheck test ids portable scan contract contract-test stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
+.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
 
-check: lint typecheck test ids portable scan contract
+check: lint typecheck test ids portable scan contract metric-versions
 	@echo "make check: all passed"
 
 # Also puts the Data Contract CLI's DuckDB engine (the lock's `contract` group) in uv's cache, so
@@ -42,6 +42,12 @@ scan: sync
 # breaks a consumer, and when origin/main is not fetched (models/contracts/gate.py).
 contract: sync
 	@uv run python models/contracts/gate.py
+
+# The metrics against the ones on origin/main, read from this clone: fails on a changed definition
+# under the same version, a lost version or owner, and when origin/main is not fetched
+# (semantics/versions.py).
+metric-versions: sync
+	@uv run python semantics/versions.py
 
 # `datacontract test` over the local dbt build (target/ledger_lab.duckdb), run on the CLI's own
 # DuckDB 1.5 engine over a copy in its storage format (models/contracts/engine.py).

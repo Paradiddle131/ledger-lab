@@ -94,7 +94,7 @@ metrics:
         - name: spend_bases_in_periods
         - name: spend_bases_in_years
     config:
-      meta: {owner: group-controller, term: constant-currency, role: headline}
+      meta: {owner: group-controller, term: constant-currency, role: headline, version: 1}
 
   - name: spend_in_periods
     label: Spend at constant rates in fiscal periods, any basis
@@ -106,7 +106,7 @@ metrics:
     type_params:
       measure: period_amount_at_constant_rates
     config:
-      meta: {owner: group-controller, term: constant-currency, role: input}
+      meta: {owner: group-controller, term: constant-currency, role: input, version: 1}
 
   - name: spend_in_years
     label: Spend at constant rates in whole fiscal years, any basis
@@ -118,7 +118,7 @@ metrics:
     type_params:
       measure: year_amount_at_constant_rates
     config:
-      meta: {owner: group-controller, term: constant-currency, role: input}
+      meta: {owner: group-controller, term: constant-currency, role: input, version: 1}
 
   - name: spend_bases_in_periods
     label: Bases summed in fiscal periods
@@ -129,7 +129,7 @@ metrics:
     type_params:
       measure: period_bases
     config:
-      meta: {owner: group-controller, term: constant-currency, role: input}
+      meta: {owner: group-controller, term: constant-currency, role: input, version: 1}
 
   - name: spend_bases_in_years
     label: Bases summed in whole fiscal years
@@ -140,4 +140,4 @@ metrics:
     type_params:
       measure: year_bases
     config:
-      meta: {owner: group-controller, term: constant-currency, role: input}
+      meta: {owner: group-controller, term: constant-currency, role: input, version: 1}

@@ -128,13 +128,13 @@
       }
     },
     "metric": {
-      "description": "A MetricFlow metric the answer cites and the version of its definition it was answered at; the version's scheme is the metric versioning's.",
+      "description": "A MetricFlow metric the answer cites and the version of its definition it was answered at: the integer, from 1, in the metric's `config.meta` (semantics/versions.py).",
       "type": "object",
       "additionalProperties": false,
       "required": ["name", "version"],
       "properties": {
         "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
-        "version": {"$ref": "#/$defs/token"}
+        "version": {"type": "integer", "minimum": 1}
       }
     },
     "run": {
