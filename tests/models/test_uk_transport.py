@@ -22,7 +22,7 @@ from conftest import landed_file
 from ingest import fetch
 from ingest.entities import REGISTER
 from ingest.individuals import person_hasher
-from ingest.uk_transport.spend import COLUMNS, SET
+from ingest.uk_transport.spend import COLUMNS, PLACEHOLDERS, SET
 from tests.models.dbt_build import PROJECT, Build, built, query
 from tests.models.uk_transport_sample import TEST_KEY, landed, sample_rows, seed_rows
 
@@ -147,14 +147,15 @@ def test_the_payment_key_is_the_entity_file_and_row_and_unique(build: Build) -> 
     assert shared[0][0] > 1 and shared[0][0] == shared[0][1]
 
 
-def test_a_hashed_supplier_has_a_hashed_document_number(build: Build) -> None:
+def test_a_hashed_supplier_has_a_hashed_document_number_or_a_placeholder(build: Build) -> None:
     rows = query(
         build,
         "select vendor_name, document_number from int_uk_transport__payments"
         " where vendor_is_hashed",
     )
     assert len(rows) == sum(r[3] in HASHED_COMPANIES for r in sample_rows())
-    assert all(n.startswith("person:") and d.startswith("id:") for n, d in rows)
+    assert all(n.startswith("person:") for n, _ in rows)
+    assert {"keyed" if d.startswith("id:") else d for _, d in rows} == {"keyed", "#"}
     clear = {n for (n,) in query(build, "select vendor_name from int_uk_transport__payments")}
     assert not clear & HASHED_COMPANIES
 
@@ -200,7 +201,7 @@ def test_the_revision_unit_tests_and_the_rules_ran_and_passed(build: Build) -> N
         "every_landed_date_casts",
         "each_uk_file_publishes_one_month",
         "no_two_files_of_a_month_share_a_publication_time",
-        "a_hashed_uk_supplier_has_a_hashed_document_number",
+        "a_hashed_uk_supplier_has_a_hashed_document_number_or_a_placeholder",
         "dates_in_fiscal_calendar_int_uk_transport__payments_payment_date",
         "unique_int_uk_transport__payments_payment_key",
         "not_null_int_uk_transport__payment_versions_published_at",
@@ -279,7 +280,7 @@ def test_the_real_year_lands_whole_in_payments(real: Build) -> None:
         real,
         "select count(*), count(distinct payment_key), count(distinct document_number)"
         " from int_uk_transport__payments",
-    ) == [(31_103, 31_103, 26_187)]
+    ) == [(31_103, 31_103, 26_097)], "one value per served number: each is in clear or hashed"
     assert (
         query(
             real,
@@ -323,16 +324,16 @@ def test_the_real_mart_holds_each_entity_once_and_no_uk_row_is_a_repeat(real: Bu
 @pytest.mark.landed
 def test_the_real_identical_rows_are_consecutive_under_one_number(real: Build) -> None:
     """The evidence on `is_repeat`: rows identical in every landed cell within their file, 121 rows
-    in 56 groups, every group consecutive rows under one transaction number, 33 of the groups
-    hashed rows whose served descriptions the landing dropped (13 of them, 27 rows, differ as
-    served); nothing ties them to a total."""
+    in 56 groups, every group consecutive rows under one transaction number (21 a clear number, 9
+    the placeholder `#`, 26 a keyed hash), 33 of the groups hashed rows whose served descriptions
+    the landing dropped (13 of them, 27 rows, differ as served); nothing ties them to a total."""
     path = Path(real.env["LEDGER_LAB_LANDING"]) / SET
     cells = ", ".join(c for c in COLUMNS if c not in ("source_file", "source_row"))
     groups = (
         duckdb.connect()
         .execute(
             "select count(*), max(source_row) - min(source_row) + 1,"  # noqa: S608
-            " case when any_value(transaction_number) = '#' then '#'"
+            " case when any_value(transaction_number) in ('#', 'DIRECT DEBIT') then 'placeholder'"
             " when any_value(transaction_number) like 'id:%' then 'hashed' else 'number' end"
             f" from read_parquet(?) group by source_file, {cells} having count(*) > 1",
             [str(path)],
@@ -343,14 +344,15 @@ def test_the_real_identical_rows_are_consecutive_under_one_number(real: Build) -
     print("identical groups, rows, extra copies:", len(groups), rows, rows - len(groups))
     assert (len(groups), rows) == (56, 121)
     assert all(n == span for n, span, _ in groups), "every group is consecutive rows"
-    assert Counter(kind for _, _, kind in groups) == {"number": 21, "#": 2, "hashed": 33}
+    assert Counter(kind for _, _, kind in groups) == {"number": 21, "placeholder": 9, "hashed": 26}
 
 
 @pytest.mark.landed
 def test_every_sample_row_is_a_landed_row() -> None:
     """Each committed row is a row of the landed set: exactly, supplier and transaction number
     included, where the landing keeps the supplier in clear; on its file, paying body, date and
-    amount beside a hashed supplier and number where the landing hashes it."""
+    amount beside a hashed supplier, and a hashed number or the same placeholder, where the landing
+    hashes it."""
     path = landed_file(SET)
     landed_rows = (
         duckdb.connect()
@@ -363,9 +365,9 @@ def test_every_sample_row_is_a_landed_row() -> None:
     )
     exact = set(landed_rows)
     hashed = {
-        (f, body, day, amount)
+        (f, body, day, amount, number if number in PLACEHOLDERS else "keyed")
         for f, body, day, supplier, number, amount in landed_rows
-        if supplier.startswith("person:") and number.startswith("id:")
+        if supplier.startswith("person:") and (number in PLACEHOLDERS or number.startswith("id:"))
     }
     clear = {r[3] for r in landed_rows}
     found: Counter[str] = Counter()
@@ -375,7 +377,8 @@ def test_every_sample_row_is_a_landed_row() -> None:
             assert (f, body, day, supplier, number, amount) in exact, (f, day, supplier)
             found["clear"] += 1
         else:
-            assert (f, body, day, amount) in hashed, (f, day, supplier)
+            kept = number if number in PLACEHOLDERS else "keyed"
+            assert (f, body, day, amount, kept) in hashed, (f, day, supplier)
             found["hashed"] += 1
     print("sample rows held to landed rows:", dict(found))
     assert found["clear"] > 0
