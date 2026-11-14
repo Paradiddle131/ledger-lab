@@ -14,9 +14,9 @@ it, and everything else is simply absent:
   `access/aggregates.yaml` and never its rows, each table holding only the groups of at least the
   minimum, so no filter or grain the persona writes can reach a smaller one;
 - the entities apart: a table of figures across all entities keeps a group only when it holds at
-  least the minimum entities among those whose rows the persona reads in no product, and their
-  rows alone hold the minimum group, so neither the group nor the group less what the persona
-  reads in clear is one entity's figure or a small group.
+  least the minimum entities among those the persona reads neither by rows nor per entity in an
+  aggregate table, and their rows alone hold the minimum group, so neither the group nor the group
+  less what the persona can work out of its own is one entity's figure or a small group.
 
 Masked values are stored masked, so a filter, a join or a count on a masked column sees the masked
 value, as on BigQuery, where predicates read the masked column. The persona's connection
@@ -91,8 +91,9 @@ class Aggregate:
     count: str
     units_of: str
     minimum: int
-    # For figures across all entities: the entities whose rows the persona reads in some product,
-    # whose share of a group it can work out and take away, and the fewest other entities a kept
+    # For figures across all entities: the entities whose rows the persona reads in some product
+    # or per entity in an aggregate table, whose share of a group it can work out and take away,
+    # and the fewest other entities a kept
     # group must hold. `known` is None for a table that keeps each entity apart.
     known: frozenset[str] | None = None
     minimum_entities: int = 0
@@ -181,7 +182,17 @@ def compile_persona(
     apart = aggregates["minimum_entities"]
     if not isinstance(apart, int) or isinstance(apart, bool) or apart < 1:
         raise CompileError(f"the minimum entities must be a whole number of one or more: {apart!r}")
-    known = frozenset(e for entities in who.reads.values() if entities for e in entities)
+    # The entities whose share of an all-entity group the persona can work out: those it reads by
+    # rows, and those it reads per entity in an aggregate table, whose sums it could take away.
+    per_entity = {p for p, e in aggregates["products"].items() if e.get("entity_rows") is True}
+    known = frozenset(
+        {e for entities in who.reads.values() if entities for e in entities}
+        | {
+            g["entity"]
+            for g in mine
+            if g["access"] == AGGREGATE and g["product"] in per_entity and "entity" in g
+        }
+    )
     tables_of = {p["id"]: list(p.get("tables", [])) for p in catalogue["data_products"]}
     rules = column_rules(columns, persona)
     for product, tagged in rules.items():

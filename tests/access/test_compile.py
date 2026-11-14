@@ -241,10 +241,7 @@ def test_a_tag_reader_change_changes_what_is_compiled_with_no_code_edit(
 # The minimum group.
 
 # The spans an all-entity group-totals figure is read by, and its figures in euros.
-SPAN_FIGURES = (
-    "period_start, period_end, sum(figures), sum(amount_at_actual_rates),"
-    " sum(amount_at_constant_rates), max(payees)"
-)
+SPAN_FIGURES = "period_start, period_end, sum(figures), sum(amount_at_constant_rates), max(payees)"
 
 
 def aggregate_readers(access: Doc, product: str) -> list[str]:
@@ -314,7 +311,7 @@ def test_the_minimum_is_one_catalogue_line(
     db = open_persona(access, columns, lower, persona, warehouse, tmp_path)
     try:
         seen = db.execute(
-            "select period_start, period_end, figures, amount_at_actual_rates,"
+            "select period_start, period_end, figures,"
             " amount_at_constant_rates, payees from group_totals order by all"
         ).fetchall()
     finally:
@@ -335,7 +332,14 @@ def test_aggregate_group_totals_are_all_entity_figures_until_the_owner_chooses(
         ]
         return set(table.group_by) | set(table.sums)
 
-    entity = {"entity_id", "basis", "currency", "amount", "group_total_key"}
+    entity = {
+        "entity_id",
+        "basis",
+        "currency",
+        "amount",
+        "group_total_key",
+        "amount_at_actual_rates",
+    }
     assert grain(aggregates).isdisjoint(entity)
     per_entity = copy.deepcopy(aggregates)
     per_entity["products"]["group-totals"]["entity_rows"] = True
@@ -359,7 +363,7 @@ def test_an_all_entity_figure_holds_two_entities_the_persona_reads_no_rows_of(
         db = open_persona(access, columns, lower, persona, warehouse, directory)
         try:
             seen[persona] = db.execute(
-                "select period_start, period_end, figures, amount_at_actual_rates,"
+                "select period_start, period_end, figures,"
                 " amount_at_constant_rates, payees from group_totals order by all"
             ).fetchall()
         finally:
@@ -399,6 +403,48 @@ def test_the_entities_apart_count_the_entities_a_persona_reads_in_any_product(
         if isinstance(t, Aggregate) and t.name == "payments_by_period"
     ]
     assert (by_period.known, by_period.minimum_entities) == (None, 0)
+
+
+def test_an_entity_read_per_entity_in_aggregate_counts_as_known(
+    access: Doc, columns: Doc, aggregates: Doc, warehouse: Path
+) -> None:
+    # Invented: the metric owner reads the group totals in aggregate too, beside its payments by
+    # entity and period, whose per-entity sums it could take away from a figure across entities.
+    catalogue = copy.deepcopy(access)
+    catalogue["grants"] = [
+        g
+        for g in catalogue["grants"]
+        if not (g["persona"] == "metric-owner" and g["product"] == "group-totals")
+    ]
+    catalogue["grants"].append(
+        {"persona": "metric-owner", "product": "group-totals", "access": "aggregate"}
+    )
+    (totals,) = [
+        t
+        for t in plan_of(catalogue, columns, aggregates, "metric-owner", warehouse).tables
+        if isinstance(t, Aggregate) and t.name == "group_totals"
+    ]
+    per_entity = {
+        g["entity"]
+        for g in access["grants"]
+        if g["persona"] == "metric-owner" and g["product"] == "payments"
+    }
+    assert per_entity and totals.known == per_entity
+
+
+def test_an_all_entity_table_shows_one_translated_amount(
+    access: Doc, aggregates: Doc, warehouse: Path
+) -> None:
+    """The same figures at two sets of rates are two equations in the entities' own-currency
+    amounts: with two entities and the public rates they split a group (shown over the landed
+    build below). One amount and a count of figures are one equation in amounts per group."""
+    schema = {t: dict(c) for t, c in source_schema(warehouse).items()}
+    for entry in aggregates["products"].values():
+        if entry["entity_rows"]:
+            continue
+        for table in entry["tables"]:
+            amounts = [s for s in table["sum"] if schema[table["from"]][s].startswith("DECIMAL")]
+            assert len(amounts) <= 1, (table["name"], amounts)
 
 
 # The kept groups over the samples at the minimum of ten, per aggregate reader and table: a change
@@ -793,6 +839,47 @@ LANDED_KEPT = {
     "approver": dict(zip(GROUP, (0, 0), strict=True)),
     "metric-owner": {"payments_by_period": 98},
 }
+
+
+@pytest.mark.landed
+def test_two_amounts_at_two_rates_would_split_a_kept_span_over_the_landed_build(
+    access: Doc, columns: Doc, aggregates: Doc, landed_warehouse: Path, tmp_path: Path
+) -> None:
+    """Why a figure across all entities shows one amount: the UK accountant's kept spans are the
+    Dutch government's and Chicago's, and the Dutch figures are in euros, the reporting currency,
+    so at both rates they are equal and the actual-rate total less the constant-rate one would be
+    Chicago's alone, which with the public rates gives Chicago's figure."""
+    persona = "accountant-uk-transport"
+    db = open_persona(access, columns, aggregates, persona, landed_warehouse, tmp_path)
+    try:
+        held = {
+            c
+            for (c,) in db.execute(
+                "select column_name from duckdb_columns() where table_name = 'group_totals'"
+            ).fetchall()
+        }
+        spans = db.execute("select period_start, period_end from group_totals").fetchall()
+    finally:
+        db.close()
+    assert "amount_at_actual_rates" not in held and "amount_at_constant_rates" in held
+    assert len(spans) == LANDED_KEPT[persona]["group_totals"]
+    for start, end in spans:
+        ((entities, euro_equal, whole, chicago),) = builder(
+            landed_warehouse,
+            "select string_agg(distinct entity_id, ',' order by entity_id),"
+            " bool_and(currency <> reporting_currency"
+            " or amount_at_actual_rates = amount_at_constant_rates),"
+            " sum(amount_at_actual_rates - amount_at_constant_rates),"
+            " sum(amount_at_actual_rates - amount_at_constant_rates)"
+            " filter (where entity_id = 'chicago')"
+            " from group_totals where period_start = ? and period_end = ?",
+            start,
+            end,
+        )
+        assert entities == "chicago,nl-government" and euro_equal
+        assert whole == chicago and chicago != 0
+
+
 LANDED_SOURCES = (
     "chicago-contracts",
     "chicago-payments",
