@@ -17,16 +17,20 @@ entities:
     currency: EUR
     brings: Budget and outturn, with several budget moments in one year.
 
+# A product's `tables` are the warehouse tables the models build for it, which the local engine
+# copies to its readers (access/compile.py); a product the models do not build yet lists none.
 data_products:
   - id: payments
     scope: entity
     holds: Contracts, vouchers and payments of one entity.
+    tables: [payments]
   - id: ledger
     scope: entity
     holds: Journal entries of one entity, posted in the ERP from its real documents.
   - id: group-totals
     scope: group
     holds: Figures summed across all entities in one currency.
+    tables: [group_totals, group_totals_left_out]
   - id: metric-definitions
     scope: group
     holds: The governed metric definitions and their owners.

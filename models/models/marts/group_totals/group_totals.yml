@@ -64,6 +64,13 @@ models:
         description: How many figures (payments, or Dutch budget lines) the row sums.
         data_tests:
           - not_null
+      - name: payees
+        description: >
+          How many distinct payees the row's figures were paid to, each payee as the payments mart
+          publishes it (an organisation's name or a person's keyed hash); a figure with no payee, a
+          Dutch budget line, counts as its own. The access rules hold a row's minimum group on it.
+        data_tests:
+          - not_null
       - name: currency
         description: The entity's own currency, the currency of `amount`.
         data_tests:
@@ -127,6 +134,12 @@ models:
         description: How many figures the rule leaves out.
         data_tests:
           - not_null
+      - name: payees
+        description: >
+          How many distinct payees the figures left out were paid to, a figure with no payee
+          counting as its own.
+        data_tests:
+          - not_null
       - name: currency
         description: The entity's own currency.
         data_tests:
@@ -152,3 +165,22 @@ unit_tests:
     expect:
       rows:
         - {group_total_key: chicago-2024-3-direct-vouchers, figures: 2, amount: 210.50, amount_at_actual_rates: 193.92, amount_at_constant_rates: 190.50}
+
+  - name: a_rows_payees_are_distinct_and_a_figure_with_none_is_its_own
+    description: >
+      Test inputs, invented: three Chicago payments of one period, two to one payee and one to
+      another, and two Dutch budget lines of one year, which have no payee: the Chicago row sums
+      three figures paid to two payees, and the Dutch row two figures, each its own.
+    model: group_totals
+    given:
+      - input: ref('int_group_totals__figures')
+        rows:
+          - {figure_key: a, entity_id: chicago, basis: direct-vouchers, fiscal_year: 2024, fiscal_period: 3, period_start: 2024-03-01, period_end: 2024-03-31, currency: USD, amount: 1.00, left_out_by: null, payee: EXAMPLE A LLC, reporting_currency: EUR, amount_at_actual_rates: 1.00, amount_at_constant_rates: 1.00, constant_rates_on: 2023-12-29}
+          - {figure_key: b, entity_id: chicago, basis: direct-vouchers, fiscal_year: 2024, fiscal_period: 3, period_start: 2024-03-01, period_end: 2024-03-31, currency: USD, amount: 1.00, left_out_by: null, payee: EXAMPLE A LLC, reporting_currency: EUR, amount_at_actual_rates: 1.00, amount_at_constant_rates: 1.00, constant_rates_on: 2023-12-29}
+          - {figure_key: c, entity_id: chicago, basis: direct-vouchers, fiscal_year: 2024, fiscal_period: 3, period_start: 2024-03-01, period_end: 2024-03-31, currency: USD, amount: 1.00, left_out_by: null, payee: "person:invented", reporting_currency: EUR, amount_at_actual_rates: 1.00, amount_at_constant_rates: 1.00, constant_rates_on: 2023-12-29}
+          - {figure_key: d, entity_id: nl-government, basis: cash-outturn, fiscal_year: 2024, fiscal_period: null, period_start: 2024-01-01, period_end: 2024-12-31, currency: EUR, amount: 1.00, left_out_by: null, payee: null, reporting_currency: EUR, amount_at_actual_rates: 1.00, amount_at_constant_rates: 1.00, constant_rates_on: 2023-12-29}
+          - {figure_key: e, entity_id: nl-government, basis: cash-outturn, fiscal_year: 2024, fiscal_period: null, period_start: 2024-01-01, period_end: 2024-12-31, currency: EUR, amount: 1.00, left_out_by: null, payee: null, reporting_currency: EUR, amount_at_actual_rates: 1.00, amount_at_constant_rates: 1.00, constant_rates_on: 2023-12-29}
+    expect:
+      rows:
+        - {group_total_key: chicago-2024-3-direct-vouchers, figures: 3, payees: 2}
+        - {group_total_key: nl-government-2024-year-cash-outturn, figures: 2, payees: 2}
