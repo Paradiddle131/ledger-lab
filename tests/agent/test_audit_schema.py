@@ -270,6 +270,7 @@ WRONG = [
     (0, "metrics/0/version", "1"),
     (0, "metrics/0/version", 0),
     (0, "metrics/0/version", 1.5),
+    (0, "metrics/0/version", 2**53),
     (0, "metrics", []),
     (0, "runs", []),
     (0, "runs/0/query/text", ""),

@@ -43,9 +43,9 @@ scan: sync
 contract: sync
 	@uv run python models/contracts/gate.py
 
-# The metrics against the ones on origin/main, read from this clone: fails on a changed definition
-# under the same version, a lost version or owner, and when origin/main is not fetched
-# (semantics/versions.py).
+# The metrics against the ones on origin/main, read from this clone and each parsed by dbt: fails on
+# a changed definition under the same version, a lost version or owner, and when origin/main is not
+# fetched or not merged (semantics/versions.py).
 metric-versions: sync
 	@uv run python semantics/versions.py
 

@@ -134,7 +134,7 @@
       "required": ["name", "version"],
       "properties": {
         "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
-        "version": {"type": "integer", "minimum": 1}
+        "version": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
       }
     },
     "run": {
