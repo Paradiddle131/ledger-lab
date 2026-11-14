@@ -414,8 +414,8 @@ def parse_and_refuse(project: Path, report: Path) -> int:
         if uid in manifest.nodes
     } | {node.name for node in manifest.nodes.values() if getattr(node, "time_spine", None)}
     refused = [
-        f"{macro.original_file_path}: macro {macro.name} decides relation names, which the gate"
-        " does not compare"
+        f"{in_tree(project, macro.original_file_path, tree)}: macro {macro.name} decides relation"
+        " names, which the gate does not compare"
         for macro in manifest.macros.values()
         if macro.package_name == root and macro.name in RELATION_MACROS
     ]
@@ -444,6 +444,14 @@ def parse_and_refuse(project: Path, report: Path) -> int:
                     refused.append(f"{path}: {key} {name} holds dbt Jinja at {place}")
     report.write_text(json.dumps({"refused": sorted(set(refused)), "vars": project_vars}))
     return 0
+
+
+def in_tree(project: Path, original: str, tree: Path) -> str:
+    """A path dbt gives relative to the project, as a path in the tree, or a mark of none."""
+    place = (project / original).resolve()
+    return (
+        place.relative_to(tree).as_posix() if place.is_relative_to(tree) else "(outside the tree)"
+    )
 
 
 def failure(error: object, project: Path, tree: Path) -> str:

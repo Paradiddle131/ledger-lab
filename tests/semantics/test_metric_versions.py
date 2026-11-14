@@ -449,25 +449,39 @@ SEED_READER = """
 semantic_models:
   - name: period_statuses
     model: ref('period_status')
+    defaults: {agg_time_dimension: year_start}
     entities:
       - {name: period_status_row, type: primary, expr: "entity_id || fiscal_year || fiscal_period"}
+    dimensions:
+      - name: year_start
+        type: time
+        expr: make_date(fiscal_year, 1, 1)
+        type_params: {time_granularity: day}
     measures:
-      - {name: period_rows, agg: count, expr: "1"}
+      - {name: closed_periods, agg: sum, expr: "case when status = 'closed' then 1 else 0 end"}
 """
 
 
 def read_from_a_seed(files: dict[str, str]) -> None:
     """A semantic model on a seed, invented for the test, whose seed entry reads the environment."""
     files[f"{FOLDER}/seeds.yml"] = SEED_READER
-    files[CALENDARS] = files[CALENDARS] + (
-        "\nseeds:\n  - name: period_status\n"
-        "    config: {alias: \"{{ env_var('ANY', 'period_status') }}\"}\n"
-    )
+    replaced(
+        CALENDARS,
+        "  - name: period_status\n",
+        "  - name: period_status\n"
+        "    config: {alias: \"{{ env_var('ANY', 'period_status') }}\"}\n",
+    )(files)
 
 
 REFUSED: dict[str, tuple[Edit, list[str]]] = {
     "dbt Jinja in a definition": (
         both(
+            replaced(
+                CONTRACTS,
+                "  - name: chicago_contracts\n",
+                "  - name: chicago_contracts\n"
+                "    config: {meta: {filter: \"{{ env_var('ANY', '') }}\"}}\n",
+            ),
             replaced(
                 CONTRACTS,
                 FIXED_AWARD_EXPR,
@@ -492,12 +506,6 @@ REFUSED: dict[str, tuple[Edit, list[str]]] = {
                 "models/models/marts/payments/_payments__models.yml",
                 "  - name: payments\n",
                 "  - name: payments\n    config: {meta: {read: \"{{ env_var('ANY', '') }}\"}}\n",
-            ),
-            replaced(
-                CONTRACTS,
-                "  - name: chicago_contracts\n",
-                "  - name: chicago_contracts\n"
-                "    config: {meta: {filter: \"{{ env_var('ANY', '') }}\"}}\n",
             ),
             read_from_a_seed,
             lambda files: files.update({"models/macros/generate_alias_name.sql": ALIAS_MACRO}),
