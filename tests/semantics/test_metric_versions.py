@@ -848,3 +848,9 @@ def test_the_gate_reads_the_metrics_dbt_parses(build: Build) -> None:
         "fixed_award",
         "paid_against_fixed_award",
     }
+    assert read["constant_currency_spend"].definition["inputs"].keys() == {
+        "spend_in_periods",
+        "spend_in_years",
+        "spend_bases_in_periods",
+        "spend_bases_in_years",
+    }

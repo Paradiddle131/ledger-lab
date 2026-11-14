@@ -7,14 +7,15 @@ exports `origin/main`'s tree (`git archive`) and the working tree (its tracked a
 the ignored ones) into temporary folders and runs `dbt parse` on the dbt project at
 `models/dbt_project.yml` of each, on the local target, with no network and under one fixed
 environment the gate sets, the same for both. So every path dbt reads metric YAML from, the
-`.dbtignore` it honours, the project's configuration (`+enabled`, `+meta` and the rest) and the
-project's time spines are dbt's, and the definitions are built from the semantic manifest dbt
-writes. A metric's definition, which its version names, is:
+`.dbtignore` it honours, the project's configuration (`+enabled` and the rest), the newer spec of
+metrics on a model's own entry and the project's time spines are dbt's, and the definitions are
+built from the semantic manifest dbt writes. A metric's definition, which its version names, is:
 
 - its own entry of the semantic manifest, all but its version and its owner;
-- every metric it is built from, transitively: an input of a ratio, a derived, a cumulative or a
-  conversion metric, and a metric read in a filter (`{{ Metric('x', ...) }}`) anywhere in it,
-  each found by MetricFlow's own model of the manifest and parser of filters;
+- every metric it is built from, transitively: every metric input anywhere in its type parameters
+  (a ratio's numerator and denominator, a derived metric's inputs, and any other kind's) and every
+  metric a filter anywhere in it reads (`{{ Metric('x', ...) }}`), each found by MetricFlow's own
+  model of the manifest and parser of filters;
 - the semantic model of each measure those metrics resolve to and of each semantic model a metric
   aggregates directly, with the semantic models they can join through a shared entity name: their
   dbt relation, entities, dimensions, defaults and every other key, and of their measures only the
@@ -30,11 +31,11 @@ definition, a comment, key order, quoting or line folding is no change.
 
 A definition that could differ for a consumer while both trees read the same is refused: dbt Jinja
 in a semantic model or metric entry, or in the entry of a model a semantic model reads or a time
-spine is (but a filter, which MetricFlow renders itself, and a model's or column's description,
-wording no definition holds), and any Jinja in
-the project file. dbt renders that Jinja with the environment (`env_var`), command-line variables,
-the clock and the run, none of which is in the tree. A file or symbolic link reaching outside the
-tree is refused too.
+spine is (but in a filter, which MetricFlow renders itself, and in a description of a model's entry
+outside its metrics, wording no definition holds), and any Jinja in the project file. dbt renders
+that Jinja with the environment (`env_var`), command-line variables (`var`), the clock and the run,
+none of which is in the tree. A symbolic link in either tree, and a file dbt reads outside the
+tree, are refused too.
 
 Two things are outside the definition. The SQL of the dbt model a semantic model reads: the
 semantic layer cannot see it, so a change there that moves a number is caught, if at all, by the
