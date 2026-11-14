@@ -1,29 +1,45 @@
 """`uv run python -m ingest.load <landed file>...`: load landed files from the landing bucket into
 the warehouse's `landed` dataset, one BigQuery load job per file.
 
-Each name is an object the fetch kit landed at the root of the lab's landing bucket (`bucket.py`),
-so a load reads only what a landing step produced, hashed names included, never a publisher's
-file. Every landed file is Parquet its step wrote: text columns as the publishers' text, typed
-columns only where the step typed them; the load keeps the file's own schema, so no delimiter,
-quoting, header or encoding rule can split a row differently from the landing. Column names are
-kept as they are; BigQuery refuses a Parquet column whose name holds a dot, so the steps land none
-(the legal-entity register's `Entity.LegalName` lands as `Entity_LegalName`). A file lands as the
-table named after it with underscores for its hyphens (`chicago-contracts` as
-`landed.chicago_contracts`), replaced whole (WRITE_TRUNCATE) so a re-run is idempotent, and a
-job that meets a single bad record fails and leaves the table as it was. Each file's table is
-loaded in turn; a failure stops before the next.
+Each name is a file the fetch kit lands (a source or set recorded in `sources.yaml`) and an object
+at the root of the lab's landing bucket (`bucket.py`), so a load reads only what a landing step
+produced, hashed names included, never a publisher's file. Every landed file is Parquet its step
+wrote: text columns as the publishers' text, typed columns only where the step typed them; the load
+keeps the file's own schema, so no delimiter, quoting, header or encoding rule can split a row
+differently from the landing. Column names are kept as they are; BigQuery refuses a Parquet column
+whose name holds a dot, so the steps land none (the legal-entity register's `Entity.LegalName`
+lands as `Entity_LegalName`). A file lands as the table named after it with underscores for its
+hyphens (`chicago-contracts` as `landed.chicago_contracts`), replaced whole (WRITE_TRUNCATE) so a
+re-run is idempotent, and a job that meets a single bad record fails and leaves the table as it
+was. Each file's table is loaded in turn; a failure stops before the next.
 
 Refused before any call: a project other than the one `LEDGER_LAB_GCP_PROJECT` names (read through
 `platform/gcp_project.py`, never the session's `GCP_PROJECT`), a location in
-`LEDGER_LAB_BQ_LOCATION` outside the free-tier regions the landing bucket may sit in, and a name
-that is not a landed file's (hidden objects and the lock among them). Refused before any load: a
-name the bucket does not hold, and a bucket holding the landing lock, since a landing in progress
-may have emptied a name.
+`LEDGER_LAB_BQ_LOCATION` outside the free-tier regions `platform/gcp/variables.tf` allows, and a
+name that is no recorded landed file's (hidden objects and the lock among them). Refused before any
+load: a landing bucket whose lock another landing or load holds, and a name the bucket does not
+hold. The load holds the landing's own lock (`Bucket.lock`) for its whole run, so no landing
+replaces an object while the set loads and no load starts during a landing; it releases the lock
+when it ends, on a failure too, and a killed load leaves it behind, as a killed landing does, for an
+operator to delete by hand once nothing runs.
 
-Load jobs from Cloud Storage bill nothing; the loader runs no query and no streaming insert. After
-each load it reads the table's metadata (`bq show`, which bills nothing), and refuses to go on once
-the loaded tables hold more than `STORAGE_CAP` bytes, far inside BigQuery's free 10 GiB. The live
-comparisons run `query`, which dry-runs every query first and caps its billed bytes.
+Load jobs from Cloud Storage bill nothing, and the loader runs no streaming insert. After each load
+it reads the metadata of every table in `landed` (`bq ls` and `bq show`, which bill nothing) and
+refuses to go on once the dataset holds more than `STORAGE_CAP` bytes, far inside BigQuery's free
+10 GiB. The live comparisons ask BigQuery three things of one landed table, each built here from
+the file's name and, for a column, its name as the table's own schema gives it, so a caller names
+no project, dataset or table: the row and non-null counts (`counts`), one column's distinct values
+(`distinct_values`) and a content digest (`digest`). Each query is dry-run first and refused above
+`MAX_BYTES_BILLED`, which also caps the job.
+
+The digest is the same on the BigQuery table and on the local file (`local_digest`) exactly when
+they hold the same rows, in any order. Each cell becomes text by one rule (a null is `N`; any
+other value is `V`, its UTF-8 length in bytes, `:` and its text, where an integer is its decimal
+digits and a boolean `true` or `false`), a row is the SHA-256 of its cells' texts in column order,
+and the digest is the row count with the sum of each of the eight 32-bit slices of every row's
+hash, so a changed cell, two cells swapped between rows, or a row dropped and another doubled
+changes it. Only the types the landing writes have a rule (text, integers, booleans); any other
+column is refused.
 
 The calls go through `bq`, whose credential the session's network proxy adds; a failure is
 reported by the file and `bq`'s exit status only, since its messages name the project.
@@ -35,6 +51,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from fsspec import AbstractFileSystem
@@ -43,15 +60,17 @@ from ingest.bucket import LOCK, SCHEME, Bucket, BucketError, bucket_name, cloud_
 
 DATASET = "landed"
 LOCATION_VARIABLE = "LEDGER_LAB_BQ_LOCATION"
-# The regions whose free tier covers the landing bucket and BigQuery storage, as platform/gcp's
-# `region` variable allows them.
-FREE_REGIONS = ("us-west1", "us-central1", "us-east1")
+VARIABLES_TF = Path(__file__).resolve().parent.parent / "platform" / "gcp" / "variables.tf"
 # A landed file's name: lower-case words and digits joined by hyphens, as the fetch kit names them.
 LANDED_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-# The landing is about 52 MB of Parquet; the tables it loads into stay far below this.
+# The landing is about 52 MB of Parquet; the `landed` dataset stays far below this.
 STORAGE_CAP = 2 * 1024**3
 # Every query's billed bytes, far inside the free 1 TiB a month and the daily query cap.
 MAX_BYTES_BILLED = 1_000_000_000
+# The digest: a row hash's 64 hex digits as eight slices of eight (32 bits each); a sum of one
+# slice over a million rows stays below 2**52, inside BigQuery's INT64 and DuckDB's BIGINT.
+SLICES = 8
+SLICE = 8
 
 Runner = Callable[[Sequence[str]], str]
 
@@ -64,19 +83,36 @@ def run_tool(command: Sequence[str]) -> str:
     return subprocess.run(command, capture_output=True, text=True, check=True).stdout  # noqa: S603
 
 
+def free_regions() -> tuple[str, ...]:
+    """The free-tier regions `platform/gcp/variables.tf`'s `region` validation allows."""
+    found = re.search(r"contains\(\[([^\]]*)\],\s*var\.region\)", VARIABLES_TF.read_text())
+    if found is None:
+        raise LoadError(f"no region validation in {VARIABLES_TF.name}")
+    return tuple(re.findall(r'"([a-z0-9-]+)"', found.group(1)))
+
+
 def location(env: Mapping[str, str]) -> str:
     """Where the jobs run: `LEDGER_LAB_BQ_LOCATION`, one of the free-tier regions."""
     where = env.get(LOCATION_VARIABLE, "").strip()
-    if where not in FREE_REGIONS:
+    regions = free_regions()
+    if where not in regions:
         raise LoadError(
-            f"{LOCATION_VARIABLE} must be the warehouse's region, one of {', '.join(FREE_REGIONS)}"
+            f"{LOCATION_VARIABLE} must be the warehouse's region, one of {', '.join(regions)}"
         )
     return where
 
 
-def table_name(name: str) -> str:
+def recorded_names() -> frozenset[str]:
+    """Every name the fetch kit can land a file under: each recorded source, and each set's name
+    (a set lands one file under its name, or files under its members')."""
+    from ingest.fetch import SET_STEPS, SOURCES, load_sources
+
+    return frozenset(load_sources(SOURCES)) | frozenset(SET_STEPS)
+
+
+def table_name(name: str, recorded: frozenset[str] | None = None) -> str:
     """The `landed` table a landed file loads into."""
-    if not LANDED_NAME.match(name):
+    if not LANDED_NAME.match(name) or name not in (recorded or recorded_names()):
         raise LoadError(f"{name!r} is not a landed file's name")
     return name.replace("-", "_")
 
@@ -100,8 +136,12 @@ def load_command(project: str, where: str, bucket: str, name: str) -> list[str]:
     )
 
 
-def show_command(project: str, where: str, name: str) -> list[str]:
-    return bq(project, where, "--format=json", "show", f"{project}:{DATASET}.{table_name(name)}")
+def show_command(project: str, where: str, table: str) -> list[str]:
+    return bq(project, where, "--format=json", "show", f"{project}:{DATASET}.{table}")
+
+
+def list_command(project: str, where: str) -> list[str]:
+    return bq(project, where, "--format=json", "ls", "--max_results=10000", f"{project}:{DATASET}")
 
 
 @dataclass(frozen=True)
@@ -115,27 +155,34 @@ class Table:
     columns: tuple[tuple[str, str], ...]
 
 
-def table_of(name: str, answer: str) -> Table:
-    """The table `bq show` describes, refused unless it is the `landed` table of `name`."""
+def described(
+    project: str, table: str, answer: str
+) -> tuple[int, int, tuple[tuple[str, str], ...]]:
+    """Rows, bytes and columns of the table `bq show` describes, refused unless it is
+    `<lab project>.landed.<table>`."""
     try:
         shown: Any = json.loads(answer)
         reference = shown["tableReference"]
-        if reference["datasetId"] != DATASET or reference["tableId"] != table_name(name):
-            raise LoadError(f"the table shown is not {DATASET}.{table_name(name)}")
+        if (
+            reference.get("projectId", project) != project
+            or reference["datasetId"] != DATASET
+            or reference["tableId"] != table
+        ):
+            raise LoadError(f"the table shown is not {DATASET}.{table}")
         columns = tuple((str(f["name"]), str(f["type"])) for f in shown["schema"]["fields"])
-        return Table(
-            name,
-            f"{DATASET}.{table_name(name)}",
-            int(shown["numRows"]),
-            int(shown["numBytes"]),
-            columns,
-        )
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+        return int(shown["numRows"]), int(shown["numBytes"]), columns
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as error:
         if isinstance(error, LoadError):
             raise
         raise LoadError(
-            f"{DATASET}.{table_name(name)}: an answer of unexpected shape ({type(error).__name__})"
+            f"{DATASET}.{table}: an answer of unexpected shape ({type(error).__name__})"
         ) from None
+
+
+def table_of(name: str, answer: str, project: str) -> Table:
+    table = table_name(name)
+    rows, size, columns = described(project, table, answer)
+    return Table(name, f"{DATASET}.{table}", rows, size, columns)
 
 
 def failure(failed: Exception) -> str:
@@ -153,58 +200,84 @@ def call(run: Runner, doing: str, command: Sequence[str]) -> str:
         raise LoadError(f"cannot {doing} ({failure(failed)})") from None
 
 
+def lab(env: Mapping[str, str]) -> tuple[str, str]:
+    """The lab's project and the jobs' location, or a refusal."""
+    try:
+        project = lab_project(env)
+    except BucketError as error:
+        raise LoadError(str(error)) from None
+    return project, location(env)
+
+
+def stored(project: str, where: str, run: Runner) -> int:
+    """The bytes every table in `landed` holds, from free metadata."""
+    answer = call(run, "list the landed tables", list_command(project, where))
+    try:
+        listed: Any = json.loads(answer) if answer.strip() else []
+        tables = [str(t["tableReference"]["tableId"]) for t in listed]
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        raise LoadError(
+            f"the landed tables' list has an unexpected shape ({type(error).__name__})"
+        ) from None
+    total = 0
+    for table in tables:
+        shown = call(run, f"describe {DATASET}.{table}", show_command(project, where, table))
+        total += described(project, table, shown)[1]
+    return total
+
+
 def load(
     names: Sequence[str],
     env: Mapping[str, str],
     run: Runner = run_tool,
     fs: AbstractFileSystem | None = None,
 ) -> list[Table]:
-    """Load each landed file into its `landed` table, in turn, and describe the tables."""
+    """Load each landed file into its `landed` table, in turn, holding the landing's lock, and
+    describe the tables."""
     if not names:
         raise LoadError("name at least one landed file")
     if len(set(names)) != len(names):
         raise LoadError("a landed file is named twice")
+    recorded = recorded_names()
     for name in names:
-        table_name(name)
+        table_name(name, recorded)
+    project, where = lab(env)
     try:
-        project = lab_project(env)
         root = bucket_name(f"{SCHEME}{project}-landing", env)
+        landing = Bucket(fs if fs is not None else cloud_storage(), root)
+        landing.lock()
     except BucketError as error:
         raise LoadError(str(error)) from None
-    where = location(env)
     try:
-        held = Bucket(fs if fs is not None else cloud_storage(), root).names()
+        held = landing.names() - {LOCK}
+        missing = [name for name in names if name not in held]
+        if missing:
+            raise LoadError(f"the landing bucket holds no {', '.join(missing)}: land it first")
+        tables: list[Table] = []
+        for name in names:
+            call(run, f"load {name}", load_command(project, where, root, name))
+            shown = call(
+                run, f"describe {name}'s table", show_command(project, where, table_name(name))
+            )
+            tables.append(table_of(name, shown, project))
+            total = stored(project, where, run)
+            if total > STORAGE_CAP:
+                raise LoadError(
+                    f"{DATASET} holds {total} bytes, above the {STORAGE_CAP}-byte cap: stop"
+                )
+        return tables
     except BucketError as error:
         raise LoadError(str(error)) from None
-    if LOCK in held:
-        raise LoadError(f"the landing bucket holds the lock {LOCK}: a landing runs or was killed")
-    missing = [name for name in names if name not in held]
-    if missing:
-        raise LoadError(f"the landing bucket holds no {', '.join(missing)}: land it first")
-    tables: list[Table] = []
-    for name in names:
-        call(run, f"load {name}", load_command(project, where, root, name))
-        tables.append(
-            table_of(
-                name, call(run, f"describe {name}'s table", show_command(project, where, name))
-            )
-        )
-        stored = sum(t.bytes for t in tables)
-        if stored > STORAGE_CAP:
-            raise LoadError(
-                f"the loaded tables hold {stored} bytes, above the {STORAGE_CAP}-byte cap: stop"
-            )
-    return tables
+    finally:
+        try:
+            landing.unlock()
+        except BucketError as error:
+            raise LoadError(f"{error}; delete {LOCK} by hand once nothing runs") from None
 
 
-def query(sql: str, env: Mapping[str, str], run: Runner = run_tool) -> list[dict[str, Any]]:
+def _query(project: str, where: str, sql: str, run: Runner) -> list[dict[str, Any]]:
     """A standard SQL query's rows, after a dry run shows it bills at most `MAX_BYTES_BILLED`, and
-    under that cap; the SQL names its tables in full (`<lab project>.landed.<table>`)."""
-    try:
-        project = lab_project(env)
-    except BucketError as error:
-        raise LoadError(str(error)) from None
-    where = location(env)
+    under that cap."""
     flags = ["--nouse_legacy_sql", f"--maximum_bytes_billed={MAX_BYTES_BILLED}"]
     dry = call(
         run,
@@ -229,6 +302,144 @@ def query(sql: str, env: Mapping[str, str], run: Runner = run_tool) -> list[dict
     if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
         raise LoadError("the query answered unexpectedly")
     return rows
+
+
+@dataclass(frozen=True)
+class Asked:
+    """One landed table to ask of: where it is and its columns, from its own `bq show`."""
+
+    project: str
+    where: str
+    table: str
+    columns: tuple[tuple[str, str], ...]
+
+    @property
+    def reference(self) -> str:
+        return f"`{self.project}.{DATASET}.{self.table}`"
+
+    def column(self, name: str) -> str:
+        """A column of the table, quoted; refused unless the table's schema names it."""
+        if name not in {c for c, _ in self.columns} or "`" in name or "\\" in name:
+            raise LoadError(f"{DATASET}.{self.table} has no column {name!r}")
+        return f"`{name}`"
+
+
+def asked(name: str, env: Mapping[str, str], run: Runner) -> Asked:
+    project, where = lab(env)
+    table = table_name(name)
+    shown = call(run, f"describe {name}'s table", show_command(project, where, table))
+    return Asked(project, where, table, described(project, table, shown)[2])
+
+
+def counts(name: str, env: Mapping[str, str], run: Runner = run_tool) -> tuple[int, list[int]]:
+    """The loaded table's rows and each column's non-null cells, in column order."""
+    t = asked(name, env, run)
+    cells = ", ".join(f"COUNT({t.column(c)}) AS c{i}" for i, (c, _) in enumerate(t.columns))
+    (row,) = _query(t.project, t.where, f"SELECT COUNT(*) AS n, {cells} FROM {t.reference}", run)  # noqa: S608
+    try:
+        return int(row["n"]), [int(row[f"c{i}"]) for i in range(len(t.columns))]
+    except (KeyError, TypeError, ValueError):
+        raise LoadError("the counts answered unexpectedly") from None
+
+
+def distinct_values(
+    name: str, column: str, env: Mapping[str, str], run: Runner = run_tool
+) -> set[str | None]:
+    """One column's distinct values in the loaded table."""
+    t = asked(name, env, run)
+    sql = f"SELECT DISTINCT {t.column(column)} AS v FROM {t.reference}"  # noqa: S608
+    try:
+        return {
+            None if r["v"] is None else str(r["v"]) for r in _query(t.project, t.where, sql, run)
+        }
+    except KeyError:
+        raise LoadError("the distinct values answered unexpectedly") from None
+
+
+@dataclass(frozen=True)
+class Digest:
+    """A table's rows, and the sum of each 32-bit slice of every row's hash."""
+
+    rows: int
+    sums: tuple[int, ...]
+
+
+# The text of a cell by its type, in each engine; the cell is `{c}`, already quoted.
+BIGQUERY_TEXT = {
+    "STRING": "{c}",
+    "INTEGER": "CAST({c} AS STRING)",
+    "BOOLEAN": "CAST({c} AS STRING)",
+}
+DUCKDB_TEXT = {
+    "VARCHAR": "{c}",
+    "BIGINT": "CAST({c} AS VARCHAR)",
+    "BOOLEAN": "CAST({c} AS VARCHAR)",
+}
+
+
+def bigquery_digest_sql(reference: str, columns: Sequence[tuple[str, str]]) -> str:
+    """The digest over `reference` in BigQuery's dialect; columns are (quoted name, type)."""
+    cells = []
+    for c, kind in columns:
+        if kind not in BIGQUERY_TEXT:
+            raise LoadError(f"no digest rule for a {kind} column")
+        text = BIGQUERY_TEXT[kind].format(c=c)
+        cells.append(
+            f"IF({c} IS NULL, 'N', CONCAT('V', CAST(BYTE_LENGTH({text}) AS STRING), ':', {text}))"
+        )
+    row = f"TO_HEX(SHA256(CONCAT({', '.join(cells)})))"
+    sums = ", ".join(
+        f"SUM(CAST(CONCAT('0x', SUBSTR(h, {i * SLICE + 1}, {SLICE})) AS INT64)) AS s{i}"
+        for i in range(SLICES)
+    )
+    return f"SELECT COUNT(*) AS n, {sums} FROM (SELECT {row} AS h FROM {reference})"  # noqa: S608
+
+
+def duckdb_digest_sql(source: str, columns: Sequence[tuple[str, str]]) -> str:
+    """The same digest over `source` in DuckDB's dialect; columns are (quoted name, type)."""
+    cells = []
+    for c, kind in columns:
+        if kind not in DUCKDB_TEXT:
+            raise LoadError(f"no digest rule for a {kind} column")
+        text = DUCKDB_TEXT[kind].format(c=c)
+        cells.append(
+            f"CASE WHEN {c} IS NULL THEN 'N'"
+            f" ELSE 'V' || CAST(strlen({text}) AS VARCHAR) || ':' || {text} END"
+        )
+    row = f"sha256({' || '.join(cells)})"
+    sums = ", ".join(
+        f"SUM(CAST('0x' || substr(h, {i * SLICE + 1}, {SLICE}) AS BIGINT)) AS s{i}"
+        for i in range(SLICES)
+    )
+    return f"SELECT COUNT(*) AS n, {sums} FROM (SELECT {row} AS h FROM {source})"  # noqa: S608
+
+
+def digest_of(row: Mapping[str, Any]) -> Digest:
+    try:
+        return Digest(int(row["n"] or 0), tuple(int(row[f"s{i}"] or 0) for i in range(SLICES)))
+    except (KeyError, TypeError, ValueError):
+        raise LoadError("the digest answered unexpectedly") from None
+
+
+def digest(name: str, env: Mapping[str, str], run: Runner = run_tool) -> Digest:
+    """The loaded table's digest, in BigQuery."""
+    t = asked(name, env, run)
+    sql = bigquery_digest_sql(t.reference, [(t.column(c), kind) for c, kind in t.columns])
+    (row,) = _query(t.project, t.where, sql, run)
+    return digest_of(row)
+
+
+def local_digest(path: Path) -> Digest:
+    """A local landed Parquet file's digest, in DuckDB, by the same rule."""
+    import duckdb
+
+    con = duckdb.connect()
+    kinds = con.execute("DESCRIBE SELECT * FROM read_parquet(?)", [str(path)]).fetchall()
+    columns = [('"' + str(c).replace('"', '""') + '"', str(k)) for c, k, *_ in kinds]
+    cursor = con.execute(duckdb_digest_sql("read_parquet(?)", columns), [str(path)])
+    names = [d[0] for d in cursor.description or ()]
+    values = cursor.fetchone()
+    return digest_of(dict(zip(names, values or (), strict=True)))
 
 
 def main(
