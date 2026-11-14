@@ -29,7 +29,17 @@
             "uniqueItems": true,
             "items": {"type": "string", "pattern": "^tests/[a-z0-9_/]+\\.py::test_[a-z0-9_]+$"}
           },
-          "status": {"enum": ["not-implemented", "implemented"]}
+          "status": {"enum": ["not-implemented", "implemented"]},
+          "awaits": {
+            "description": "For a not-implemented control whose proving tests exist: the parameter of each of them that still skips, and what they prove without it.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["parameter", "until_then"],
+            "properties": {
+              "parameter": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+              "until_then": {"type": "string", "minLength": 1}
+            }
+          }
         }
       }
     }

@@ -12,7 +12,11 @@ it, and everything else is simply absent:
   is left out for a persona that is neither, so no query can name it;
 - the minimum group: an `aggregate` grant gives the product's aggregate tables of
   `access/aggregates.yaml` and never its rows, each table holding only the groups of at least the
-  minimum, so no filter or grain the persona writes can reach a smaller one.
+  minimum, so no filter or grain the persona writes can reach a smaller one;
+- the entities apart: a table of figures across all entities keeps a group only when it holds at
+  least the minimum entities among those the persona reads neither by rows nor per entity in an
+  aggregate table, and their rows alone hold the minimum group, so neither the group nor the group
+  less what the persona can work out of its own is one entity's figure or a small group.
 
 Masked values are stored masked, so a filter, a join or a count on a masked column sees the masked
 value, as on BigQuery, where predicates read the masked column. The persona's connection
@@ -87,6 +91,12 @@ class Aggregate:
     count: str
     units_of: str
     minimum: int
+    # For figures across all entities: the entities whose rows the persona reads in some product
+    # or per entity in an aggregate table, whose share of a group it can work out and take away,
+    # and the fewest other entities a kept
+    # group must hold. `known` is None for a table that keeps each entity apart.
+    known: frozenset[str] | None = None
+    minimum_entities: int = 0
 
 
 @dataclass(frozen=True)
@@ -169,6 +179,20 @@ def compile_persona(
     minimum = aggregates["minimum_group"]
     if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum < 2:
         raise CompileError(f"the minimum group must be a whole number of two or more: {minimum!r}")
+    apart = aggregates["minimum_entities"]
+    if not isinstance(apart, int) or isinstance(apart, bool) or apart < 1:
+        raise CompileError(f"the minimum entities must be a whole number of one or more: {apart!r}")
+    # The entities whose share of an all-entity group the persona can work out: those it reads by
+    # rows, and those it reads per entity in an aggregate table, whose sums it could take away.
+    per_entity = {p for p, e in aggregates["products"].items() if e.get("entity_rows") is True}
+    known = frozenset(
+        {e for entities in who.reads.values() if entities for e in entities}
+        | {
+            g["entity"]
+            for g in mine
+            if g["access"] == AGGREGATE and g["product"] in per_entity and "entity" in g
+        }
+    )
     tables_of = {p["id"]: list(p.get("tables", [])) for p in catalogue["data_products"]}
     rules = column_rules(columns, persona)
     for product, tagged in rules.items():
@@ -238,6 +262,8 @@ def compile_persona(
             entities = _entities(catalogue, persona, product)
             if entities is not None and ENTITY not in source:
                 raise CompileError(f"{product} is entity-scoped but {view['from']} has no {ENTITY}")
+            if not entry["entity_rows"] and ENTITY not in source:
+                raise CompileError(f"{view['name']}: {view['from']} has no {ENTITY} to keep apart")
             plan.append(
                 Aggregate(
                     view["name"],
@@ -249,6 +275,8 @@ def compile_persona(
                     count,
                     units[count],
                     minimum,
+                    None if entry["entity_rows"] else known,
+                    0 if entry["entity_rows"] else apart,
                 )
             )
     names = [t.table if isinstance(t, Rows) else t.name for t in plan]
@@ -288,6 +316,24 @@ def _where(entities: frozenset[str] | None) -> str:
     return f" where {quote(ENTITY)} in ({listed})"
 
 
+def _kept(table: Aggregate) -> str:
+    """The condition a group of the aggregate table meets to be written."""
+    of = quote(table.units_of)
+    count = "count(distinct {})" if table.count == "count_distinct" else "max({})"
+    if table.known is None:
+        return f"{count.format(of)} >= {table.minimum}"
+    # Only the rows of entities the persona reads in no product count, written as CASE since
+    # BigQuery has no FILTER clause; with no entity known, every row is another entity's.
+    entity = quote(ENTITY)
+    if table.known:
+        other = f"{entity} not in ({', '.join(literal(e) for e in sorted(table.known))})"
+        of, entity = (f"case when {other} then {c} end" for c in (of, entity))
+    return (
+        f"{count.format(of)} >= {table.minimum}"
+        f" and count(distinct {entity}) >= {table.minimum_entities}"
+    )
+
+
 def statements(plan: Plan) -> list[str]:
     """The SQL that builds the persona's database, with the source attached as SOURCE."""
     sql: list[str] = []
@@ -308,7 +354,7 @@ def statements(plan: Plan) -> list[str]:
             sql.append(
                 f"create table {quote(table.name)} as select {keys}{sums},"  # noqa: S608
                 f" {units} as {quote(table.units)} from {source}{_where(table.entities)}"
-                f" group by {keys} having {units} >= {table.minimum}"
+                f" group by {keys} having {_kept(table)}"
             )
     return sql
 

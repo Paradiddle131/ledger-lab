@@ -1,5 +1,6 @@
 # The controls catalogue: each control, its owner, what it asserts and the tests that prove it.
-# A control is `implemented` only when its tests exist; tests/test_controls.py checks it.
+# A control is `implemented` only when its tests exist and prove it; one whose tests exist but
+# do not prove it yet says what it `awaits`. tests/test_controls.py checks both.
 # Shape: controls/schema.json. Owners are persona ids from access/personas.yaml.
 
 layers:
@@ -35,6 +36,9 @@ controls:
     asserts: The warehouse, never the prompt, decides what each persona sees; every persona against every entity and sensitive column is clear, masked, aggregate only or denied as access/personas.yaml says.
     proven_by: [tests/access/test_visibility.py::test_every_persona_sees_its_matrix]
     status: not-implemented
+    awaits:
+      parameter: bigquery
+      until_then: "The test passes on the local engine only, and there 83 of the 120 cells of access/visibility.yaml are proven on labelled invented tables only, not on the landed data: every cell of the ledger, the metric definitions and the audit log (no table built yet, so every edit, draft and post cell), both bank tags (no column until the ERP's tables exist), every cell of the Dutch government's payments and its accountant's individual's-id tag (no payment rows), and the group-totals aggregate cells of Chicago's accountant and the approver (no group kept for them); 37 are proven on the landed build. BigQuery, whose own rules decide, is skipped."
   - id: aggregates-hold-a-minimum-group-across-the-session
     layer: Data access
     owner: group-controller
