@@ -1,8 +1,8 @@
 -- The landed budget statements, every column as landed, then what the suite's rules read: the year
 -- and amount as numbers, how many moments each served row has, the article a row shares with
 -- another served row, whether a name is doubly encoded or has spaces at its edges, whether the
--- amount is zero or negative, and the year and moment of a row when the file serves no non-zero
--- figure at that moment for the whole year.
+-- amount is zero or negative, and, as one text, the years and moments at which the file serves
+-- no non-zero figure at all.
 select
     *,
     try_cast(Begrotingsjaar as integer) as year_number,
@@ -22,9 +22,14 @@ select
     ) as is_name_with_edge_space,
     cast(amount = '0' as integer) as is_zero_amount,
     cast(try_cast(amount as bigint) < 0 as integer) as is_negative_amount,
-    case
-        when count(*) filter (where amount <> '0') over (partition by Begrotingsjaar, moment) = 0
-            then concat_ws(' ', Begrotingsjaar, moment)
-    end as moment_not_served
+    (
+        select coalesce(string_agg(year_moment, ', ' order by year_moment), 'none')
+        from (
+            select Begrotingsjaar || ' ' || moment as year_moment
+            from landed
+            group by Begrotingsjaar, moment
+            having count(*) filter (where amount <> '0') = 0
+        )
+    ) as moments_not_served
 from landed
 order by source_row, moment

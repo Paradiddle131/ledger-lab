@@ -4,6 +4,7 @@
     "pinned": {
       "rows": 1958,
       "rates_of_currency": 979,
+      "longest_gap_days": 5,
       "weekdays_without_rate": 42
     },
     "names": []
@@ -24,8 +25,10 @@
     {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "rate", "regex": "^\\d+\\.\\d+$"}, "notes": "A rate is digits with a decimal point, never in exponent form."},
     {"type": "expect_column_values_to_be_between", "kwargs": {"column": "rate_value", "min_value": 0.5, "max_value": 2.0}, "notes": "Range: a plausibility bound, not the measured extremes (0.82428 to 0.89338 for the pound, 1.0198 to 1.1974 for the dollar), since a rate moves every day; a rate ten times off breaks it."},
     {"type": "expect_table_row_count_to_equal", "kwargs": {"value": {"$PARAMETER": "rows"}}, "notes": "Pinned: every rate the pin serves."},
-    {"type": "expect_column_values_to_be_between", "kwargs": {"column": "rates_of_currency", "min_value": {"$PARAMETER": "rates_of_currency"}, "max_value": {"$PARAMETER": "rates_of_currency"}}, "notes": "Pinned: each currency has a rate on the same number of days."},
-    {"type": "expect_column_values_to_be_between", "kwargs": {"column": "days_after_previous_rate", "min_value": 1, "max_value": 5}, "notes": "Mess, closed days absent: at most four closed days in a row (Good Friday to Easter Monday), the longest gap the translation carries a rate over."},
+    {"type": "expect_column_min_to_be_between", "kwargs": {"column": "rates_of_currency", "min_value": {"$PARAMETER": "rates_of_currency"}, "max_value": {"$PARAMETER": "rates_of_currency"}}, "notes": "Pinned: each currency has a rate on the same number of days, the fewest of them."},
+    {"type": "expect_column_max_to_be_between", "kwargs": {"column": "rates_of_currency", "min_value": {"$PARAMETER": "rates_of_currency"}, "max_value": {"$PARAMETER": "rates_of_currency"}}, "notes": "Pinned: each currency has a rate on the same number of days, the most of them."},
+    {"type": "expect_column_values_to_be_between", "kwargs": {"column": "days_after_previous_rate", "min_value": 1, "max_value": null}, "notes": "Days follow each other: one rate a day, in order."},
+    {"type": "expect_column_max_to_be_between", "kwargs": {"column": "days_after_previous_rate", "min_value": {"$PARAMETER": "longest_gap_days"}, "max_value": {"$PARAMETER": "longest_gap_days"}}, "notes": "Pinned mess, closed days absent: at most four closed days in a row on the pinned file (Good Friday to Easter Monday), the longest gap the translation carries a rate over."},
     {"type": "expect_column_sum_to_be_between", "kwargs": {"column": "weekdays_without_rate_before", "min_value": {"$PARAMETER": "weekdays_without_rate"}, "max_value": {"$PARAMETER": "weekdays_without_rate"}}, "notes": "Pinned mess, closed days absent: weekdays the settlement system is closed have no row (21 for each currency); which days they are is the landed test's TARGET calendar check."}
   ]
 }

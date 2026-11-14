@@ -123,9 +123,7 @@ FIXTURE_COUNTS: dict[str, dict[str, Any]] = {
         "rows": 74,
         "itemised_rows": 60,
         "rolled_up_rows": 14,
-        "rolled_up_years": [
-            *map(str, (2002, 2003, 2004, 2005, 2006, 2007, 2008, 2011, 2023, 2024))
-        ],
+        "rolled_up_years": ["2002, 2003, 2004, 2005, 2006, 2007, 2008, 2011, 2023, 2024"],
         "rows_of_2002": 3,
         "without_contract": 45,
         "multiple_vouchers": 3,
@@ -135,13 +133,19 @@ FIXTURE_COUNTS: dict[str, dict[str, Any]] = {
         "hashed_rows": 15,
         "hashed_payees": 8,
     },
-    "ecb-rates": {"rows": 18, "rates_of_currency": 9, "weekdays_without_rate": 4},
+    "ecb-rates": {
+        "rows": 64,
+        "rates_of_currency": 32,
+        "longest_gap_days": 693,
+        "weekdays_without_rate": 1112,
+    },
     "gleif-legal-entities": {
         "rows": 3,
-        "records_of_country": ["GB 1", "NL 1", "US 1"],
+        "records_of_countries": ["GB 1, NL 1, US 1"],
         "without_real_legal_form": 0,
         "left_out_sole_proprietors": 1,
         "left_out_partnerships": 1,
+        "left_out_dutch_firms": 1,
         "left_out_without_legal_form": 0,
         "other_names_blanked": 0,
     },
@@ -154,8 +158,8 @@ FIXTURE_COUNTS: dict[str, dict[str, Any]] = {
         "zero_amounts": 44,
         "negative_amounts": 3,
         "moments_not_served": [
-            *("2022 StandSBS", "2026 Realisatie", "2026 StandO1", "2026 StandO2"),
-            *("2027 Realisatie", "2027 StandO1", "2027 StandO2", "2027 StandSBS"),
+            "2022 StandSBS, 2026 Realisatie, 2026 StandO1, 2026 StandO2, 2027 Realisatie,"
+            " 2027 StandO1, 2027 StandO2, 2027 StandSBS"
         ],
     },
     "sec-annual-filings": {
@@ -165,9 +169,8 @@ FIXTURE_COUNTS: dict[str, dict[str, Any]] = {
         "amended_filings": 1,
         "restated_periods": 4,
         "reports_without_own_revenue": 1,
-        "company_reports": ["1069183 2023 2024", "78814 2023 2024 2025 2025/A"],
-        "reports_without_annual_length": ["0001069183-25-000019"],
-        "annual_figures_as_one_quarter": [],
+        "company_reports": ["1069183 2023 2024, 78814 2023 2024 2025 2025/A"],
+        "wrong_lengths": ["0001069183-25-000019"],
     },
     "uk-transport-spend-2025": {
         "rows": 57,
@@ -261,6 +264,53 @@ def test_a_column_that_can_hold_a_name_carries_only_rules_whose_result_is_a_coun
         and x["type"] != "expect_table_columns_to_match_ordered_list"
     }
     assert on_names <= COUNT_RULES
+
+
+# Each suite's rules, counted: a rule taken out, or one added, is a reviewed change here.
+RULES = {
+    "chicago-contracts": 51,
+    "chicago-payments": 33,
+    "ecb-rates": 20,
+    "gleif-legal-entities": 70,
+    "nl-government-budget": 37,
+    "sec-annual-filings": 47,
+    "uk-transport-spend-2025": 42,
+}
+# Arguments that let a rule pass on a share of the rows, or on rows a condition picks.
+WEAKENING = {"mostly", "row_condition", "condition_parser"}
+
+
+def test_each_suite_keeps_its_rules_and_none_passes_on_a_share_of_the_rows() -> None:
+    assert {s: len(quality.suite(s).expectations) for s in SOURCES} == RULES
+    weakened = {
+        (s, x["type"], x["kwargs"].get("column"))
+        for s in SOURCES
+        for x in quality.suite(s).expectations
+        if set(x["kwargs"]) & WEAKENING or set(x) - {"type", "kwargs", "notes"}
+    }
+    assert weakened == set()
+
+
+def test_a_rule_that_cannot_be_evaluated_fails_the_check(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rule on a column the batch lacks raises inside GX; it is reported as failed, whatever
+    GX's own verdict, and the command exits non-zero."""
+    the = quality.suite("ecb-rates")
+    blind = [
+        *the.expectations,
+        {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "served_later"}},
+    ]
+    monkeypatch.setattr(
+        quality, "suite", lambda _: quality.Suite(the.source, blind, the.meta, the.query)
+    )
+    lines = quality.check("ecb-rates", fixture("ecb-rates", tmp_path), FIXTURE_COUNTS["ecb-rates"])
+    assert failed(lines) == [
+        "FAIL expect_column_values_to_not_be_null on served_later: could not be evaluated"
+    ]
+    land(tmp_path, "ecb-rates")
+    assert quality.main(["ecb-rates"]) == 1
+    assert "could not be evaluated" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("source", SOURCES)
@@ -415,7 +465,7 @@ PLANTS: list[tuple[str, str, list[str], str]] = [
             "update t set quarters = '1' where accession_number = '0000078814-25-000015'"
             " and period_end = report_period"
         ],
-        "expect_column_distinct_values_to_equal_set on report_without_annual_length",
+        "expect_column_most_common_value_to_be_in_set on wrong_lengths",
     ),
     (
         "uk-transport-spend-2025",
@@ -445,6 +495,60 @@ PLANTS: list[tuple[str, str, list[str], str]] = [
         "expect_column_sum_to_be_between on is_identical_copy",
     ),
 ]
+
+
+# A day no calendar has, in each date a suite types: it must break a rule, never pass as a null.
+IMPOSSIBLE_DAYS: list[tuple[str, str, str]] = [
+    (
+        "chicago-contracts",
+        "approval_date = '2020-02-30T00:00:00.000'",
+        "expect_column_values_to_not_be_null on approved_on",
+    ),
+    (
+        "chicago-contracts",
+        "end_date = '2020-02-30T00:00:00.000'",
+        "expect_column_sum_to_be_between on is_impossible_start_or_end",
+    ),
+    (
+        "chicago-payments",
+        "check_date = '02/30/2020'",
+        "expect_column_sum_to_be_between on is_itemised_without_day",
+    ),
+    ("ecb-rates", "date = '2024-02-30'", "expect_column_values_to_not_be_null on day_number"),
+    (
+        "gleif-legal-entities",
+        "\"Registration.LastUpdateDate\" = '2026-02-30T00:00:00Z'",
+        "expect_column_values_to_not_be_null on updated_on",
+    ),
+    (
+        "sec-annual-filings",
+        "filing_date = '20250230'",
+        "expect_column_values_to_not_be_null on filed_on",
+    ),
+    (
+        "sec-annual-filings",
+        "period_end = '20240231'",
+        "expect_column_sum_to_be_between on is_impossible_period_day",
+    ),
+    (
+        "uk-transport-spend-2025",
+        "date = '31/02/2026'",
+        "expect_column_values_to_not_be_null on paid_on",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("source", "assignment", "rule"),
+    IMPOSSIBLE_DAYS,
+    ids=[f"{s}-{r.rsplit(' ', 1)[1]}" for s, _, r in IMPOSSIBLE_DAYS],
+)
+def test_a_day_no_calendar_has_breaks_a_rule(
+    source: str, assignment: str, rule: str, tmp_path: Path
+) -> None:
+    altered = plant(fixture(source, tmp_path), "impossible-day", [on_first(assignment)])
+    broken = failed(quality.check(source, altered, FIXTURE_COUNTS[source]))
+    assert any(line.startswith(f"FAIL {rule}:") for line in broken), broken
 
 
 def test_every_suite_has_a_planted_break_of_every_kind() -> None:
@@ -599,7 +703,7 @@ def test_the_command_attempts_no_connection(tmp_path: Path) -> None:
     landing = land(tmp_path, "ecb-rates")
     run = offline(landing)
     assert run.returncode == 1, run.stderr
-    assert "ecb-rates: FAILED, 18 rules" in run.stdout, "the fixture breaks the pinned counts"
+    assert "ecb-rates: FAILED, 20 rules" in run.stdout, "the fixture breaks the pinned counts"
     assert run.stderr.splitlines()[-1] == "connections attempted: 0"
     calling = offline(landing, CALLING_OUT)
     assert calling.stderr.splitlines()[-1] != "connections attempted: 0", calling.stderr
@@ -613,14 +717,20 @@ def ecb_counts(path: Path) -> dict[str, Any]:
     for day, currency in rows:
         days.setdefault(currency, []).append(date.fromisoformat(day))
     per_currency = {len(d) for d in days.values()}
-    absent = 0
+    absent, longest = 0, 0
     for listed in days.values():
         listed.sort()
         for before, after in zip(listed, listed[1:], strict=False):
             between = (before + timedelta(n) for n in range(1, (after - before).days))
             absent += sum(d.weekday() < 5 for d in between)
+            longest = max(longest, (after - before).days)
     (rates,) = per_currency
-    return {"rows": len(rows), "rates_of_currency": rates, "weekdays_without_rate": absent}
+    return {
+        "rows": len(rows),
+        "rates_of_currency": rates,
+        "longest_gap_days": longest,
+        "weekdays_without_rate": absent,
+    }
 
 
 def filings_counts(path: Path) -> dict[str, Any]:
@@ -656,7 +766,7 @@ def payments_counts(path: Path) -> dict[str, Any]:
     p = payments.profile(path)
     same = ("rows", "itemised_rows", "rolled_up_rows", "without_contract", "negative_amounts")
     return {k: p[k] for k in same} | {
-        "rolled_up_years": sorted(p["rolled_up_by_year"]),
+        "rolled_up_years": [", ".join(sorted(p["rolled_up_by_year"]))],
         "rows_of_2002": p["rolled_up_by_year"]["2002"],
         "hashed_rows": p["rows_hashed"],
         "hashed_payees": p["payees_hashed"],
@@ -680,7 +790,10 @@ def register_counts(path: Path) -> dict[str, Any]:
     left_out = r["left_out"]
     return {
         "rows": sum(r["rows_by_country"].values()),
-        "records_of_country": sorted(f"{k} {v}" for k, v in r["rows_by_country"].items()),
+        "records_of_countries": [
+            ", ".join(sorted(f"{k} {v}" for k, v in r["rows_by_country"].items()))
+        ],
+        "left_out_dutch_firms": left_out["partnership 62Y3"],
         "left_out_sole_proprietors": left_out["sole proprietor category"],
         "left_out_partnerships": sum(n for k, n in left_out.items() if k.startswith("partner")),
         "left_out_without_legal_form": sum(
