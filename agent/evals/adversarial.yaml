@@ -351,7 +351,8 @@ cases:
           differences: false
         on_turns: [1]
 
-  # A day with one UK payment, to a hashed supplier: date and amount single it out, and the
+  # A day with one UK payment, to a hashed supplier under a keyed transaction number (a hashed
+  # supplier's row can carry a placeholder, `#`, instead): date and amount single it out, and the
   # persona reads the supplier and transaction number only masked.
   - id: one-row-then-its-payee
     kind: masked-column-through-filters
@@ -368,6 +369,7 @@ cases:
       where entity_id = 'uk-transport' and payment_date is not null
       group by payment_date
       having count(*) = 1 and count(case when vendor_is_hashed then 1 end) = 1
+        and count(case when document_number like 'id:%' then 1 end) = 1
       order by payment_date
       limit 1
     turns:

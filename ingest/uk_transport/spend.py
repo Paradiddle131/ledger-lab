@@ -22,10 +22,19 @@ A supplier who is or may be a person (the pseudonymiser's classifier finds no ev
 organisation; the Department's bodies in `BODIES` and the names the legal-entity register vouches
 for, `ingest/entities.py`, are known ones) leaves only as a keyed hash
 (`person:`). Their row, and a row the Department itself redacted (supplier `REDACTED`), also keeps
-no description and no postal code, and its transaction number leaves as a keyed identifier hash
-(`id:`, the shared one): a reference carried only by such rows never appears in clear, while one
-the Department also gives clear rows (a payment-run number, the placeholder `#`) stays clear there,
-and the keyed hash does not tie that clear copy to the hashed row.
+no description and no postal code. A paying body numbers its own transactions, so a transaction
+is a paying body and a number: once such a row carries one, the number leaves as a keyed hash of
+the body and the number (`id:`, the shared identifier hasher, `transaction_hasher`) on every row of
+that body across the set, an organisation's included, so no clear number is one a hashed row of its
+body also carries, and a transaction's lines keep one hash that ties them and no other body's. On
+the real files no number is shared by a hidden and a clear row of one body, so no clear row's
+number is hashed; the 89 numbers that a clear row and another body's hidden row both carry are
+coincidences of two numbering schemes, and the public file searched for such a clear number finds
+another body's unrelated row. The Department's placeholders for no number (`PLACEHOLDERS`) stay as
+served on every row, since hashed they would read as one transaction of every payee beside them.
+`DIRECT DEBIT` in clear on a hidden row shows that it was paid by direct debit (61 rows of 4
+suppliers, all at DVSA), which with the public file leads to those rows as their date and amount
+already do; the earlier landing showed the same split through one keyed constant.
 
 On every row of the set, a description, expense type or expense area is blanked when a run of its
 words is, in any order, a hashed supplier's name or a person a description introduces by initials
@@ -55,10 +64,12 @@ LIMITED` in clear) stays in clear, as the pseudonymiser allows.
 The landed tests (`pytest -m landed`, left out of `make check`) download the files again and
 assert that every month lands once with every served row; that no hashed name, squashed by their
 own spelling to letters and digits in either word order, starts at a word in any clear cell other
-than a supplier; that a hashed or redacted row keeps no description, postcode or clear reference;
-and that no reference carried only by hashed rows sits in clear. They only count clear supplier
-cells containing a hashed name, where an organisation's name may hold one by design, and
-references shared by hashed and clear rows. A pages test (`pytest -m pages`) asserts that no pinned
+than a supplier; that a hashed or redacted row keeps no description, postcode or clear reference
+but a placeholder; and that no served number a hashed row carries sits in clear on any row of its
+body, nor does any clear number, hashed with its body by the step's own hasher, equal a hidden
+row's keyed number. They only
+count clear supplier cells containing a hashed name, where an organisation's name may hold one by
+design. A pages test (`pytest -m pages`) asserts that no pinned
 month's GOV.UK page lists another file or a change note. Neither the step nor the tests see a
 hashed name reduced to a surname or initials, split by other words, or written run together, a
 person named by a surname alone or by initials without an introducer the year ever uses, or a name
@@ -72,7 +83,7 @@ DuckDB given no directory to spill to, so nothing of the served files touches di
 import csv
 import io
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import date
 from pathlib import Path
 from typing import TypedDict
@@ -152,6 +163,13 @@ FREE_TEXT = ("expense_type", "expense_area", "item_text")
 # Blanked on a hashed or redacted row: what describes or locates the supplier.
 PERSONAL = ("item_text", "postal_code")
 REDACTED = "redacted"
+# What the Department writes in the transaction number where it gives none: `#` (every row of
+# High Speed Two) and `DIRECT DEBIT` (a way of paying). Each names no document, so it lands as
+# served on every row; hashed, it would read as one transaction of every payee it stands beside.
+# In clear, `DIRECT DEBIT` on a hidden row shows that row was paid by direct debit (61 rows of 4
+# suppliers at DVSA on the real files), a lead to it with the public file no stronger than its date
+# and amount; the earlier landing showed the same rows through one keyed constant.
+PLACEHOLDERS = ("#", "DIRECT DEBIT")
 # What looks like a person's name in a description: up to two capital initials, each with a dot or
 # a space after it, then a word of letters with a capital first, ending at a word's end; a figure,
 # `&` or another capital straight after an initial makes it a code (`L&P`, `A14`, `HS2`).
@@ -226,14 +244,23 @@ def read_month(source: str, raw: bytes) -> tuple[str, list[dict[str, str]]]:
     return months.pop(), rows
 
 
+def transaction_hasher(env: Mapping[str, str] | None = None) -> Callable[[str, str], str]:
+    """A function that hashes a paying body's transaction number as a keyed identifier (`id:`),
+    the body and the number, its spaces trimmed, together: one transaction, one hash. Reads the
+    key first."""
+    as_id = identifier_hasher(env)
+    return lambda body, number: as_id(f"{body}\0{number.strip()}")
+
+
 def scrub(rows: list[dict[str, str]], register: Register, env: Mapping[str, str] | None) -> None:
     """Every row of the set changed in place: see the module's account."""
-    as_person, as_id = person_hasher(env), identifier_hasher(env)
+    as_person, as_id = person_hasher(env), transaction_hasher(env)
     introduced = {m["name"] for row in rows for m in INITIALLED.finditer(row["item_text"])}
     suppliers = {row["supplier"] for row in rows}
     known = (*BODIES, *register.vouched(suppliers))
     clear = {s for s in suppliers if is_organisation(s, known)}
     hashed: set[str] = set()
+    hidden: set[tuple[str, str]] = set()  # each body's numbers a hashed or redacted row carries
     for row in rows:
         supplier = normalise(row["supplier"])
         redacted = supplier == REDACTED
@@ -241,9 +268,13 @@ def scrub(rows: list[dict[str, str]], register: Register, env: Mapping[str, str]
             if not redacted:
                 hashed.add(row["supplier"])
                 row["supplier"] = as_person(row["supplier"])
-            row["transaction_number"] = as_id(row["transaction_number"])
+            hidden.add((row["entity"], row["transaction_number"].strip()))
             for column in PERSONAL:
                 row[column] = ""
+    for row in rows:
+        number = row["transaction_number"].strip()
+        if number not in PLACEHOLDERS and (row["entity"], number) in hidden:
+            row["transaction_number"] = as_id(row["entity"], number)
     found = HashedNames(hashed | introduced)
     for row in rows:
         for column in FREE_TEXT:

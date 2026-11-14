@@ -38,8 +38,9 @@ models:
           - not_null
       - name: transaction_number
         description: >
-          As landed: the Department's number, `#` where it gives none, and `id:` and a keyed hash
-          on a hashed or redacted row.
+          As landed: the Department's number; `#` or `DIRECT DEBIT` where it gives none; and `id:`
+          and a keyed hash of the paying body and number on every row of that body carrying a
+          number a hashed or redacted row of the body carries.
         data_tests:
           - not_null
 

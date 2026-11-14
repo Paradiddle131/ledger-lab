@@ -27,10 +27,12 @@ from ingest.uk_transport.spend import (
     BODIES,
     COLUMNS,
     LAYOUTS,
+    PLACEHOLDERS,
     SET,
     SpendError,
     profile,
     step,
+    transaction_hasher,
 )
 
 ENV = {KEY_VARIABLE: "k" * 32}
@@ -285,6 +287,59 @@ def test_a_reference_hash_is_keyed_and_never_equals_a_name_hash(tmp_path: Path) 
     assert unkeyed not in (row["supplier"], row["transaction_number"])
 
 
+def test_a_number_a_hashed_row_carries_is_hashed_on_every_row_of_its_body(
+    tmp_path: Path,
+) -> None:
+    """The person's row is the Maritime and Coastguard Agency's (`person_row`'s default body)."""
+    files = {
+        "2025-04": served(person_row(number="4400123 ")),
+        "2026-01": served(
+            person_row(
+                date="20/01/2026", supplier="CENTREBUS LTD", item="Bus grant", number="4400123"
+            ),
+            person_row(date="21/01/2026", supplier="CENTREBUS LTD", number="4400999"),
+            person_row(
+                date="22/01/2026", entity="DVSA", supplier="CENTREBUS LTD", number="4400123"
+            ),
+        ),
+    }
+    path = land(tmp_path, files)
+    (person,) = rows(path, "2025-04")
+    shared, other, elsewhere = rows(path, "2026-01")
+    assert str(person["transaction_number"]).startswith("id:")
+    assert shared["transaction_number"] == person["transaction_number"], "one hash, every line"
+    assert (shared["supplier"], shared["item_text"], shared["postal_code"]) == (
+        "CENTREBUS LTD",
+        "Bus grant",
+        "ZZ1 1ZZ",
+    )
+    assert other["transaction_number"] == "4400999", "a number no hashed row carries stays"
+    assert elsewhere["transaction_number"] == "4400123", "another body's number is its own"
+    assert (
+        transaction_hasher(ENV)("Maritime and Coastguard Agency", "4400123")
+        == (person["transaction_number"])
+    )
+    assert transaction_hasher(ENV)("DVSA", "4400123") != person["transaction_number"]
+
+
+def test_a_hidden_rows_number_without_a_figure_is_hashed_unless_a_placeholder(
+    tmp_path: Path,
+) -> None:
+    (row,) = one_month(tmp_path, person_row(number="NO REFERENCE"))
+    assert str(row["transaction_number"]).startswith("id:")
+
+
+@pytest.mark.parametrize("placeholder", PLACEHOLDERS)
+def test_a_placeholder_stays_as_served_on_every_row(tmp_path: Path, placeholder: str) -> None:
+    person, company = one_month(
+        tmp_path,
+        person_row(number=placeholder),
+        person_row(supplier="CENTREBUS LTD", number=placeholder),
+    )
+    assert str(person["supplier"]).startswith("person:")
+    assert (person["transaction_number"], company["transaction_number"]) == (placeholder,) * 2
+
+
 @pytest.mark.parametrize(
     "item",
     [
@@ -474,7 +529,8 @@ def test_a_supplier_the_register_vouches_for_lands_in_clear_and_a_person_stays_h
         (Record(company.title(), "GENERAL", "H0PO"), Record("Jane Example", "GENERAL", "H0PO"))
     )
     april = served(
-        person_row(supplier=company, item="Track renewals"), person_row(item="Settlement")
+        person_row(supplier=company, item="Track renewals"),
+        person_row(item="Settlement", number="4400124"),
     )
     path = tmp_path / SET
     path.write_bytes(step(year_files({"2025-04": april}), ENV, register))
@@ -607,28 +663,27 @@ def test_no_pinned_month_has_been_revised_on_gov_uk() -> None:
 def test_no_hashed_supplier_is_named_anywhere_in_the_landed_set(real: tuple) -> None:
     """Independent of the step's word windows: a hashed supplier's name, squashed character by
     character to letters and digits, in either word order, must not start at a word in any clear
-    cell of any row but a supplier; their row keeps no reference, postcode or description; and a
-    reference carried only by hashed rows appears nowhere in clear (one shared with clear rows,
-    such as a payment-run number or `#`, stays clear there, and the keyed hash does not tie the
-    clear copy to its hashed row)."""
+    cell of any row but a supplier; their row keeps no reference but a placeholder, and no postcode
+    or description; and no number a hashed row carries appears in clear on any row of its body."""
     files, landed = real
     by_position = {(r["source_file"], r["source_row"]): r for r in landed}
-    hashed_names, hashed_refs, clear_refs = set(), set(), set()
+    hashed_names, hashed_refs = set(), set()
     for pinned, raw in files.items():
         served_rows = list(csv.reader(io.StringIO(raw.decode("cp1252"), newline="")))[1:]
         for position, cells in enumerate(served_rows, 1):
             row = by_position[(pinned.rsplit("/", 1)[1], position)]
-            supplier, reference = cells[5], cells[6]
+            body, supplier, reference = cells[1], cells[5], cells[6]
             if row["supplier"] != supplier:
                 assert row["supplier"].startswith("person:"), "a supplier changes only to a hash"
                 hashed_names.add(supplier)
             if row["supplier"] != supplier or row["supplier"] == "REDACTED":
-                hashed_refs.add(reference)
+                assert (row["item_text"], row["postal_code"]) == (None, None)
+                if reference in PLACEHOLDERS:
+                    assert row["transaction_number"] == reference
+                    continue
+                hashed_refs.add((body, reference.strip()))
                 assert row["transaction_number"] == "id:" + row["transaction_number"][3:]
                 assert len(row["transaction_number"]) == 67
-                assert (row["item_text"], row["postal_code"]) == (None, None)
-            else:
-                clear_refs.add(reference)
     spellings = set()
     for name in hashed_names:
         words = re.findall(r"\w+", name)
@@ -647,13 +702,11 @@ def test_no_hashed_supplier_is_named_anywhere_in_the_landed_set(real: tuple) -> 
                 else:
                     found[column] = found.get(column, 0) + 1
     print(
-        f"{len(hashed_names)} names hashed, {len(hashed_refs)} references hashed, of which"
-        f" {len(hashed_refs & clear_refs)} also on clear rows; clear suppliers containing a"
-        f" hashed name: {inside_clear_suppliers}"
+        f"{len(hashed_names)} names hashed, {len(hashed_refs)} references hashed; clear"
+        f" suppliers containing a hashed name: {inside_clear_suppliers}"
     )
     assert found == {}
-    leaked_refs = {r["transaction_number"] for r in landed} & (hashed_refs - clear_refs)
-    assert leaked_refs == set()
+    assert {(r["entity"], r["transaction_number"].strip()) for r in landed} & hashed_refs == set()
     assert {normalise(n) for n in hashed_names} & {
         normalise(r["supplier"]) for r in landed
     } == set()
@@ -667,3 +720,49 @@ def test_no_hashed_supplier_is_named_anywhere_in_the_landed_set(real: tuple) -> 
     }
     print(f"{len(vouched)} clear suppliers on the register's word alone")
     assert {n for n in vouched if not register.vouches(n) or person_shaped(n)} == set()
+
+
+@pytest.mark.landed
+def test_no_clear_transaction_number_is_one_a_hashed_row_carries(real: tuple) -> None:
+    """The step's own transaction hasher, applied to every clear number of the landed set with its
+    paying body, finds no hidden row's keyed number; placeholders stay as served on every row.
+    Counts only: rows by what their number is, and the clear numbers another body's hidden row
+    also carries, coincidences of two numbering schemes, which stay in clear."""
+    _, landed = real
+    as_id = transaction_hasher()
+    rows_ = [
+        (
+            r["entity"],
+            r["transaction_number"],
+            r["supplier"].startswith("person:") or r["supplier"] == "REDACTED",
+        )
+        for r in landed
+    ]
+    keyed = {t for _, t, h in rows_ if h and t.startswith("id:")}
+    shown = {(e, t) for e, t, _ in rows_ if not t.startswith("id:") and t not in PLACEHOLDERS}
+    bodies = {e for e, _, _ in rows_}
+    counts = {
+        "clear": sum(1 for e, t, _ in rows_ if (e, t) in shown),
+        "keyed": sum(1 for _, t, _ in rows_ if t.startswith("id:")),
+        "keyed on organisation rows": sum(1 for _, t, h in rows_ if t.startswith("id:") and not h),
+        "placeholder": sum(1 for _, t, _ in rows_ if t in PLACEHOLDERS),
+        "placeholder on hidden rows": sum(1 for _, t, h in rows_ if t in PLACEHOLDERS and h),
+        "clear numbers a hidden row of their body carries": len(
+            {as_id(e, t) for e, t in shown} & keyed
+        ),
+        "clear numbers another body's hidden row carries": len(
+            {t for e, t in shown if any(as_id(b, t) in keyed for b in bodies - {e})}
+        ),
+        "hidden rows with a clear number": sum(1 for e, t, h in rows_ if h and (e, t) in shown),
+    }
+    print("UK transaction numbers:", counts)
+    assert counts == {
+        "clear": 17_349,
+        "keyed": 11_219,
+        "keyed on organisation rows": 0,
+        "placeholder": 2_535,
+        "placeholder on hidden rows": 790,
+        "clear numbers a hidden row of their body carries": 0,
+        "clear numbers another body's hidden row carries": 89,
+        "hidden rows with a clear number": 0,
+    }
