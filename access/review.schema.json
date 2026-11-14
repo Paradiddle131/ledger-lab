@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "The access review's accounts, owners and conflicting duties",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["accounts", "owners", "conflicts"],
+  "$defs": {
+    "slug": {"type": "string", "pattern": "^[a-z][a-z0-9-]*[a-z0-9]$"},
+    "text": {"type": "string", "minLength": 1}
+  },
+  "properties": {
+    "accounts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "declared", "duties", "reach", "limits"],
+        "properties": {
+          "id": {"$ref": "#/$defs/slug"},
+          "kind": {"enum": ["automation"]},
+          "declared": {
+            "description": "The address of the account's declaration in platform/gcp.",
+            "type": "string",
+            "pattern": "^(data\\.)?google_service_account\\.[a-z][a-z0-9_]*$"
+          },
+          "duties": {"$ref": "#/$defs/text"},
+          "reach": {"description": "What the account can do at most, in a sentence.", "$ref": "#/$defs/text"},
+          "project_roles_granted_by_hand": {
+            "description": "Project roles granted outside platform/gcp, which nothing offline checks.",
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "pattern": "^roles/[A-Za-z.]+$"}
+          },
+          "limits": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/text"}}
+        }
+      }
+    },
+    "owners": {
+      "description": "Each identity's owner, a human persona id.",
+      "type": "object",
+      "propertyNames": {"$ref": "#/$defs/slug"},
+      "additionalProperties": {"$ref": "#/$defs/slug"}
+    },
+    "conflicts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "duties"],
+        "oneOf": [
+          {"required": ["sides", "scope"], "not": {"required": ["not_checkable"]}},
+          {"required": ["not_checkable"], "not": {"anyOf": [{"required": ["sides"]}, {"required": ["scope"]}]}}
+        ],
+        "properties": {
+          "id": {"$ref": "#/$defs/slug"},
+          "duties": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "uniqueItems": true,
+            "items": {"$ref": "#/$defs/text"}
+          },
+          "sides": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["product", "access"],
+              "properties": {
+                "product": {"$ref": "#/$defs/slug"},
+                "access": {"enum": ["read", "aggregate", "edit", "draft", "post"]}
+              }
+            }
+          },
+          "scope": {"enum": ["same-entity", "any-entity"]},
+          "not_checkable": {"$ref": "#/$defs/text"}
+        }
+      }
+    }
+  }
+}

@@ -21,6 +21,7 @@ import pytest
 import yaml
 from jsonschema import Draft202012Validator
 
+from access.review import Grant, conflicts
 from tests.platform.test_access_rules import (
     DATASET_ROLES,
     dataset_id,
@@ -30,6 +31,8 @@ from tests.platform.test_access_rules import (
 )
 
 MATRIX = Path(__file__).resolve().parents[2] / "access/visibility.yaml"
+# The conflicting pairs of duties, one definition shared with the access review.
+CONFLICTS = yaml.safe_load((MATRIX.parent / "review.yaml").read_text())["conflicts"]
 # A product cell's place: persona, product and, for an entity-scoped product, the entity.
 Key = tuple[str, str, str | None]
 Doc = dict[str, Any]
@@ -171,11 +174,6 @@ def duty_breaches(matrix: Doc, access: Doc) -> list[str]:
         )
         if len(posters) > 1:
             found.append(f"ledger {entity}: one poster, the matrix has {', '.join(posters)}")
-        found += [
-            f"{p} ledger {entity}: a poster never drafts"
-            for p in posters
-            if "draft" in row_cells(matrix["personas"][p])
-        ]
     paid = [
         e
         for (p, product, e), c in cells
@@ -184,6 +182,16 @@ def duty_breaches(matrix: Doc, access: Doc) -> list[str]:
     if len(paid) != 1:
         found.append(f"payables-clerk payments: one entity's rows, the matrix gives {len(paid)}")
     for persona, row in matrix["personas"].items():
+        # The conflicting pairs of duties in access/review.yaml, which the access review checks on
+        # the grants, held here on the cells: a persona's cells hold a pair's two sides.
+        held = [
+            Grant(product, e, ACCESS[c])
+            for (p, product, e), c in cells
+            if p == persona and c != "denied"
+        ]
+        for conflict in conflicts(held, CONFLICTS):
+            on = ", ".join(e or "the group" for e in conflict.entities)
+            found.append(f"{persona}: holds both sides of {conflict.rule} on {on}")
         if persona in agents:
             found += [
                 f"{persona} {t}: an agent reads no tag in clear"
@@ -630,7 +638,7 @@ BREACHES: dict[str, tuple[Mutation, list[str]]] = {
     ),
     "the poster given draft on another ledger": (
         lambda m, a, c: give(m, a, "approver", "ledger", "west", "draft"),
-        ["approver ledger east: a poster never drafts"],
+        ["approver: holds both sides of enter-and-approve-entry on east, west"],
     ),
     "the metric owner given clear payments beside its aggregates": (
         lambda m, a, c: (
