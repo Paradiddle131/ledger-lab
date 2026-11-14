@@ -1,8 +1,10 @@
 # The payments data product's contract, in the Open Data Contract Standard: the mart's columns in
 # order, their types, nullability and accepted values, what each means, and the rules its rows keep.
-# `datacontract test` checks a build against it (tests/models/test_payments_contract.py), and
-# `make contract` fails on a change that breaks a consumer against the contract on origin/main.
-# The descriptions are the dbt docs' text (models/models/marts/payments/), held equal by a test.
+# `make contract` fails on a change that breaks a consumer of the contract on origin/main
+# (models/contracts/gate.py). `make contract-test` runs `datacontract test` over the local dbt
+# build, through a copy in the CLI's older DuckDB format (the `local` server's file); the tests run
+# it over the sample and the landed builds. The descriptions are the dbt docs' text
+# (models/models/marts/payments/), held equal by a test.
 apiVersion: v3.2.0
 kind: DataContract
 id: payments
@@ -16,7 +18,7 @@ description:
 servers:
   - server: local
     type: duckdb
-    database: target/ledger_lab.duckdb
+    database: target/ledger_lab.cli.duckdb
     schema: main
 schema:
   - name: payments
@@ -32,6 +34,11 @@ schema:
       Chicago's detail (rolled-up rows, department) stays in `int_chicago__payments`, and every
       landed version of a UK month in `int_uk_transport__payment_versions`.
     properties:
+      # Not classified personal: it names one payment, not a payee. On a hashed row it is a hash of
+      # the row as landed, hashed name included, so it cannot be recomputed from the publisher's
+      # files without the hash key, and each of a payee's payments gets its own key, so it links
+      # nothing the row does not already show. `document_number` is personal: on a hashed UK row
+      # it is a keyed hash that ties together the rows of one hashed transaction.
       - name: payment_key
         logicalType: string
         physicalType: VARCHAR
@@ -52,6 +59,7 @@ schema:
           - value: nl-government
         description: |-
           The entity that paid, by its id in `access/personas.yaml` and the calendar seeds (`chicago`, `uk-transport`).
+          The Dutch government's `nl-government` is accepted too, though no row carries it: its budget file holds budget lines, not payments, so it adds none.
       - name: currency
         logicalType: string
         physicalType: VARCHAR
@@ -61,7 +69,7 @@ schema:
           - value: GBP
           - value: EUR
         description: |-
-          The currency the entity paid in, its own (`USD` for Chicago, `GBP` for the UK department); amounts are never translated here.
+          The currency the entity paid in, its own (`USD` for Chicago, `GBP` for the UK department, `EUR`, which no row carries yet, for the Dutch government); amounts are never translated here.
       - name: payment_date
         logicalType: date
         physicalType: DATE
@@ -104,6 +112,7 @@ schema:
       - name: document_number
         logicalType: string
         physicalType: VARCHAR
+        classification: personal
         description: |-
           The document the payment was made on: Chicago's voucher number, as served (`Multiple` for a payment covering several vouchers), null on a rolled-up row, which has none; the UK department's transaction number as landed, `#` where it gives none and a keyed hash (`id:`) on a hashed or redacted row, so it repeats.
       - name: contract_number
@@ -131,9 +140,9 @@ schema:
         required: true
         description: |-
           True on a row that repeats another served row of the same entity, so a sum that leaves repeats out counts each payment once; false on the first row of each group and wherever an entity has no rule for repeats.
-          For Chicago a row is a repeat when it is a copy after the first of rows identical in every landed column (2,560 rows on the pinned files), when it has no department beside an otherwise identical row that has one (the row with the department is the first; 7,300 rows), or when it is a rolled-up year whose amount equals to the cent the year's other dated payments of its vendor and contract (the dated rows are the first; 4 rows).
-          These are 9,864 of 475,609 rows and $3.999bn; that they are the same payment served again rests on paid totals, not on the City saying so: with repeats left out, 21,960 contracts are paid exactly their award after revisions, against 21,264 with them, and 849 contracts are paid exactly twice their award with them.
-          For the UK department no row is flagged: 121 rows of the pinned files fall in 56 groups identical as landed (65 extra copies), each group consecutive rows under one transaction number; 43 groups are identical in every served cell too, and nothing in the files tells those from two equal lines of one document, while 13 hashed groups (27 rows) differ in the description the landing drops, so they are certainly separate lines (`int_uk_transport__payments` gives the evidence).
+          For Chicago a row is a repeat when it is a copy after the first of rows identical in every landed column, when it has no department beside an otherwise identical row that has one (the row with the department is the first), or when it is a rolled-up year whose amount equals to the cent the year's other dated payments of its vendor and contract (the dated rows are the first); `int_chicago__payments` names each repeat's kind.
+          That they are the same payment served again rests on paid totals, not on the City saying so: with repeats left out, more contracts are paid exactly their award after revisions than with them.
+          For the UK department no row is flagged: its rows identical as landed are consecutive rows under one transaction number, and nothing in the files tells those identical in every served cell from two equal lines of one document, while hashed ones that differ in the description the landing drops are certainly separate lines (`int_uk_transport__payments` gives the evidence).
     quality:
       - id: currency-is-the-entitys-own
         type: sql
@@ -156,18 +165,18 @@ schema:
             and length(vendor_name) = 71
             and ltrim(substr(vendor_name, 8), '0123456789abcdef') = '')
         mustBe: 0
-      - id: every-chicago-payment-once
+      - id: chicago-row-count-equals-its-model
         type: sql
         dimension: completeness
-        description: The mart holds exactly the rows of Chicago's own payments model, no more and no fewer.
+        description: The mart holds as many Chicago rows as Chicago's own payments model.
         query: |-
           select (select count(*) from payments where entity_id = 'chicago')
             - (select count(*) from int_chicago__payments)
         mustBe: 0
-      - id: every-uk-transport-payment-once
+      - id: uk-transport-row-count-equals-its-model
         type: sql
         dimension: completeness
-        description: The mart holds exactly the rows of the UK department's own payments model, no more and no fewer.
+        description: The mart holds as many UK department rows as the department's own payments model.
         query: |-
           select (select count(*) from payments where entity_id = 'uk-transport')
             - (select count(*) from int_uk_transport__payments)

@@ -1,63 +1,49 @@
-"""`make contract`: fail when the payments contract breaks a consumer of the one on `origin/main`.
+"""`make contract`: fail when a data contract breaks a consumer of the one on `origin/main`.
 
-The Data Contract CLI's `breaking` command compares the two from a consumer's point of view: a
-change is breaking when data a consumer could have relied on may now arrive otherwise (a column
-removed or renamed, any type changed, a column made nullable, a key or uniqueness dropped, an
-accepted value added, a bound or quality rule loosened or removed), and not breaking when the
-contract only promises more (an optional column added, a nullable column made required, an
-accepted value removed) or changes words (a description, a classification).
+Every `*.odcs.yaml` file `origin/main` holds, anywhere in its tree, is matched by its contract id
+with one in the working tree, wherever that one now sits, and a change is breaking when:
 
-The comparison reads `origin/main` from the local clone, so it needs no network. A clone that does
-not hold `origin/main` cannot be compared, so the gate fails and says how to fetch it, rather than
-passing a change it never saw. While `origin/main` holds no payments contract there is nothing
-published to break, so the first contract passes, and the gate says so.
+- the Data Contract CLI's `breaking` comparison, from a consumer's point of view, finds one: data
+  a consumer could have relied on may now arrive otherwise (a column removed or renamed, any type
+  changed, a column made nullable, a key or uniqueness dropped, an accepted value added, a bound
+  loosened, a quality rule the CLI can grade loosened or removed);
+- a quality rule `origin/main` holds is gone, under its id at the same place, or is changed in
+  anything but its wording (`description`, `name`), since the CLI cannot grade a changed SQL query;
+  a rule is tightened by adding a new one beside it;
+- a column `origin/main` classifies `personal` is classified otherwise, which lowers its handling;
+- a contract `origin/main` holds is gone from the working tree, or no longer has its id;
+- a contract cannot be read.
 
-The CLI runs in its own locked environment (the `contract` dependency group), installed from the
-lock on first use and read from uv's cache after that.
+Not breaking: an optional column added, a nullable column made required, an accepted value
+removed, a bound tightened, a description changed, a column newly classified `personal`, a new rule
+or a new contract.
+
+The comparison reads `origin/main` from the local clone and runs the CLI in this environment, so
+it needs no network. A clone that does not hold `origin/main` cannot be compared, so the gate fails
+and says how to fetch it, rather than passing a change it never saw. While `origin/main` holds no
+contract there is nothing published to break, so the first contracts pass, and the gate says so.
 """
 
-import os
-import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
+from typing import Any
+
+import yaml
+from datacontract.data_contract import DataContract
+from datacontract.model.breaking import BreakingChangeLevel
 
 REPO = Path(__file__).resolve().parents[2]
 CONTRACT = Path("models/contracts/payments.odcs.yaml")
 BASE = "origin/main"
+SUFFIX = ".odcs.yaml"
+# What a quality rule may change without breaking a consumer: its wording.
+WORDING = {"description", "name"}
+Contract = dict[str, Any]
 
 
 class GateError(Exception):
     """The comparison cannot be made; the message says why and what to do."""
-
-
-def in_contract_env(
-    *command: str, env: dict[str, str] | None = None, stdin: str | None = None
-) -> subprocess.CompletedProcess[str]:
-    """Run a command in the CLI's locked environment, never reaching for a newer one."""
-    uv = os.environ.get("UV") or shutil.which("uv")
-    if uv is None:
-        raise GateError("uv is missing: install it (https://docs.astral.sh/uv/)")
-    return subprocess.run(  # noqa: S603
-        [uv, "run", "--isolated", "--frozen", "--only-group", "contract", *command],
-        input=stdin,
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=REPO,
-        env=(env or dict(os.environ)) | {"COLUMNS": "200"},
-    )
-
-
-def datacontract(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    """Run the Data Contract CLI."""
-    return in_contract_env("datacontract", *args, env=env)
-
-
-def breaking(before: Path, after: Path) -> subprocess.CompletedProcess[str]:
-    """The CLI's consumer-perspective comparison; a non-zero exit is a breaking change."""
-    return datacontract("breaking", "--no-inline-references", str(before), str(after))
 
 
 def git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -70,34 +56,122 @@ def git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def published(repo: Path, base: str = BASE, path: Path = CONTRACT) -> str | None:
-    """The contract as `base` holds it, or None when `base` holds none; GateError without `base`."""
+def published(repo: Path, base: str = BASE) -> dict[str, str]:
+    """Every contract file `base` holds, by path, with its text; GateError without `base`."""
     if git(repo, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}").returncode != 0:
         raise GateError(
-            f"{base} is not in this clone, so the contract cannot be compared with it:"
+            f"{base} is not in this clone, so the contracts cannot be compared with it:"
             f" run `git fetch origin main` and try again"
         )
-    shown = git(repo, "show", f"{base}:{path.as_posix()}")
-    return shown.stdout if shown.returncode == 0 else None
+    paths = git(repo, "ls-tree", "-r", "--name-only", base).stdout.splitlines()
+    return {p: git(repo, "show", f"{base}:{p}").stdout for p in paths if p.endswith(SUFFIX)}
+
+
+def working(repo: Path) -> dict[str, str]:
+    """Every contract file of the working tree, tracked or new, by path, with its text."""
+    listed = git(repo, "ls-files", "--cached", "--others", "--exclude-standard").stdout
+    paths = [p for p in listed.splitlines() if p.endswith(SUFFIX) and (repo / p).is_file()]
+    return {p: (repo / p).read_text() for p in paths}
+
+
+def parsed(path: str, text: str) -> Contract | str:
+    """The contract, or why it cannot be read."""
+    try:
+        contract = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        return f"{path} is unreadable: {str(e).splitlines()[0]}"
+    if not isinstance(contract, dict) or not contract.get("id"):
+        return f"{path} is unreadable: no contract id"
+    return contract
+
+
+def rules(contract: Contract) -> dict[str, dict[str, Any]]:
+    """Every quality rule by place and id: `<schema>/<id>` or `<schema>.<column>/<id>`."""
+    found: dict[str, dict[str, Any]] = {}
+    for schema in contract.get("schema") or []:
+        places = [(schema["name"], schema)] + [
+            (f"{schema['name']}.{p['name']}", p) for p in schema.get("properties") or []
+        ]
+        for place, owner in places:
+            for n, rule in enumerate(owner.get("quality") or []):
+                found[f"{place}/{rule.get('id') or f'#{n} (no id)'}"] = rule
+    return found
+
+
+def personal(contract: Contract) -> set[str]:
+    return {
+        f"{schema['name']}.{p['name']}"
+        for schema in contract.get("schema") or []
+        for p in schema.get("properties") or []
+        if p.get("classification") == "personal"
+    }
+
+
+def columns(contract: Contract) -> set[str]:
+    return {
+        f"{schema['name']}.{p['name']}"
+        for schema in contract.get("schema") or []
+        for p in schema.get("properties") or []
+    }
+
+
+def breaks(before: Contract, after: Contract) -> list[str]:
+    """What in `after` breaks a consumer of `before`, each as one line."""
+    found: list[str] = []
+    try:
+        result = DataContract(data_contract_str=yaml.safe_dump(before), inline_references=False)
+        graded = result.breaking(
+            DataContract(data_contract_str=yaml.safe_dump(after), inline_references=False)
+        )
+    except Exception as e:  # the CLI raises its own and pydantic's errors on a bad contract
+        return [f"contract {after['id']} is unreadable: {str(e).splitlines()[0]}"]
+    found += [
+        f"{entry.path}: {entry.message}"
+        for entry in graded.entries
+        if entry.level == BreakingChangeLevel.ERROR
+    ]
+    old, new = rules(before), rules(after)
+    for key, rule in old.items():
+        if key not in new:
+            found.append(f"quality rule {key} is gone (removed, moved or renamed)")
+        elif {k: v for k, v in rule.items() if k not in WORDING} != {
+            k: v for k, v in new[key].items() if k not in WORDING
+        }:
+            found.append(f"quality rule {key} is changed beyond its wording")
+    for col in sorted(personal(before) & columns(after) - personal(after)):
+        found.append(f"{col} is no longer classified personal")
+    return found
+
+
+def compare(before: dict[str, str], after: dict[str, str], base: str = BASE) -> tuple[bool, str]:
+    """Whether the contract files `after` keep every promise the files `before` made, and why."""
+    if not before:
+        return True, f"contract: {base} holds no contract, so nothing published can break"
+    found: list[str] = []
+    current: dict[str, Contract] = {}
+    for path, text in after.items():
+        contract = parsed(path, text)
+        if isinstance(contract, str):
+            found.append(contract)
+        else:
+            current[contract["id"]] = contract
+    for path, text in before.items():
+        contract = parsed(path, text)
+        if isinstance(contract, str):
+            raise GateError(f"{base}'s {contract}")
+        if contract["id"] not in current:
+            found.append(f"contract {contract['id']} ({path} on {base}) is gone or has a new id")
+            continue
+        found += [f"{contract['id']}: {line}" for line in breaks(contract, current[contract["id"]])]
+    if not found:
+        return True, f"contract: no change breaks a consumer of {base}'s contracts"
+    lines = "\n".join(f"- {line}" for line in found)
+    return False, f"contract: these changes break consumers of {base}'s contracts:\n{lines}"
 
 
 def check(repo: Path = REPO, base: str = BASE) -> tuple[bool, str]:
-    """Whether the working tree's contract keeps every promise `base`'s made, and the report."""
-    before = published(repo, base)
-    if before is None:
-        return True, f"contract: {base} holds no payments contract, so nothing published can break"
-    after = repo / CONTRACT
-    if not after.is_file():
-        return False, f"contract: {CONTRACT} is gone, which breaks every consumer of {base}'s"
-    with tempfile.TemporaryDirectory(prefix="contract-") as tmp:
-        old = Path(tmp) / "published.odcs.yaml"
-        old.write_text(before)
-        result = breaking(old, after)
-    if result.returncode == 0:
-        return True, f"contract: no change breaks a consumer of {base}'s contract"
-    return False, (
-        f"contract: a change breaks consumers of {base}'s contract\n{result.stdout}{result.stderr}"
-    )
+    """The working tree's contracts against `base`'s, read from the clone."""
+    return compare(published(repo, base), working(repo), base)
 
 
 def main() -> int:
