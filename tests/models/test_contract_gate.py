@@ -6,6 +6,8 @@ Every contract here is the committed one changed inside the test, in a throwaway
 `origin/main` the test sets.
 """
 
+import copy
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
@@ -23,6 +25,7 @@ from tests.models.test_payments_contract import (
     git_repo,
     on_rule,
     properties,
+    rename,
     setting,
     unsetting,
     with_files,
@@ -51,6 +54,14 @@ def bigquery_types(c: Contract) -> None:
 def add_trivial_rule(c: Contract) -> None:
     (schema,) = c["schema"]
     schema["quality"].append({"id": "trivial", "type": "sql", "query": "select 0", "mustBe": 0})
+
+
+def add(name: str, **settings: object) -> Change:
+    def change(c: Contract) -> None:
+        properties(c).append({"name": name, "logicalType": "string", "physicalType": "VARCHAR"})
+        properties(c)[-1].update(settings)
+
+    return change
 
 
 def both(*changes: Change) -> Change:
@@ -117,6 +128,12 @@ PASSING = {
     "the payee name removed": remove_the_payee_name,
     "every storage type changed for BigQuery": bigquery_types,
     "a rule's query changed": on_rule(HASHED, "query", "select 0"),
+    "the payee name removed beside an added personal column": both(
+        remove_the_payee_name, add("payee_key", classification="personal")
+    ),
+    "a column not classified personal removed beside an added column": both(
+        drop("contract_number"), add("department")
+    ),
 }
 
 
@@ -207,6 +224,14 @@ FAILING: dict[str, tuple[Change, str]] = {
         declaring("2.0", listed(BREAKS)),
         "version '2.0' is not a major version above '1.0.0'",
     ),
+    "a version with a pre-release suffix": (
+        declaring("2.0.0-rc.1", listed(BREAKS)),
+        "version '2.0.0-rc.1' is not a major version above '1.0.0'",
+    ),
+    "a version with trailing text": (
+        declaring("2.0.0x", listed(BREAKS)),
+        "version '2.0.0x' is not a major version above '1.0.0'",
+    ),
     "a version with a prefix": (
         declaring("v2.0.0", listed(BREAKS)),
         "version 'v2.0.0' is not a major version above '1.0.0'",
@@ -248,20 +273,102 @@ def at_two(change: Change, lines: list[str]) -> str:
     return changed(both(change, declaring("2.0.0", listed(lines))))
 
 
-# What no version can declare: each listed under a new major version as the gate would report it
-# were it declarable, so the refusal alone fails it.
-DECLASSIFIED = "payments.vendor_name is no longer classified personal"
-RECLASSIFIED = "payments.document_number is no longer classified personal"
-GONE = f"contract payments ({PATH} on origin/main) is gone or has a new id"
-REFUSED: dict[str, tuple[dict[str, str], str]] = {
+def everything_declared(change: Change) -> str:
+    """The committed contract changed, at 2.0.0, listing every line the gate reports for the
+    change, the refused ones included, exactly as it reports them: only a refusal can fail it."""
+    after = committed()
+    change(after)
+    declarable, refused = gate.breaks(committed(), after)
+    assert refused, "the change is refused by nothing, so this case proves nothing"
+    return at_two(change, declarable + refused)
+
+
+def rename_schema(name: str) -> Change:
+    def change(c: Contract) -> None:
+        (schema,) = c["schema"]
+        schema["name"] = name
+
+    return change
+
+
+def declassify_all(c: Contract) -> None:
+    for p in properties(c):
+        p.pop("classification", None)
+
+
+def table_under_a_new_schema(c: Contract) -> None:
+    """The published table's rows under a new schema, the old schema pointed at another table."""
+    (schema,) = c["schema"]
+    successor = copy.deepcopy(schema)
+    successor["name"] = "payments_v2"
+    for p in successor["properties"]:
+        p.pop("classification", None)
+    schema["physicalName"] = "payments_old"
+    c["schema"].append(successor)
+
+
+def nest_a_field(c: Contract) -> None:
+    properties(c).append(
+        {
+            "name": "payee",
+            "logicalType": "object",
+            "properties": [{"name": "name", "logicalType": "string", "physicalType": "VARCHAR"}],
+        }
+    )
+
+
+REFUSED_BY_VERSION: dict[str, tuple[Change, str]] = {
     "a personal column declassified": (
-        {PATH: at_two(unsetting("vendor_name", "classification"), [DECLASSIFIED])},
-        f"payments: {DECLASSIFIED}, which no version can declare",
+        unsetting("vendor_name", "classification"),
+        "payments: payments.vendor_name is no longer classified personal, which no version",
     ),
     "a personal column reclassified": (
-        {PATH: at_two(setting("document_number", "classification", "restricted"), [RECLASSIFIED])},
-        f"payments: {RECLASSIFIED}, which no version can declare",
+        setting("document_number", "classification", "restricted"),
+        "payments: payments.document_number is no longer classified personal, which no version",
     ),
+    "a personal column renamed without its classification": (
+        both(rename("vendor_person_key", "payee_ref"), unsetting("payee_ref", "classification")),
+        "payments.vendor_person_key, classified personal, is gone while payments.payee_ref"
+        " is added without that classification",
+    ),
+    "a personal column removed beside an added column not classified personal": (
+        both(drop("vendor_name"), add("department")),
+        "payments.vendor_name, classified personal, is gone while payments.department",
+    ),
+    "the schema renamed": (rename_schema("payments_v2"), "schema payments is gone or renamed"),
+    "the schema renamed with every classification dropped": (
+        both(rename_schema("payments_v2"), declassify_all),
+        "schema payments is gone or renamed",
+    ),
+    "the schema renamed with every type changed": (
+        both(rename_schema("payments_v2"), bigquery_types),
+        "schema payments is gone or renamed",
+    ),
+    "the published table under a new schema": (
+        table_under_a_new_schema,
+        "table payments of schema payments is now under schema payments_v2",
+    ),
+    "a field nested in a column": (nest_a_field, "payments.payee nests properties"),
+    "a contract the CLI cannot read": (
+        setting("payment_key", "required", "maybe"),
+        "contract payments is unreadable",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(REFUSED_BY_VERSION))
+def test_no_version_declares_a_lowered_classification_a_gone_schema_or_an_unreadable_contract(
+    published_repo: Path, name: str
+) -> None:
+    change, says = REFUSED_BY_VERSION[name]
+    ok, report = gate.check(with_files(published_repo, {PATH: everything_declared(change)}))
+    assert not ok, report
+    assert says in report
+    assert "(not listed" not in report and "did not happen" not in report, report
+
+
+GONE = f"contract payments ({PATH} on origin/main) is gone or has a new id"
+REFUSED: dict[str, tuple[dict[str, str], str]] = {
     "the contract's id changed": (
         {PATH: at_two(lambda c: c.update(id="payments-v2"), [GONE])},
         GONE,
@@ -279,9 +386,7 @@ REFUSED: dict[str, tuple[dict[str, str], str]] = {
 
 
 @pytest.mark.parametrize("name", list(REFUSED))
-def test_no_version_declares_a_lowered_classification_or_a_contract_gone_or_doubled(
-    published_repo: Path, name: str
-) -> None:
+def test_no_version_declares_a_contract_gone_or_doubled(published_repo: Path, name: str) -> None:
     files, says = REFUSED[name]
     ok, report = gate.check(with_files(published_repo, files))
     assert not ok, report
@@ -293,6 +398,22 @@ def test_no_version_declares_an_unreadable_contract(published_repo: Path) -> Non
     ok, report = gate.check(with_files(published_repo, {PATH: text}))
     assert not ok
     assert f"{gate.CONTRACT} is unreadable" in report
+
+
+def test_a_schema_rename_hides_no_break_and_in_place_each_needs_its_line(
+    published_repo: Path,
+) -> None:
+    retyped = found(bigquery_types)
+    assert len(retyped) == 17
+    ok, report = gate_on(
+        published_repo, both(bigquery_types, declaring("2.0.0", listed(retyped[1:])))
+    )
+    assert not ok
+    assert f"payments: {retyped[0]} (not listed in {gate.DECLARED})" in report
+    renamed = both(rename_schema("payments_v2"), bigquery_types)
+    ok, report = gate.check(with_files(published_repo, {PATH: everything_declared(renamed)}))
+    assert not ok
+    assert "schema payments is gone or renamed, which no version can declare" in report
 
 
 @pytest.fixture(scope="module")
@@ -339,3 +460,33 @@ def test_a_merged_major_versions_list_excuses_no_later_break(merged_repo: Path, 
     change, passes = AFTER_MERGE[name]
     ok, report = gate.check(with_files(merged_repo, {PATH: changed(change)}))
     assert ok == passes, report
+
+
+GIT = ["git"]
+
+
+def partial_clone(tmp_path: Path, missing: str) -> Path:
+    """A clone of a repository whose main holds the committed contract, made without its
+    `missing` objects (`blob` or `tree`), its remote then gone, so git cannot read them."""
+    source = git_repo(tmp_path / "source", {PATH: CONTRACT.read_text()})
+    subprocess.run([*GIT, "config", "uploadpack.allowFilter", "true"], cwd=source, check=True)
+    clone = tmp_path / "clone"
+    filtered = {"blob": "--filter=blob:none", "tree": "--filter=tree:0"}[missing]
+    subprocess.run(
+        [*GIT, "clone", "--quiet", "--no-checkout", filtered, source.as_uri(), str(clone)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [*GIT, "remote", "set-url", "origin", (tmp_path / "gone").as_uri()], cwd=clone, check=True
+    )
+    return clone
+
+
+@pytest.mark.parametrize("missing", ["blob", "tree"])
+def test_a_base_git_cannot_read_fails_the_gate(tmp_path: Path, missing: str) -> None:
+    (tmp_path / "source").mkdir()
+    clone = partial_clone(tmp_path, missing)
+    with_files(clone, {PATH: changed(drop("amount"))})
+    with pytest.raises(gate.GateError, match="cannot be read"):
+        gate.check(clone)
