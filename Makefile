@@ -4,9 +4,9 @@
 LOADOUT ?= $(or $(shell sed -n 's/^The collection .* is cloned at `\([^`]*\)`.*/\1/p' $(HOME)/.claude/CLAUDE.md 2>/dev/null),../loadout)
 GUARDS := $(LOADOUT)/cloud/githooks
 
-.PHONY: check sync lint typecheck test ids portable scan stack-up stack-down stack-test cost-check fresh-clone tofu fences-validate
+.PHONY: check sync lint typecheck test ids portable scan contract stack-up stack-down stack-test cost-check fresh-clone tofu fences-validate
 
-check: lint typecheck test ids portable scan
+check: lint typecheck test ids portable scan contract
 	@echo "make check: all passed"
 
 sync:
@@ -33,6 +33,11 @@ portable:
 scan: sync
 	git ls-files -z | xargs -0 uv run detect-secrets-hook
 	@echo "scan: $$(git ls-files | wc -l) tracked files, no secret"
+
+# The payments contract against the one on origin/main, read from this clone: fails on a change
+# that breaks a consumer, and when origin/main is not fetched (models/contracts/gate.py).
+contract: sync
+	@uv run python models/contracts/gate.py
 
 # The container stack: the shared database always, one more service per PROFILE=<name>.
 # Each checkout is its own Compose project (containers, network, volume) and the database takes a
