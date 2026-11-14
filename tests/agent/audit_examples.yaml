@@ -1,0 +1,125 @@
+# Invented example records of the audit log, for the tests only: no value here is data. The
+# personas, sources and metric are the catalogues' own; every other name, time, figure, salt and
+# text is made up, the landed files' and commit's digests are repeated letters, and the seals and
+# digests are computed from the invented values (agent/audit.py). `records` is the log, one answer,
+# one proposal and the approval of that proposal, chained from the first record; `sealed` is what
+# is kept outside the log, the salt and value of each seal by record position and field path.
+records:
+- seq: 0
+  prev: '0000000000000000000000000000000000000000000000000000000000000000'
+  kind: answer
+  at: '2026-01-15T10:00:05Z'
+  asker:
+    persona: accountant-chicago
+    session: example-session-a
+    turn: 1
+  question: 3330784edee884e99be5c174d78abc74c1dc8a54921c15257f543829eb709291  # pragma: allowlist secret
+  release:
+    commit: cccccccccccccccccccccccccccccccccccccccc
+  model:
+    name: example-model:free
+    settings:
+      temperature: 0
+      max_tokens: 512
+  outcome: answered
+  data:
+    build:
+      id: example-build-1
+      at: '2026-01-15T06:00:00Z'
+    sources:
+    - name: chicago-contracts
+      sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      landed_at: '2026-01-14T22:00:00Z'
+    - name: chicago-payments
+      sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      landed_at: '2026-01-14T22:00:00Z'
+  metrics:
+  - name: spend_against_award
+    version: example-version-1
+  runs:
+  - query:
+      text: select sum(paid_against_fixed_award) / sum(fixed_award) as spend_against_award from chicago_contract_reconciliation
+        where fixed_award > 0 and last_ends_on between $from_day and $to_day
+      parameters: 562d7b390a66e2d571905212b24e6566707afe379a03f2eb59ad38971e0d73b4  # pragma: allowlist secret
+    as: accountant-chicago
+    engine: duckdb
+    job: example-run-1
+    at: '2026-01-15T10:00:02Z'
+    result: 68628e2f02950f443cf2350ad64eb8a5b48867fddc8440ca1f39ff2f79cc2d6c  # pragma: allowlist secret
+  answer: 51c0b0636a81933a49be12529398d6d5973921d17934fb3b49578f9657388e13  # pragma: allowlist secret
+  digest: bfd770a79167272fe298c99967c6d54f050ef19ff895425b4af54399839c019b  # pragma: allowlist secret
+- seq: 1
+  prev: bfd770a79167272fe298c99967c6d54f050ef19ff895425b4af54399839c019b  # pragma: allowlist secret
+  kind: proposal
+  at: '2026-01-15T11:00:00Z'
+  requester:
+    persona: accountant-chicago
+    session: example-session-b
+    turn: 1
+  agent: proposer
+  request: 39f8db3c6669acc5f4a22d241ba0924ec91ac141edbfe1ec50724ca8877573a1  # pragma: allowlist secret
+  release:
+    commit: cccccccccccccccccccccccccccccccccccccccc
+  model:
+    name: example-model:free
+    settings:
+      temperature: 0
+  inputs: d251224f912b7ea15e2e27c1c6b27a388fa447f7a54c1e18f7e22cb5f5544ce2  # pragma: allowlist secret
+  draft: c05325477b36e25a697bd1e88dcf7cea7a0d521e0e6d63ffada46da0b03c4063  # pragma: allowlist secret
+  digest: e50bbd4c7f0960292eef0e2b8738dcd56d75ec360a892de6ff308f87cd7ff177  # pragma: allowlist secret
+- seq: 2
+  prev: e50bbd4c7f0960292eef0e2b8738dcd56d75ec360a892de6ff308f87cd7ff177  # pragma: allowlist secret
+  kind: approval
+  at: '2026-01-15T14:30:00Z'
+  proposal:
+    seq: 1
+    digest: e50bbd4c7f0960292eef0e2b8738dcd56d75ec360a892de6ff308f87cd7ff177  # pragma: allowlist secret
+  approver: approver
+  seen: c05325477b36e25a697bd1e88dcf7cea7a0d521e0e6d63ffada46da0b03c4063  # pragma: allowlist secret
+  decision: approved
+  posting: example-move-1
+  digest: e2dca46490c3b30eece3427f5a02b7b15060c19929407534ad10374d3a6c3600  # pragma: allowlist secret
+sealed:
+  0:
+    question:
+    - example-salt-of-the-question
+    - 'Example question: what share of its fixed awards has Chicago paid on contracts that ended in 2025?'
+    runs/0/query/parameters:
+    - example-salt-of-the-parameters
+    - from_day: '2025-01-01'
+      to_day: '2025-12-31'
+    runs/0/result:
+    - example-salt-of-the-result
+    - columns:
+      - spend_against_award
+      rows:
+      - - '0.5'
+    answer:
+    - example-salt-of-the-answer
+    - 'Example answer: Chicago paid half of the fixed awards of those contracts (spend_against_award,
+      example-version-1).'
+  1:
+    request:
+    - example-salt-of-the-request
+    - 'Example request: draft the entry for the example voucher.'
+    inputs:
+    - example-salt-of-the-inputs
+    - documents:
+      - example-voucher-1
+    draft:
+    - example-salt-of-the-draft
+    - journal: example-journal
+      lines:
+      - account: example-expense-account
+        debit: '100.00'
+      - account: example-payables-account
+        credit: '100.00'
+  2:
+    seen:
+    - example-salt-of-the-draft
+    - journal: example-journal
+      lines:
+      - account: example-expense-account
+        debit: '100.00'
+      - account: example-payables-account
+        credit: '100.00'

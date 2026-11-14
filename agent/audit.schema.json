@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Audit record",
+  "description": "One record per agent answer, per proposal the acting agent drafts and per human decision on a proposal, in one log the agent operator and the auditor read. A record holds in clear only what tells no reader any data value: who, when, which data, code, metric versions, query text and warehouse job; it holds a seal (agent/audit.py) in place of every value a reader of the log may not see (the question, query parameters, each query's result, the answer, a proposal's request, inputs and draft). The salt and value of each seal are kept outside the log, keyed by the record's position. Records form one hash chain: `prev` is the previous record's `digest`, `digest` the SHA-256 of the record's RFC 8785 canonical form without `digest`.",
+  "type": "object",
+  "required": ["seq", "prev", "digest", "kind", "at"],
+  "properties": {
+    "seq": {
+      "description": "The record's position in the log, from 0, with no gap; the key its sealed values are kept under.",
+      "$ref": "#/$defs/position"
+    },
+    "prev": {
+      "description": "The `digest` of the record at position seq - 1; sixty-four zeros for the first record.",
+      "$ref": "#/$defs/sha256"
+    },
+    "digest": {
+      "description": "SHA-256 of the record's RFC 8785 canonical form, every field but this one.",
+      "$ref": "#/$defs/sha256"
+    },
+    "kind": {"enum": ["answer", "proposal", "approval"]},
+    "at": {"description": "When the answer was given, the proposal drafted or the decision taken.", "$ref": "#/$defs/time"}
+  },
+  "allOf": [
+    {"if": {"required": ["kind"], "properties": {"kind": {"const": "answer"}}}, "then": {"$ref": "#/$defs/answer"}},
+    {"if": {"required": ["kind"], "properties": {"kind": {"const": "proposal"}}}, "then": {"$ref": "#/$defs/proposal"}},
+    {"if": {"required": ["kind"], "properties": {"kind": {"const": "approval"}}}, "then": {"$ref": "#/$defs/approval"}}
+  ],
+  "unevaluatedProperties": false,
+  "$defs": {
+    "position": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sealed": {
+      "description": "A seal: SHA-256 of the RFC 8785 form of [salt, value], the salt random and kept with the value outside the log.",
+      "$ref": "#/$defs/sha256"
+    },
+    "time": {
+      "description": "An RFC 3339 instant in UTC.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"
+    },
+    "persona": {
+      "description": "A persona id of access/personas.yaml; a test checks it against the catalogue.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
+    },
+    "asker": {
+      "description": "The human persona who asked, the session they asked in and the turn of that session.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["persona", "session", "turn"],
+      "properties": {
+        "persona": {"$ref": "#/$defs/persona"},
+        "session": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"},
+        "turn": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+      }
+    },
+    "release": {
+      "description": "The code the answer or proposal ran on: the commit of this repository, which holds the prompt, the tools, the models, the metric definitions and the catalogues.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit"],
+      "properties": {"commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}
+    },
+    "model": {
+      "description": "The model that wrote the text, as its provider names it, and every setting sent with the call; absent when no model wrote it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "settings"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "settings": {
+          "type": "object",
+          "additionalProperties": {"type": ["string", "number", "boolean"]}
+        }
+      }
+    },
+    "data": {
+      "description": "The data the answer was read from: the warehouse build queried and every landed file it was built from, with when each landed, which is the answer's freshness.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["build", "sources"],
+      "properties": {
+        "build": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "at"],
+          "properties": {
+            "id": {"description": "The build's run identifier, dbt's invocation id.", "type": "string", "minLength": 1},
+            "at": {"$ref": "#/$defs/time"}
+          }
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "sha256", "landed_at"],
+            "properties": {
+              "name": {"description": "A source of ingest/sources.yaml, the landed file's name.", "type": "string", "pattern": "^[a-z][a-z0-9-]*[a-z0-9]$"},
+              "sha256": {"description": "SHA-256 of the landed file's bytes.", "$ref": "#/$defs/sha256"},
+              "landed_at": {"$ref": "#/$defs/time"}
+            }
+          }
+        }
+      }
+    },
+    "metric": {
+      "description": "A MetricFlow metric the answer cites and the version of its definition it was answered at.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "version": {"type": "string", "minLength": 1}
+      }
+    },
+    "run": {
+      "description": "One warehouse job: the query as sent, the identity it ran as, the engine and job reference, and the seal of its result.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["query", "as", "engine", "job", "at", "result"],
+      "properties": {
+        "query": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["text"],
+          "properties": {
+            "text": {
+              "description": "The SQL exactly as sent; every value taken from the question or from a result is bound as a parameter, never written into it.",
+              "type": "string",
+              "minLength": 1
+            },
+            "parameters": {
+              "description": "The seal of the bound parameters, an object of name to value; absent when the query binds none.",
+              "$ref": "#/$defs/sealed"
+            }
+          }
+        },
+        "as": {"description": "The persona whose identity the warehouse ran the job as.", "$ref": "#/$defs/persona"},
+        "engine": {"enum": ["duckdb", "bigquery"]},
+        "job": {"description": "The warehouse's reference to the job: a BigQuery job's project, location and id, or the local engine's run id.", "type": "string", "minLength": 1},
+        "at": {"description": "When the job started.", "$ref": "#/$defs/time"},
+        "result": {
+          "description": "The seal of the result as {columns: [name, ...], rows: [[cell, ...], ...]}, in the order returned, each cell the text the engine casts it to, or null.",
+          "$ref": "#/$defs/sealed"
+        }
+      }
+    },
+    "answer": {
+      "description": "An answer to one question: answered, with at least one warehouse run and one metric, or abstained, when no metric or verified query covers the question.",
+      "required": ["asker", "question", "release", "outcome", "data", "metrics", "runs", "answer"],
+      "properties": {
+        "asker": {"$ref": "#/$defs/asker"},
+        "question": {"description": "The seal of the question as asked.", "$ref": "#/$defs/sealed"},
+        "release": {"$ref": "#/$defs/release"},
+        "model": {"$ref": "#/$defs/model"},
+        "outcome": {"enum": ["answered", "abstained"]},
+        "data": {"$ref": "#/$defs/data"},
+        "metrics": {"type": "array", "items": {"$ref": "#/$defs/metric"}},
+        "runs": {"type": "array", "items": {"$ref": "#/$defs/run"}},
+        "answer": {"description": "The seal of the answer text as given.", "$ref": "#/$defs/sealed"}
+      },
+      "if": {"properties": {"outcome": {"const": "answered"}}},
+      "then": {"properties": {"metrics": {"minItems": 1}, "runs": {"minItems": 1}}}
+    },
+    "proposal": {
+      "description": "An entry the acting agent drafted at a human's request, before any decision on it.",
+      "required": ["requester", "agent", "request", "release", "inputs", "draft"],
+      "properties": {
+        "requester": {"$ref": "#/$defs/asker"},
+        "agent": {"description": "The agent persona that drafted the entry.", "$ref": "#/$defs/persona"},
+        "request": {"description": "The seal of the request as made.", "$ref": "#/$defs/sealed"},
+        "release": {"$ref": "#/$defs/release"},
+        "model": {"$ref": "#/$defs/model"},
+        "inputs": {"description": "The seal of the documents the draft was made from.", "$ref": "#/$defs/sealed"},
+        "draft": {"description": "The seal of the drafted entry as shown to the approver.", "$ref": "#/$defs/sealed"}
+      }
+    },
+    "approval": {
+      "description": "A human decision on one proposal: what they saw is sealed under the draft's salt, so its seal equals the proposal's draft exactly when they saw that draft.",
+      "required": ["proposal", "approver", "seen", "decision"],
+      "properties": {
+        "proposal": {
+          "description": "The proposal's record, by position and digest.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["seq", "digest"],
+          "properties": {
+            "seq": {"$ref": "#/$defs/position"},
+            "digest": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "approver": {"$ref": "#/$defs/persona"},
+        "seen": {"$ref": "#/$defs/sealed"},
+        "decision": {"enum": ["approved", "rejected"]},
+        "posting": {"description": "The ERP's reference to the posted entry.", "type": "string", "minLength": 1}
+      },
+      "if": {"properties": {"decision": {"const": "approved"}}},
+      "then": {"required": ["posting"]},
+      "else": {"not": {"required": ["posting"]}}
+    }
+  }
+}
