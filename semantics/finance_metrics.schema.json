@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Finance metrics the platform promises",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["finance_metrics"],
+  "$defs": {
+    "slug": {"type": "string", "pattern": "^[a-z][a-z0-9-]*[a-z0-9]$"},
+    "metric": {"type": "string", "pattern": "^[a-z][a-z0-9_]*[a-z0-9]$"}
+  },
+  "properties": {
+    "finance_metrics": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "term"],
+        "properties": {
+          "id": {"$ref": "#/$defs/slug"},
+          "name": {"type": "string", "minLength": 1},
+          "term": {"$ref": "#/$defs/slug"},
+          "metrics": {
+            "description": "The MetricFlow metrics that answer it, each of role headline.",
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {"$ref": "#/$defs/metric"}
+          },
+          "not_definable": {
+            "description": "Why the public data cannot answer it yet.",
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "oneOf": [{"required": ["metrics"]}, {"required": ["not_definable"]}]
+      }
+    }
+  }
+}

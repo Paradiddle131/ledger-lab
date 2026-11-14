@@ -24,6 +24,7 @@ dev = [
   "datacontract-cli==1.2.9",
   "dbt-core==1.12.7",
   "dbt-duckdb==1.11.1",
+  "dbt-metricflow==0.15.0",
   "detect-secrets==1.5.0",
   "duckdb==2.0.0",
   "fsspec==2026.9.0",
@@ -54,7 +55,7 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "S"]
 "tests/**" = ["S101", "S603"]
 
 [tool.pyright]
-include = ["tests", "platform", "access", "ingest", "models/contracts"]
+include = ["tests", "platform", "access", "ingest", "models/contracts", "semantics"]
 extraPaths = ["platform"]
 pythonVersion = "3.13"
 typeCheckingMode = "standard"
