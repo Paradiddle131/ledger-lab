@@ -13,12 +13,22 @@
 # `entity_rows` says whether the grain keeps each entity apart: when true the table also groups by
 # `entity_group_by` and sums `entity_sum`; when false it gives figures across all entities only.
 # No table groups by or sums a tagged column of access/columns.yaml.
-# Differencing two allowed answers is not stopped here.
+# A table of figures across all entities (`entity_rows: false`) also keeps a group only when it
+# holds at least `minimum_entities` entities whose rows the persona reads in no product, and those
+# entities' rows alone hold the minimum group: a persona can work out its own entities' share of a
+# group from the rows it reads in clear and take it away, so without this a group of one other
+# entity, or the group less the persona's own, would be one entity's figure or a small group.
+# Differencing two answers of different grains is not stopped here: within one table each row
+# counts in one group, and the two group-totals tables sum different figures.
 
 # Ten, a common small-cell threshold, and the one the adversarial cases measure their targets
 # against (agent/evals/adversarial.yaml, held equal by a test); BigQuery states it as the policy's
 # `threshold`.
 minimum_group: 10
+# Two, so a figure across all entities is never one entity's alone, directly or less the persona's
+# own entities: the stricter reading of aggregate access, which is open with the owner. One gives
+# the looser: a group may then be one other entity's figure as long as its rows hold the minimum.
+minimum_entities: 2
 
 products:
   # The metric owner's payments, by entity and fiscal period: each entity's rows apart, as its

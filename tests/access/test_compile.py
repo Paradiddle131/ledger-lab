@@ -286,18 +286,31 @@ def test_a_group_totals_query_over_fewer_than_the_minimum_group_returns_nothing(
                 assert smallest is None or smallest >= minimum, (persona, table)
 
 
+def kept_spans(warehouse: Path, own: str, minimum: int, entities: int) -> list[tuple[Any, ...]]:
+    """The all-entity spans a reader of `own`'s rows is given, counted here apart from the compiler:
+    the span's rows of other entities hold `minimum` payees and `entities` entities."""
+    return builder(
+        warehouse,
+        f"select {SPAN_FIGURES} from group_totals group by all"  # noqa: S608
+        " having max(case when entity_id <> ? then payees end) >= ?"
+        " and count(distinct case when entity_id <> ? then entity_id end) >= ? order by all",
+        own,
+        minimum,
+        own,
+        entities,
+    )
+
+
 def test_the_minimum_is_one_catalogue_line(
     access: Doc, columns: Doc, aggregates: Doc, warehouse: Path, tmp_path: Path
 ) -> None:
-    persona = aggregate_readers(access, "group-totals")[0]
     lower = copy.deepcopy(aggregates)
     lower["minimum_group"] = 2
-    expected = builder(
-        warehouse,
-        f"select {SPAN_FIGURES} from group_totals group by all having max(payees) >= 2"  # noqa: S608
-        " order by all",
-    )
-    assert expected, "the samples hold a span of at least two payees"
+    lower["minimum_entities"] = 1
+    own = accountants(access)
+    persona = aggregate_readers(access, "group-totals")[0]
+    expected = kept_spans(warehouse, own[persona], 2, 1)
+    assert expected, "the samples hold a span of at least two payees of another entity"
     db = open_persona(access, columns, lower, persona, warehouse, tmp_path)
     try:
         seen = db.execute(
@@ -329,10 +342,84 @@ def test_aggregate_group_totals_are_all_entity_figures_until_the_owner_chooses(
     assert entity <= grain(per_entity)
 
 
-# The kept groups over the samples at the minimum of ten, per aggregate table: a change to the
-# minimum, a grain or a units count moves them.
-SAMPLE_KEPT = {"group_totals": 0, "group_totals_left_out": 2, "payments_by_period": 1}
-SAMPLE_KEPT_AT_TWO = {"group_totals": 1, "group_totals_left_out": 5, "payments_by_period": 25}
+# The entities apart: an all-entity figure is never one entity's, nor the persona's own less.
+
+
+def test_an_all_entity_figure_holds_two_entities_the_persona_reads_no_rows_of(
+    access: Doc, columns: Doc, aggregates: Doc, warehouse: Path, tmp_path: Path
+) -> None:
+    assert aggregates["minimum_entities"] == 2
+    lower = copy.deepcopy(aggregates)
+    lower["minimum_group"] = 2
+    own = accountants(access)
+    seen: dict[str, list[tuple[Any, ...]]] = {}
+    for persona in aggregate_readers(access, "group-totals"):
+        directory = tmp_path / persona
+        directory.mkdir()
+        db = open_persona(access, columns, lower, persona, warehouse, directory)
+        try:
+            seen[persona] = db.execute(
+                "select period_start, period_end, figures, amount_at_actual_rates,"
+                " amount_at_constant_rates, payees from group_totals order by all"
+            ).fetchall()
+        finally:
+            db.close()
+        assert seen[persona] == kept_spans(warehouse, own[persona], 2, 2), persona
+    # Over the samples a span of two other entities exists for one reader and not for another,
+    # and at one entity apart the reader of Chicago would be given a span less its own.
+    assert any(seen.values()) and not all(seen.values())
+    assert kept_spans(warehouse, "chicago", 2, 1) != kept_spans(warehouse, "chicago", 2, 2)
+
+
+def test_the_entities_apart_count_the_entities_a_persona_reads_in_any_product(
+    access: Doc, columns: Doc, aggregates: Doc, warehouse: Path
+) -> None:
+    persona = aggregate_readers(access, "group-totals")[0]
+    # Invented: the persona also reads the UK's payments, so it knows the UK's share too.
+    wider = copy.deepcopy(access)
+    wider["grants"].append(
+        {"persona": persona, "entity": "uk-transport", "product": "payments", "access": "read"}
+    )
+
+    def known(catalogue: Doc) -> frozenset[str] | None:
+        (table,) = [
+            t
+            for t in plan_of(catalogue, columns, aggregates, persona, warehouse).tables
+            if isinstance(t, Aggregate) and t.name == "group_totals"
+        ]
+        assert table.minimum_entities == aggregates["minimum_entities"]
+        return table.known
+
+    assert known(access) == {accountants(access)[persona]}
+    assert known(wider) == {accountants(access)[persona], "uk-transport"}
+    # Each entity's own rows need no entity apart: the metric owner's payments by period.
+    (by_period,) = [
+        t
+        for t in plan_of(access, columns, aggregates, "metric-owner", warehouse).tables
+        if isinstance(t, Aggregate)
+        and t.name == "payments_by_period"
+    ]
+    assert (by_period.known, by_period.minimum_entities) == (None, 0)
+
+
+# The kept groups over the samples at the minimum of ten, per aggregate reader and table: a change
+# to the minimum, the entities apart, a grain or a units count moves them. The readers of one
+# entity's payments differ on the all-entity tables, since each takes away its own entity.
+GROUP = ("group_totals", "group_totals_left_out")
+SAMPLE_KEPT = {
+    "accountant-chicago": dict(zip(GROUP, (0, 1), strict=True)),
+    "accountant-nl-government": dict(zip(GROUP, (0, 1), strict=True)),
+    "accountant-uk-transport": dict(zip(GROUP, (0, 0), strict=True)),
+    "approver": dict(zip(GROUP, (0, 1), strict=True)),
+    "metric-owner": {"payments_by_period": 1},
+}
+SAMPLE_KEPT_AT_TWO = {
+    "accountant-chicago": dict(zip(GROUP, (0, 1), strict=True)),
+    "accountant-nl-government": dict(zip(GROUP, (1, 1), strict=True)),
+    "accountant-uk-transport": dict(zip(GROUP, (0, 3), strict=True)),
+    "approver": dict(zip(GROUP, (0, 1), strict=True)),
+    "metric-owner": {"payments_by_period": 25},
+}
 
 
 @pytest.mark.parametrize("minimum", [None, 2])
@@ -350,7 +437,8 @@ def test_the_kept_groups_over_the_samples_are_pinned(
     doc = copy.deepcopy(aggregates)
     if minimum is not None:
         doc["minimum_group"] = minimum
-    kept: dict[str, int] = {}
+    kept: dict[str, dict[str, int]] = {}
+    tables = {v["name"] for entry in doc["products"].values() for v in entry["tables"]}
     for persona in sorted(
         {*aggregate_readers(access, "group-totals"), *aggregate_readers(access, "payments")}
     ):
@@ -358,10 +446,10 @@ def test_the_kept_groups_over_the_samples_are_pinned(
         directory.mkdir()
         db = open_persona(access, columns, doc, persona, warehouse, directory)
         try:
-            for table in SAMPLE_KEPT:
+            for table in sorted(tables):
                 if reads_aggregate(access, doc, persona, table):
                     (n,) = db.execute(f"select count(*) from {table}").fetchone() or (0,)  # noqa: S608
-                    assert kept.setdefault(table, n) == n, (persona, table)
+                    kept.setdefault(persona, {})[table] = n
         finally:
             db.close()
             shutil.rmtree(directory)
@@ -469,6 +557,7 @@ REFUSALS = {
     "all-entity-grouped-by-entity": "all-entity figures grouped by",
     "unknown-units": "units count no column",
     "minimum-of-one": "minimum group",
+    "no-entity-apart": "minimum entities",
     "clear-and-masked": "both in clear and masked",
     "rows-and-aggregate": "both by rows and in aggregate",
     "hash-on-a-number": "masks strings only",
@@ -503,6 +592,8 @@ def refusal(change: str, access: Doc, columns: Doc, aggregates: Doc) -> tuple[Do
         totals["units"] = {"name": "payees", "sum": "payees"}
     elif change == "minimum-of-one":
         aggregates["minimum_group"] = 1
+    elif change == "no-entity-apart":
+        aggregates["minimum_entities"] = 0
     elif change == "clear-and-masked":
         columns["tags"][0]["clear"].append(persona)
     elif change == "rows-and-aggregate":
@@ -528,6 +619,17 @@ def test_an_entity_scoped_table_without_an_entity_column_is_refused(
     schema = source_schema(warehouse)
     schema["payments"] = [c for c in schema["payments"] if c[0] != "entity_id"]
     with pytest.raises(CompileError, match="entity_id"):
+        compile_persona(access, columns, aggregates, "accountant-chicago", schema)
+
+
+def test_an_all_entity_table_without_an_entity_column_is_refused(
+    access: Doc, columns: Doc, aggregates: Doc, warehouse: Path
+) -> None:
+    # Invented: the group totals as a source schema without its entity column, so the entities
+    # apart cannot be counted.
+    schema = source_schema(warehouse)
+    schema["group_totals"] = [c for c in schema["group_totals"] if c[0] != "entity_id"]
+    with pytest.raises(CompileError, match="no entity_id to keep apart"):
         compile_persona(access, columns, aggregates, "accountant-chicago", schema)
 
 
@@ -679,9 +781,19 @@ def test_no_persona_reads_the_landed_payments_file(
 
 # What the compiled personas read over the landed files today, counted independently below.
 LANDED_PAYMENTS = {"chicago": 475609, "uk-transport": 31103}
-# The groups each aggregate table keeps at the minimum: every one of the 49 spans and 7 years and
-# rules (the smallest 207 and 115 payees), and 98 of the 108 entity periods.
-LANDED_KEPT = {"group_totals": 49, "group_totals_left_out": 7, "payments_by_period": 98}
+# The groups each aggregate reader's tables keep at the minimum. Of the 49 spans, 35 hold one
+# entity's figures and 14 two entities', and each of the 7 years and rules left out holds one
+# entity's: a reader of Chicago's payments (an accountant, the approver) keeps no span, since
+# every span less Chicago is one entity's or none; the UK's accountant keeps the 2 spans of Chicago
+# and the Dutch government, the Dutch accountant the 12 of Chicago and the UK. The metric owner
+# keeps 98 of the 108 entity periods.
+LANDED_KEPT = {
+    "accountant-chicago": dict(zip(GROUP, (0, 0), strict=True)),
+    "accountant-nl-government": dict(zip(GROUP, (12, 0), strict=True)),
+    "accountant-uk-transport": dict(zip(GROUP, (2, 0), strict=True)),
+    "approver": dict(zip(GROUP, (0, 0), strict=True)),
+    "metric-owner": {"payments_by_period": 98},
+}
 LANDED_SOURCES = (
     "chicago-contracts",
     "chicago-payments",
@@ -757,12 +869,13 @@ def test_every_persona_reads_what_its_rules_give_over_the_landed_build(
                     if masked:
                         want = [None if v is None else sha256_rendered(v) for v in want]
                     assert values == want, (persona, key)
-            for table, kept in LANDED_KEPT.items():
-                if reads_aggregate(access, aggregates, persona, table):
-                    count, smallest = db.execute(
-                        f"select count(*), min(payees) from {table}"  # noqa: S608
-                    ).fetchone() or (0, 0)
-                    assert (count, smallest >= minimum) == (kept, True), (persona, table)
+            for table, kept in LANDED_KEPT.get(persona, {}).items():
+                assert reads_aggregate(access, aggregates, persona, table), (persona, table)
+                count, smallest = db.execute(
+                    f"select count(*), min(payees) from {table}"  # noqa: S608
+                ).fetchone() or (0, None)
+                assert count == kept, (persona, table)
+                assert smallest is None or smallest >= minimum, (persona, table)
         finally:
             db.close()
             shutil.rmtree(directory)

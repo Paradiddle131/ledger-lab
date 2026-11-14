@@ -3,7 +3,7 @@
   "title": "Aggregate tables and the minimum group",
   "type": "object",
   "additionalProperties": false,
-  "required": ["minimum_group", "products"],
+  "required": ["minimum_group", "minimum_entities", "products"],
   "$defs": {
     "slug": {"type": "string", "pattern": "^[a-z][a-z0-9-]*[a-z0-9]$"},
     "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
@@ -14,6 +14,11 @@
       "description": "The fewest payees a group may hold to be shown.",
       "type": "integer",
       "minimum": 2
+    },
+    "minimum_entities": {
+      "description": "The fewest entities whose rows the persona reads nowhere that a group across all entities must hold, their rows alone holding the minimum group.",
+      "type": "integer",
+      "minimum": 1
     },
     "products": {
       "type": "object",
