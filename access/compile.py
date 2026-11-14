@@ -419,7 +419,7 @@ def statements(plan: Plan) -> list[str]:
             listed = ", ".join(f"{masked(c)} as {quote(c.name)}" for c in table.columns)
             source = f"{SOURCE}.main.{quote(table.table)}"
             sql.append(
-                f"create table {quote(table.purpose)}.{quote(table.table)}"  # noqa: S608
+                f"create table {quote(table.table)}"  # noqa: S608
                 f" as select {listed} from {source}{_where(table.entities)}"
             )
         else:
