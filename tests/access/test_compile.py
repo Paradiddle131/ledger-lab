@@ -760,13 +760,21 @@ def test_the_products_without_tables_yet_follow_their_grants_on_invented_tables(
         }
 
     # Invented: one purpose per invented product, of all its columns, for its row readers.
-    whole = {"ledger": ["entity_id", "entry"], "metric_definitions": ["metric"], "audit_log": ["answer"]}
+    whole = {
+        "ledger": ["entity_id", "entry"],
+        "metric_definitions": ["metric"],
+        "audit_log": ["answer"],
+    }
     wider = copy.deepcopy(PURPOSES)
     for product, table in invented.items():
         readers = sorted(p["id"] for p in access["personas"] if reads(p["id"], product))
         wider["purposes"].append(
-            {"id": f"invented-{product}", "for": "invented", "personas": readers,
-             "tables": {table: whole[table]}}
+            {
+                "id": f"invented-{product}",
+                "for": "invented",
+                "personas": readers,
+                "tables": {table: whole[table]},
+            }
         )
 
     for persona in (p["id"] for p in access["personas"]):
@@ -778,7 +786,9 @@ def test_the_products_without_tables_yet_follow_their_grants_on_invented_tables(
             for product, table in invented.items():
                 assert (table in held) == bool(reads(persona, product)), (persona, table)
             if "ledger" in held:
-                rows = db.execute("select distinct entity_id from invented_ledger.ledger").fetchall()
+                rows = db.execute(
+                    "select distinct entity_id from invented_ledger.ledger"
+                ).fetchall()
                 assert {e for (e,) in rows} == reads(persona, "ledger"), persona
         finally:
             db.close()
@@ -986,7 +996,9 @@ def test_every_persona_reads_what_its_rules_give_over_the_landed_build(
     for persona in (p["id"] for p in access["personas"]):
         directory = tmp_path / persona
         directory.mkdir()
-        db = open_persona(access, columns, aggregates, PURPOSES, persona, landed_warehouse, directory)
+        db = open_persona(
+            access, columns, aggregates, PURPOSES, persona, landed_warehouse, directory
+        )
         try:
             held = {
                 f"{schema}.{t}"
@@ -1016,7 +1028,11 @@ def test_every_persona_reads_what_its_rules_give_over_the_landed_build(
                 for key, *values in db.execute(
                     f"select payment_key, {', '.join(shown)} from {table}"  # noqa: S608
                 ).fetchall():
-                    want = [v for c, v in zip(personal.split(", "), stored[key], strict=True) if c in shown]
+                    want = [
+                        v
+                        for c, v in zip(personal.split(", "), stored[key], strict=True)
+                        if c in shown
+                    ]
                     if masked:
                         want = [None if v is None else sha256_rendered(v) for v in want]
                     assert values == want, (persona, key)

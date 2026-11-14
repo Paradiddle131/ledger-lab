@@ -29,8 +29,8 @@ The compile is a pure function of the catalogues and the source tables' columns,
 inputs give the same statements, and it refuses what it cannot express (an unknown access, a tag
 with no masking rule it knows, a column or table the source lacks, an aggregate over a tagged
 column, a purpose for a persona with no row grant or with a tagged column it reads neither way, a
-row grant with no purpose) instead of leaving anything open. Persona, product and table ids are schema-checked
-slugs; every identifier and literal is quoted all the same.
+row grant with no purpose) instead of leaving anything open. Persona, product, purpose and table
+ids are schema-checked slugs; every identifier and literal is quoted all the same.
 """
 
 from collections.abc import Mapping, Sequence
@@ -413,12 +413,9 @@ def _kept(table: Aggregate) -> str:
 def statements(plan: Plan) -> list[str]:
     """The SQL that builds the persona's database, with the source attached as SOURCE."""
     sql: list[str] = []
-    schemas: set[str] = set()
     for table in plan.tables:
         if isinstance(table, Rows):
-            if table.purpose not in schemas:
-                schemas.add(table.purpose)
-                sql.append(f"create schema {quote(table.purpose)}")
+            sql.append(f"create schema if not exists {quote(table.purpose)}")
             listed = ", ".join(f"{masked(c)} as {quote(c.name)}" for c in table.columns)
             source = f"{SOURCE}.main.{quote(table.table)}"
             sql.append(

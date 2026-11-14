@@ -5,20 +5,26 @@ connection on an engine and makes, for every cell, the observation that proves i
 source read with full rights; the matrix test beside it checks the matrix against the grants, this
 one against what the engine returns. The observations, per kind of cell:
 
-- product `clear`, and `edit`, which reads as clear: each of the product's tables is there, and its
-  rows of the entity (every row, for a group product) are as many as the source's and equal them
-  row for row on every untagged column;
+- product `clear`, and `edit`, which reads as clear: each table of the product the persona's
+  purposes list (`access/purposes.yaml`) is there as `<purpose>.<table>` with exactly the columns
+  its purpose lists, and its rows of the entity (every row, for a group product) are as many as
+  the source's and equal them row for row on every untagged column it holds; the product's table
+  itself, and any other table of its rows, is not there;
 - product `denied`, and `draft` and `post`, which read nothing in the warehouse: no table of the
-  product holds a row of the entity, a group product has no table, and no aggregate of it either;
+  product, under any schema, holds a row of the entity, a group product has no such table, and no
+  aggregate of it either;
 - product `aggregate`: no row table of the product; each of its aggregate tables in
   `access/aggregates.yaml` there with exactly its grain, sums and units as columns; its groups (of
   the entity, for an entity-scoped product) equal to the groups worked out here from the source,
   in Python, apart from the compiler; none below the minimum group;
-- tag `clear`: each column the tag marks holds the stored value on every row the persona reads;
-- tag `masked`: it holds the tag's masking rule applied to the stored value, worked out here, and no
-  column of any table the persona holds has a stored value of the tag that no untagged column has;
+- tag `clear`: each column the tag marks holds the stored value on every row the persona reads, in
+  each purpose's table that lists the column;
+- tag `masked`: it holds the tag's masking rule applied to the stored value, worked out here, in
+  each purpose's table that lists it, and no column of any table the persona holds has a stored
+  value of the tag that no untagged column has; where no purpose of the persona lists a column of
+  the tag, that absence is the observation;
 - tag `denied`: no table the persona holds has a column the tag marks, nor such a value anywhere;
-- beyond the cells, the persona holds no table that no product lists.
+- beyond the cells, the persona holds no table but its own purposes' and the aggregate tables.
 
 A cell is proven on a build when the source holds something there for it to show or hide, its
 support. The products the models build no table of yet (the ledger, the metric definitions, the
@@ -55,6 +61,7 @@ from access.compile import (
     masked,
     materialise,
     quote,
+    schema_of,
     source_schema,
 )
 from tests.access.test_compile import LANDED_SOURCES, sha256_rendered
@@ -89,6 +96,16 @@ class Catalogues:
     access: Doc
     columns: Doc
     aggregates: Doc
+    purposes: Doc
+
+    def purpose_tables(self, persona: str, table: str) -> dict[str, list[str]]:
+        """Each `<purpose>.<table>` the persona's purposes read the product table as, with the
+        columns its purpose lists."""
+        return {
+            f"{schema_of(p['id'])}.{table}": p["tables"][table]
+            for p in self.purposes["purposes"]
+            if persona in p["personas"] and table in p["tables"]
+        }
 
 
 class Reader(Protocol):
@@ -194,7 +211,7 @@ class LocalEngine:
     def persona(self, persona: str) -> LocalReader:
         c = self.catalogues
         plan = compile_persona(
-            c.access, c.columns, c.aggregates, persona, source_schema(self.warehouse)
+            c.access, c.columns, c.aggregates, c.purposes, persona, source_schema(self.warehouse)
         )
         directory = self.directory / f"persona-{len(self.opened)}"
         directory.mkdir(parents=True)
@@ -253,6 +270,14 @@ INVENTED_BANK = {
     "payments.vendor_bank_account_number": "bank-account-number",
     "payments.vendor_bank_account_holder": "bank-account-holder",
 }
+# The invented tables' columns, each read whole by an invented purpose of its product's row readers;
+# and the purposes the invented bank columns are added to: those that follow a payment to its payee.
+INVENTED_COLUMNS = {
+    "ledger": ["entity_id", "entry_key", "account", "amount"],
+    "metric_definitions": ["metric"],
+    "audit_log": ["answer"],
+}
+INVENTED_BANK_PURPOSES = ("payment-review", "audit")
 INVENTED_YEAR = 1999
 
 
@@ -303,18 +328,47 @@ def invent(access: Doc) -> list[str]:
 
 
 def invented_catalogues(catalogues: Catalogues) -> Catalogues:
-    """The catalogues naming the invented tables as their products' and tagging the invented bank
-    columns; the ledger then awaits no tag."""
+    """The catalogues naming the invented tables as their products', tagging the invented bank
+    columns, which the ledger then awaits no longer, and reading both through purposes: each
+    invented table whole, by its product's row readers, and the bank columns in the purposes that
+    follow a payment to its payee."""
     access = {**catalogues.access, "data_products": []}
+    purposes = [
+        {**p, "tables": {t: list(c) for t, c in p["tables"].items()}}
+        for p in catalogues.purposes["purposes"]
+    ]
+    for purpose in purposes:
+        if purpose["id"] in INVENTED_BANK_PURPOSES:
+            purpose["tables"]["payments"] += [c.partition(".")[2] for c in INVENTED_BANK]
     for product in catalogues.access["data_products"]:
         tables = product.get("tables") or [INVENTED_TABLES[product["id"]]]
         access["data_products"].append({**product, "tables": tables})
+        if not product.get("tables"):
+            (table,) = tables
+            readers = {
+                g["persona"]
+                for g in catalogues.access["grants"]
+                if g["product"] == product["id"] and g["access"] in ("read", "edit")
+            }
+            purposes.append(
+                {
+                    "id": f"invented-{product['id']}",
+                    "for": "invented",
+                    "personas": sorted(readers),
+                    "tables": {table: INVENTED_COLUMNS[table]},
+                }
+            )
     products = {
         product: {"columns": dict(entry.get("columns", {}))}
         for product, entry in catalogues.columns["products"].items()
     }
     products["payments"]["columns"].update(INVENTED_BANK)
-    return Catalogues(access, {**catalogues.columns, "products": products}, catalogues.aggregates)
+    return Catalogues(
+        access,
+        {**catalogues.columns, "products": products},
+        catalogues.aggregates,
+        {"purposes": purposes},
+    )
 
 
 # What a persona is observed to see.
@@ -505,10 +559,12 @@ def observe(engine: Engine, matrix: Doc, persona: str) -> list[Seen]:
             observe_product(sight, place, product, entity, tables_of[product])
     seen += observe_tags(sight)
     listed = {
-        *(t for tables in tables_of.values() for t in tables),
+        *(n for ts in tables_of.values() for t in ts for n in cat.purpose_tables(persona, t)),
         *(s["name"] for e in cat.aggregates["products"].values() for s in e["tables"]),
     }
-    inventory = Seen(persona, "tables", "only tables its products list", len(sight.held))
+    inventory = Seen(
+        persona, "tables", "only its purposes' tables and the aggregate tables", len(sight.held)
+    )
     if unlisted := sorted(set(sight.held) - listed):
         inventory.fail(f"observed {len(unlisted)} more: {', '.join(unlisted)}")
     if views := sorted(me.views()):
@@ -528,36 +584,57 @@ def observe_product(
         grain, sums, units, *_ = spec_columns(spec, entry)
         shape[name] = [*grain, *sums, units]
 
-    def is_rows(table: str) -> bool:
-        # A group-totals aggregate table has its source table's name; the columns tell them apart.
-        return table in held and list(held[table]) != shape.get(table)
+    def row_tables(table: str) -> list[str]:
+        """The tables the persona holds under the product table's name, in any schema; a
+        group-totals aggregate table has its source table's name, and its columns tell it apart."""
+        return [
+            name
+            for name in held
+            if name.partition(".")[2] == table
+            or name == table
+            and list(held[name]) != shape.get(name)
+        ]
 
     one = {entity} if entity else None
     tagged = tagged_columns(cat.columns)
     reads = any(c in READS for p, _, c in cells_of(sight.row) if p == product)
     for table in tables:
         total = sight.count(source, table, one)
-        # What a cell shows or hides; an aggregate cell is proven by the groups it is given.
-        place.support += 0 if place.cell == "aggregate" else total
+        mine = cat.purpose_tables(sight.persona, table)
         if place.cell in READS:
-            if not is_rows(table):
-                place.fail(f"observed no table {table}")
-                continue
-            if (n := sight.count(me, table, one)) != total:
-                place.fail(f"observed {n} rows in {table} where the source holds {total}")
-            plain = [c for c in sight.built[table] if c not in tagged.get(table, {})]
-            if missing := [c for c in plain if c not in held[table]]:
-                place.fail(f"observed {table} without {len(missing)} of its untagged columns")
-                continue
-            digest = select(me.row_hash(plain), table, of_entities(one))
-            if differ := Counter(source.rows(digest)) - Counter(me.rows(digest)):
-                place.fail(f"observed {sum(differ.values())} rows of {table} unlike the source's")
-        elif is_rows(table):
+            for name in sorted(set(row_tables(table)) - set(mine)):
+                place.fail(f"observed {name}, which no purpose of it lists")
+            for name, listed in mine.items():
+                # What a cell shows; an aggregate cell is proven by the groups it is given.
+                place.support += total
+                if name not in held:
+                    place.fail(f"observed no table {name}")
+                    continue
+                want = [c for c in sight.built[table] if c in listed]
+                if list(held[name]) != want:
+                    extra = len(set(held[name]) - set(want))
+                    place.fail(
+                        f"observed {name} with {extra} columns its purpose does not list"
+                        f" and without {len(set(want) - set(held[name]))} it lists"
+                    )
+                    continue
+                if (n := sight.count(me, name, one)) != total:
+                    place.fail(f"observed {n} rows in {name} where the source holds {total}")
+                plain = [c for c in want if c not in tagged.get(table, {})]
+                digest = select(me.row_hash(plain), table, of_entities(one))
+                theirs = select(me.row_hash(plain), name, of_entities(one))
+                if differ := Counter(source.rows(digest)) - Counter(me.rows(theirs)):
+                    place.fail(
+                        f"observed {sum(differ.values())} rows of {name} unlike the source's"
+                    )
+            continue
+        place.support += 0 if place.cell == "aggregate" else total
+        for name in row_tables(table):
             # A product the persona reads no rows of has no row table at all, not an empty one.
-            if not reads or entity is None or ENTITY not in held[table]:
-                place.fail(f"observed a row table {table}")
-            elif n := sight.count(me, table, one):
-                place.fail(f"observed {n} rows of the entity in {table}")
+            if not reads or entity is None or ENTITY not in held[name]:
+                place.fail(f"observed a row table {name}")
+            elif n := sight.count(me, name, one):
+                place.fail(f"observed {n} rows of the entity in {name}")
     for name, spec in specs.items():
         assert entry is not None
         grain = shape[name][: len(spec_columns(spec, entry)[0])]
@@ -596,11 +673,12 @@ def observe_product(
             place.fail(f"observed {len(small)} groups in {name} below the minimum group")
 
 
-def row_key(sight: Sight, table: str) -> list[str]:
-    """The columns that tell the table's rows apart for a tagged value: the first untagged column
-    unique in the source, else every untagged column, so a tag's cell reads its own column."""
+def row_key(sight: Sight, table: str, listed: Sequence[str]) -> list[str]:
+    """The columns that tell the table's rows apart for a tagged value, of those a purpose lists:
+    the first untagged column unique in the source, else every untagged one it lists, so a tag's
+    cell reads its own column."""
     tagged = tagged_columns(sight.catalogues.columns).get(table, {})
-    plain = [c for c in sight.built[table] if c not in tagged]
+    plain = [c for c in sight.built[table] if c not in tagged and c in listed]
     for column in plain:
         ((rows, distinct),) = sight.source.rows(
             select(f"count(*), count(distinct {quote(column)})", table)
@@ -662,28 +740,36 @@ def observe_tags(sight: Sight) -> list[Seen]:
         ]
         if not marks:
             continue  # it marks no column of the build: the invented copy acts it out
+        reached = False
         if cell in ("clear", "masked"):
             for table, column in marks:
                 entities = read_entities(sight.row, product_of[f"{table}.{column}"])
                 if entities == set():
                     continue  # the persona reads no rows of this product
-                if table not in sight.held or column not in sight.held[table]:
-                    place.fail(f"observed no column {table}.{column}")
-                    continue
-                key = sight.me.row_hash(row_key(sight, table))
-                pairs = select(f"{key}, {quote(column)}", table, of_entities(entities))
-                stored = sight.source.rows(pairs)
-                place.support += sum(1 for _, v in stored if v is not None)
-                rule = "stored value" if cell == "clear" else f"{rules[tag]} masking"
-                want = Counter(
-                    (h, v if cell == "clear" else mask(rules[tag], v)) for h, v in stored
-                )
-                if differ := want - Counter(sight.me.rows(pairs)):
-                    n = sum(differ.values())
-                    place.fail(f"observed {n} values of {table}.{column} not its {rule}")
+                for name, listed in cat.purpose_tables(sight.persona, table).items():
+                    if column not in listed:
+                        continue  # the purpose withholds it: the product cell holds it absent
+                    reached = True
+                    if name not in sight.held or column not in sight.held[name]:
+                        place.fail(f"observed no column {name}.{column}")
+                        continue
+                    key = sight.me.row_hash(row_key(sight, table, listed))
+                    pairs = select(f"{key}, {quote(column)}", table, of_entities(entities))
+                    theirs = select(f"{key}, {quote(column)}", name, of_entities(entities))
+                    stored = sight.source.rows(pairs)
+                    place.support += sum(1 for _, v in stored if v is not None)
+                    rule = "stored value" if cell == "clear" else f"{rules[tag]} masking"
+                    want = Counter(
+                        (h, v if cell == "clear" else mask(rules[tag], v)) for h, v in stored
+                    )
+                    if differ := want - Counter(sight.me.rows(theirs)):
+                        n = sum(differ.values())
+                        place.fail(f"observed {n} values of {name}.{column} not its {rule}")
         if cell in ("masked", "denied"):
             hidden = secrets(sight, marks)
-            if cell == "denied":
+            # Denied, or masked where no purpose lists a column of the tag: the stored values
+            # being nowhere, and no column of the tag, is what the cell is observed by.
+            if cell == "denied" or not reached:
                 place.support += len(hidden)
                 for _, column in marks:
                     if named := sorted(t for t, cols in sight.held.items() if column in cols):
@@ -737,6 +823,7 @@ def engine(
     access: Doc,
     columns: Doc,
     aggregates: Doc,
+    purposes: Doc,
     tmp_path: Path,
 ) -> Iterator[Engine]:
     """The engine a persona's connection is opened on: the local engine over the dbt build of
@@ -749,7 +836,7 @@ def engine(
         # with the warehouse's own rules, which this engine acts on; nothing here calls GCP.
         pytest.skip("the BigQuery engine is not written yet: it comes with the warehouse's rules")
     warehouse: Path = request.getfixturevalue("warehouse")
-    local = LocalEngine(warehouse, Catalogues(access, columns, aggregates), tmp_path)
+    local = LocalEngine(warehouse, Catalogues(access, columns, aggregates, purposes), tmp_path)
     yield local
     local.close()
 
@@ -804,6 +891,9 @@ MUTATIONS = [
     "leak-clear-values-in-another-schema",
     "a-view-over-a-hidden-table",
     "an-empty-table-of-a-denied-product",
+    "leave-the-base-table-in",
+    "hold-another-purposes-table",
+    "add-a-withheld-column",
 ]
 WAREHOUSE = f"{SOURCE}.main"
 
@@ -835,17 +925,19 @@ def mutation(
         cat.aggregates["products"]["group-totals"],
     )
     stored = f"(select max(vendor_person_key) from {WAREHOUSE}.payments)"  # noqa: S608
+    (review,) = cat.purpose_tables("accountant-chicago", "payments")
+    (totals_read,) = cat.purpose_tables("metric-owner", "group_totals")
     if name == "leak-another-entitys-rows":
         persona = "accountant-chicago"
         plan = compile_persona(
-            cat.access, cat.columns, cat.aggregates, persona, source_schema(warehouse)
+            cat.access, cat.columns, cat.aggregates, cat.purposes, persona, source_schema(warehouse)
         )
         (rows,) = [t for t in plan.tables if isinstance(t, Rows) and t.table == "payments"]
         listed = ", ".join(masked(c) for c in rows.columns)
         return (
             persona,
             [
-                f"insert into payments select {listed} from {WAREHOUSE}.payments"  # noqa: S608
+                f"insert into {review} select {listed} from {WAREHOUSE}.payments"  # noqa: S608
                 " where entity_id = 'uk-transport'"
             ],
             {"payments uk-transport"},
@@ -854,8 +946,8 @@ def mutation(
         return (
             "accountant-chicago",
             [
-                "update payments set amount = amount + 1"
-                " where payment_key = (select min(payment_key) from payments)"
+                f"update {review} set amount = amount + 1"  # noqa: S608
+                f" where payment_key = (select min(payment_key) from {review})"
             ],
             {"payments chicago"},
         )
@@ -863,8 +955,8 @@ def mutation(
         return (
             "accountant-chicago",
             [
-                f"update payments set vendor_person_key = w.vendor_person_key"  # noqa: S608
-                f" from {WAREHOUSE}.payments as w where w.payment_key = payments.payment_key"
+                f"update {review} as m set vendor_person_key = w.vendor_person_key"  # noqa: S608
+                f" from {WAREHOUSE}.payments as w where w.payment_key = m.payment_key"
             ],
             {"tag individual-id"},
         )
@@ -872,7 +964,13 @@ def mutation(
         return (
             "metric-owner",
             [f"create table payments as select {plain} from {WAREHOUSE}.payments"],  # noqa: S608
-            {f"payments {e}" for e in matrix["personas"]["metric-owner"]["products"]["payments"]},
+            {
+                "tables",
+                *(
+                    f"payments {e}"
+                    for e in matrix["personas"]["metric-owner"]["products"]["payments"]
+                ),
+            },
         )
     if name == "replace-an-aggregate-with-its-rows":
         return (
@@ -907,22 +1005,41 @@ def mutation(
         return (
             "metric-owner",
             [
-                "alter table group_totals add column vendor_person_key varchar",
-                f"update group_totals set vendor_person_key = {stored}",  # noqa: S608
+                f"alter table {totals_read} add column vendor_person_key varchar",
+                f"update {totals_read} set vendor_person_key = {stored}",  # noqa: S608
             ],
-            {"tag individual-id"},
+            {"tag individual-id", "group-totals"},
         )
     if name == "add-a-tagged-value-under-another-name":
         return (
             "metric-owner",
             [
-                "alter table group_totals add column note varchar",
-                f"update group_totals set note = {stored}",  # noqa: S608
+                f"alter table {totals_read} add column note varchar",
+                f"update {totals_read} set note = {stored}",  # noqa: S608
             ],
-            {"tag individual-id"},
+            {"tag individual-id", "group-totals"},
+        )
+    if name == "add-a-withheld-column":
+        (close,) = cat.purpose_tables("group-controller", "payments")
+        return (
+            "group-controller",
+            [
+                f"alter table {close} add column contract_number varchar",
+                f"update {close} as m set contract_number = w.contract_number"  # noqa: S608
+                f" from {WAREHOUSE}.payments as w where w.payment_key = m.payment_key",
+            ],
+            {
+                f"payments {e}"
+                for e in matrix["personas"]["group-controller"]["products"]["payments"]
+            },
         )
     plan = compile_persona(
-        cat.access, cat.columns, cat.aggregates, "accountant-chicago", source_schema(warehouse)
+        cat.access,
+        cat.columns,
+        cat.aggregates,
+        cat.purposes,
+        "accountant-chicago",
+        source_schema(warehouse),
     )
     (rows,) = [t for t in plan.tables if isinstance(t, Rows) and t.table == "payments"]
     uk = f"from {WAREHOUSE}.payments where entity_id = 'uk-transport'"
@@ -953,7 +1070,29 @@ def mutation(
         return (
             "proposer",
             [f"create table payments as select {plain} from {WAREHOUSE}.payments where false"],  # noqa: S608
-            {f"payments {e}" for e in matrix["personas"]["proposer"]["products"]["payments"]},
+            {
+                "tables",
+                *(f"payments {e}" for e in matrix["personas"]["proposer"]["products"]["payments"]),
+            },
+        )
+    chicago = f"from {WAREHOUSE}.payments where entity_id = 'chicago'"
+    as_listed = f"select {', '.join(masked(c) for c in rows.columns)} {chicago}"  # noqa: S608
+    if name == "leave-the-base-table-in":
+        return (
+            "accountant-chicago",
+            [f"create table payments as {as_listed}"],
+            {"payments chicago", "tables"},
+        )
+    if name == "hold-another-purposes-table":
+        (close,) = cat.purpose_tables("group-controller", "payments")
+        schema, _, table = close.partition(".")
+        listed = ", ".join(
+            quote(c) for c in cat.purpose_tables("group-controller", "payments")[close]
+        )
+        return (
+            "accountant-chicago",
+            [f"create schema {schema}", f"create table {close} as select {listed} {chicago}"],  # noqa: S608
+            {"payments chicago", "tables"},
         )
     assert name == "hold-an-unlisted-table"
     return (
@@ -969,11 +1108,12 @@ def test_the_matrix_goes_red_on_exactly_the_cells_a_broken_database_touches(
     access: Doc,
     columns: Doc,
     aggregates: Doc,
+    purposes: Doc,
     visibility: Doc,
     warehouse: Path,
     tmp_path: Path,
 ) -> None:
-    cat = Catalogues(access, columns, aggregates)
+    cat = Catalogues(access, columns, aggregates, purposes)
     persona, statements, places = mutation(name, cat, warehouse, visibility)
     assert places, "the samples hold something for the change to touch"
     whole = LocalEngine(warehouse, cat, tmp_path / "whole")
@@ -1093,9 +1233,11 @@ def own_shares(engine: Engine, persona: str, entities: set[str]) -> dict[Row, li
         first, last = span.get((e, y, None), (s, t))
         span[(e, y, None)] = (min(first, s), max(last, t))
     shares: dict[Row, list[Any]] = {}
+    (mine,) = engine.catalogues.purpose_tables(persona, "payments")
     for entity, year, period, currency, amount in engine.persona(persona).rows(
-        "select entity_id, fiscal_year, fiscal_period, currency, amount from payments"
-        " where not is_repeat"
+        select(
+            "entity_id, fiscal_year, fiscal_period, currency, amount", mine, " where not is_repeat"
+        )
     ):
         if entity not in entities or (entity, year, period) not in span or amount is None:
             continue
@@ -1117,8 +1259,10 @@ def one_entitys_figures(engine: Engine, matrix: Doc, minimum: int) -> dict[str, 
     payments) is taken from the source, as the public files give it, and counted apart."""
     cat = engine.catalogues
     at = {**cat.aggregates, "minimum_group": minimum}
-    strict = engine.rebuilt(Catalogues(cat.access, cat.columns, at))
-    loose = engine.rebuilt(Catalogues(cat.access, cat.columns, {**at, "minimum_entities": 1}))
+    strict = engine.rebuilt(Catalogues(cat.access, cat.columns, at, cat.purposes))
+    loose = engine.rebuilt(
+        Catalogues(cat.access, cat.columns, {**at, "minimum_entities": 1}, cat.purposes)
+    )
     isolated: dict[str, Counter[str]] = {}
     for persona in PERSONAS:
         row = matrix["personas"][persona]
@@ -1293,11 +1437,14 @@ def test_every_persona_sees_its_matrix_over_the_landed_build(
     access: Doc,
     columns: Doc,
     aggregates: Doc,
+    purposes: Doc,
     visibility: Doc,
     landed_warehouse: Path,
     tmp_path: Path,
 ) -> None:
-    engine = LocalEngine(landed_warehouse, Catalogues(access, columns, aggregates), tmp_path)
+    engine = LocalEngine(
+        landed_warehouse, Catalogues(access, columns, aggregates, purposes), tmp_path
+    )
     try:
         failures, tally = verdict(act_out(engine, visibility, PERSONAS))
         isolating = isolating_groups(engine, visibility, aggregates)
