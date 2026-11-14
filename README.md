@@ -85,21 +85,26 @@ Every model that reads a fetched source reads the file the fetch kit landed (`py
 The Dutch budget against outturn shows the figures as the file serves them: a zero the file may serve in place of a figure is flagged on its line (`has_doubtful_zero`), and the landed tests count the figures the file serves wrong.
 The group totals sum each entity's spend by fiscal period, or by year where the source gives only a year, in euros at actual and at constant rates, each row naming what its figure is (`basis`: Chicago's direct vouchers, contract payments and yearly roll-ups, the UK department's payments over £25,000, the Dutch government's cash-expenditure outturn), and count what they leave out, by rule, beside them (`group_totals_left_out`).
 
-The governed metrics are MetricFlow definitions in `semantics/*.yml`, each owned by a persona and named by a glossary term in its `meta`: spend against award, remaining commitment and what was paid over award (the City of Chicago's contracts the contract reconciliation holds to an award above 0, groupable by its break class), the duplicate-payment rate by rows and by amount (Chicago's payments the publisher serves again), and constant-currency spend (the group totals at one day's rates, a figure only where the rows share one basis, so group it by `group_total__basis`).
-Days to pay is not defined: every public file serves one date per payment.
-The build writes the semantic manifest `mf` reads (`models/target/semantic_manifest.json`).
+The governed metrics are MetricFlow definitions in `semantics/metricflow/`, each with an owner (the persona who owns its glossary term), a glossary term and a role in its `meta`: a `headline` metric is one to read, an `input` only feeds one.
+[`semantics/finance_metrics.yaml`](semantics/finance_metrics.yaml) maps the five promised finance metrics to the headline metrics that answer them:
+spend against award, remaining commitment and what was paid over award (the City of Chicago's contracts the contract reconciliation holds to an award above 0, groupable by break class and filterable by end date; by `metric_time` they group contracts by approval cohort, the day of their first revision), the duplicate-payment rate by rows and by amount (Chicago's payments the publisher serves again), and constant-currency spend (the group totals at one day's rates, a figure only where the rows share one basis, so group it by `group_total__basis`; by year or coarser, never by month, since a whole year's figure has no month).
+Days to pay is not definable from the public files, which serve one date per payment; the file says why.
+A dbt build writes the semantic manifest `mf` reads (`models/target/semantic_manifest.json`).
 
 The `mf` command checks for a newer release of itself on every run, and has no setting to stop it: it sends one HTTPS request to `pypi.org` for `dbt-metricflow`'s public release list (`/pypi/dbt-metricflow/json`, the client library's default user agent, nothing about the project or its data), waits at most one second, keeps the answer for an hour in the system's temporary folder (`update_checker_cache.pkl`), and carries on silently when the request fails.
-To run it with no network call, use the runner the tests use, which turns that check off and ends the run on any connection or name lookup:
+To run it with no network call, use the runner beside the definitions, which turns that check off and ends the run on any connection or name lookup.
+The build below reads the committed samples (`source_rows: sample`), so it needs no landing; its database goes to `target/ledger_lab.duckdb` under the folder you run from, which must exist, hence the `mkdir`:
 
 ```bash
-uv run dbt build --project-dir models --profiles-dir models
-DBT_PROJECT_DIR=models DBT_PROFILES_DIR=models uv run python -I tests/semantics/offline_mf.py validate-configs
-DBT_PROJECT_DIR=models DBT_PROFILES_DIR=models uv run python -I tests/semantics/offline_mf.py query --metrics spend_against_award,remaining_commitment --group-by contract__break_class
-DBT_PROJECT_DIR=models DBT_PROFILES_DIR=models uv run python -I tests/semantics/offline_mf.py query --metrics constant_currency_spend --group-by group_total__basis,group_total__fiscal_year
+mkdir -p target
+uv run dbt build --project-dir models --profiles-dir models --vars '{source_rows: sample}'
+DBT_PROJECT_DIR=models DBT_PROFILES_DIR=models uv run python -I semantics/offline/offline_mf.py validate-configs
+DBT_PROJECT_DIR=models DBT_PROFILES_DIR=models uv run python -I semantics/offline/offline_mf.py query --metrics spend_against_award,remaining_commitment --group-by contract__break_class
+DBT_PROJECT_DIR=models DBT_PROFILES_DIR=models uv run python -I semantics/offline/offline_mf.py query --metrics constant_currency_spend --group-by group_total__basis,metric_time__year
 DBT_PROJECT_DIR=models DBT_PROFILES_DIR=models uv run mf query --metrics duplicate_payment_rate  # the plain command, update check included
 ```
 
+`make reconcile-landed` runs the metrics over the landed files beside the reconciliation, each against its pinned value.
 
 Each source is fetched by name from [`ingest/sources.yaml`](ingest/sources.yaml), which records its URL or pinned query, SHA-256, licence link, publisher and whether it names people; the file lands under `LEDGER_LAB_LANDING` (default `landing/`, outside git) only when its checksum matches, and the command exits non-zero otherwise:
 

@@ -112,7 +112,7 @@ controls:
   - id: unowned-metric-cannot-ship
     layer: Accountability
     owner: metric-owner
-    asserts: make check fails when any MetricFlow metric in semantics/, the inputs of a ratio or derived metric included, has no owner in its config meta, an owner that is no persona of access/personas.yaml or is an agent persona, or no glossary term or one semantics/glossary.yaml lacks; each case is planted in a metric's own YAML and read back through dbt's parse, as make check reads the real definitions.
+    asserts: make check fails when any MetricFlow metric in semantics/metricflow/, the inputs of a ratio or derived metric included, has no owner in its config meta, an owner that is no persona of access/personas.yaml, is an agent persona or is not the owner of the metric's glossary term, no glossary term or one semantics/glossary.yaml lacks, or no role (headline or input); each case is planted in a metric's own YAML and read back through dbt's parse, as make check reads the real definitions.
     proven_by:
       - tests/semantics/test_metrics.py::test_every_metric_has_a_human_owner_and_a_glossary_term
       - tests/semantics/test_metrics.py::test_a_metric_without_a_human_owner_or_a_known_term_is_refused
