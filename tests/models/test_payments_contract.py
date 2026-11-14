@@ -742,7 +742,8 @@ def split_payees_and_documents(build: Build, landing: Path) -> None:
     references per entity as the landed files' own counts give; every clear name an organisation
     by the landing's own classifier and register; no clear name whose person hash is a key; no
     clear reference a hashed payee's row carries; no clear UK number a hashed row of its paying
-    body carries, by the landing's own hasher; and no UK reference, which the published contract's rule holds null."""
+    body carries, by the landing's own hasher; and no UK reference, which the published
+    contract's rule holds null."""
     files = {
         "chicago": str(landing / "chicago-payments"),
         "uk": str(landing / "uk-transport-spend-2025"),
