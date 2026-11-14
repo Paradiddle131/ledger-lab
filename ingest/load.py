@@ -6,9 +6,9 @@ so a load reads only what a landing step produced, hashed names included, never 
 file. Every landed file is Parquet its step wrote: text columns as the publishers' text, typed
 columns only where the step typed them; the load keeps the file's own schema, so no delimiter,
 quoting, header or encoding rule can split a row differently from the landing. Column names are
-kept as they are: BigQuery refuses a Parquet column whose name holds a dot (the legal-entity
-register's `Entity.LegalName`), so that file's load job fails and no table is made for it. A file
-lands as the table named after it with underscores for its hyphens (`chicago-contracts` as
+kept as they are; BigQuery refuses a Parquet column whose name holds a dot, so the steps land none
+(the legal-entity register's `Entity.LegalName` lands as `Entity_LegalName`). A file lands as the
+table named after it with underscores for its hyphens (`chicago-contracts` as
 `landed.chicago_contracts`), replaced whole (WRITE_TRUNCATE) so a re-run is idempotent, and a
 job that meets a single bad record fails and leaves the table as it was. Each file's table is
 loaded in turn; a failure stops before the next.

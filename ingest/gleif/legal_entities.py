@@ -2,7 +2,10 @@
 
 `step` reads the one CSV inside a verified golden-copy archive and turns the records whose legal
 address is in a vendor's country (`COUNTRIES`) into Parquet, keeping only the columns the vendor
-matching needs (`COLUMNS`) as the text the register served, with blanks as nulls.
+matching needs (`SERVED_COLUMNS`) as the text the register served, with blanks as nulls, each under
+its served name with every dot an underscore (`COLUMNS`: `Entity.LegalName` lands as
+`Entity_LegalName`), since BigQuery loads no Parquet column whose name holds a dot; a rename that
+would give two columns one name is refused.
 
 What may name a person never lands, and doubt means a person. A record is left out when:
 - the register files it as a sole proprietor, an individual acting in a business capacity, whose
@@ -104,10 +107,10 @@ NO_LEGAL_FORM = frozenset({"", "8888", "9999"})
 # register grows by a few per cent a year, so 6 GiB leaves room for a re-pin and refuses a wrong
 # or hostile archive before any of it is decompressed.
 MAX_UNZIPPED = 6 * 1024**3
-COUNTRY = "Entity.LegalAddress.Country"
-CATEGORY = "Entity.EntityCategory"
-LEGAL_FORM = "Entity.LegalForm.EntityLegalFormCode"
-LEGAL_NAME = "Entity.LegalName"
+SERVED_COUNTRY = "Entity.LegalAddress.Country"
+SERVED_CATEGORY = "Entity.EntityCategory"
+SERVED_LEGAL_FORM = "Entity.LegalForm.EntityLegalFormCode"
+SERVED_LEGAL_NAME = "Entity.LegalName"
 # The golden-copy CSV carries up to five other and five transliterated names a record.
 OTHER_NAMES = tuple(
     f"Entity.{group}.{name}.{n}"
@@ -118,20 +121,47 @@ OTHER_NAMES = tuple(
     for n in range(1, 6)
 )
 
-COLUMNS: tuple[str, ...] = (
+# The served columns that land, in the golden copy's names.
+SERVED_COLUMNS: tuple[str, ...] = (
     "LEI",
-    LEGAL_NAME,
+    SERVED_LEGAL_NAME,
     "Entity.LegalName.xmllang",
     *(f"{name}{part}" for name in OTHER_NAMES for part in ("", ".xmllang", ".type")),
-    COUNTRY,
+    SERVED_COUNTRY,
     "Entity.LegalJurisdiction",
-    CATEGORY,
-    LEGAL_FORM,
+    SERVED_CATEGORY,
+    SERVED_LEGAL_FORM,
     "Entity.LegalForm.OtherLegalForm",
     "Entity.EntityStatus",
     "Registration.RegistrationStatus",
     "Registration.LastUpdateDate",
 )
+
+
+class LegalEntitiesError(ValueError):
+    """The served archive is not the golden copy this step knows."""
+
+
+def landed_name(served: str) -> str:
+    """A served column's landed name: every dot an underscore, nothing else changed."""
+    return served.replace(".", "_")
+
+
+def landed_columns(served: Sequence[str]) -> tuple[str, ...]:
+    """The landed names of served columns, refused when two of them would share one."""
+    landed = tuple(landed_name(c) for c in served)
+    if len(set(landed)) != len(landed):
+        shared = sorted({n for n in landed if landed.count(n) > 1})
+        raise LegalEntitiesError(f"the served columns would land under one name: {shared}")
+    return landed
+
+
+# The landed columns, in order, and the ones the matching reads.
+COLUMNS = landed_columns(SERVED_COLUMNS)
+COUNTRY = landed_name(SERVED_COUNTRY)
+CATEGORY = landed_name(SERVED_CATEGORY)
+LEGAL_FORM = landed_name(SERVED_LEGAL_FORM)
+LEGAL_NAME = landed_name(SERVED_LEGAL_NAME)
 # The reasons a record is left out, each counted even when nothing was.
 REASONS = (
     "sole proprietor category",
@@ -147,10 +177,6 @@ class Profile(TypedDict):
     left_out: dict[str, int]
     other_names_blanked: int
     still_to_leave_out: dict[str, int]
-
-
-class LegalEntitiesError(ValueError):
-    """The served archive is not the golden copy this step knows."""
 
 
 def reason_to_leave_out(country: str, category: str, form: str, legal_name: str) -> str | None:
@@ -194,19 +220,27 @@ def _member(raw: bytes) -> tuple[zipfile.ZipFile, zipfile.ZipInfo]:
     return archive, members[0]
 
 
-def _screen(records: Iterable[list[str]], header: list[str], out: io.TextIOBase) -> Counter[str]:
-    """Write the records that land, screened, and count what was left out."""
-    missing = [column for column in COLUMNS if column not in header]
+def _screen(
+    records: Iterable[list[str]],
+    header: list[str],
+    out: io.TextIOBase,
+    served: Sequence[str] = SERVED_COLUMNS,
+) -> Counter[str]:
+    """Write the records that land, screened, under their landed names, and count what was left
+    out."""
+    landed = landed_columns(served)
+    missing = [column for column in served if column not in header]
     if missing:
         raise LegalEntitiesError(f"the served file lacks the columns {missing}")
-    keep = [header.index(column) for column in COLUMNS]
+    keep = [header.index(column) for column in served]
     country, category, form, name = (
-        header.index(c) for c in (COUNTRY, CATEGORY, LEGAL_FORM, LEGAL_NAME)
+        header.index(c)
+        for c in (SERVED_COUNTRY, SERVED_CATEGORY, SERVED_LEGAL_FORM, SERVED_LEGAL_NAME)
     )
-    names = [COLUMNS.index(other) for other in OTHER_NAMES]
+    names = [list(served).index(other) for other in OTHER_NAMES]
     counts: Counter[str] = Counter({reason: 0 for reason in (*REASONS, "other names blanked")})
     writer = csv.writer(out)
-    writer.writerow(COLUMNS)
+    writer.writerow(landed)
     for row in records:
         if row[country] not in COUNTRIES:
             continue
