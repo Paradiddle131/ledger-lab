@@ -396,8 +396,7 @@ def test_the_entities_apart_count_the_entities_a_persona_reads_in_any_product(
     (by_period,) = [
         t
         for t in plan_of(access, columns, aggregates, "metric-owner", warehouse).tables
-        if isinstance(t, Aggregate)
-        and t.name == "payments_by_period"
+        if isinstance(t, Aggregate) and t.name == "payments_by_period"
     ]
     assert (by_period.known, by_period.minimum_entities) == (None, 0)
 
