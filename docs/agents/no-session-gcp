@@ -1,0 +1,2 @@
+ledger-lab uses only its own GCP project, named by LEDGER_LAB_GCP_PROJECT; the session's GCP_PROJECT and injected credential may belong to another lab
+The cloud session-start hook reads the line above and prints it in place of the session project's status; AGENTS.md § Guardrails (own project only) is the rule.
