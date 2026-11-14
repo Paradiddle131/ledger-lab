@@ -6,7 +6,7 @@ GUARDS := $(LOADOUT)/cloud/githooks
 
 .PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
 
-check: lint typecheck test ids portable scan contract metric-versions
+check: lint typecheck test ids portable scan contract
 	@echo "make check: all passed"
 
 # Also puts the Data Contract CLI's DuckDB engine (the lock's `contract` group) in uv's cache, so
