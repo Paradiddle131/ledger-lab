@@ -1,0 +1,69 @@
+{
+  "name": "sec-annual-filings",
+  "meta": {
+    "pinned": {
+      "rows": 328,
+      "filings": 79,
+      "companies": 20,
+      "amended_filings": 1,
+      "restated_periods": 4,
+      "reports_without_own_revenue": 0,
+      "company_reports": [
+        "1020569 2022 2023 2024 2025, 1022079 2022 2023 2024 2025, 1067701 2022 2023 2024 2025, 1069183 2022 2023 2024 2025, 1116463 2022 2023 2024 2025, 1158463 2022 2023 2024 2025, 1321655 2022 2023 2024 2025, 1351636 2022 2024 2025, 1488139 2022 2023 2024, 1759509 2022 2023 2024 2025, 202058 2022 2023 2024 2025, 21175 2022 2023 2024 2025, 26172 2022 2023 2024 2025, 27419 2023 2024 2025 2026, 277509 2022 2023 2024 2025, 68505 2022 2023 2024 2025, 746838 2022 2023 2024 2025, 78814 2022 2023 2024 2025 2025/A, 887936 2022 2023 2024 2025, 9092 2022 2023 2024 2025"
+      ],
+      "wrong_lengths": [
+        "0000202058-26-000015, 0000202058-26-000015 20241231"
+      ]
+    },
+    "names": []
+  },
+  "expectations": [
+    {"type": "expect_table_columns_to_match_ordered_list", "kwargs": {"column_list": ["cik", "accession_number", "form", "is_amendment", "filing_date", "report_period", "concept", "period_end", "quarters", "unit", "value", "value_number", "filed_on", "filed_in_month", "is_impossible_period_day", "is_amended_form", "amended_filing", "restated_period", "report_without_own_revenue", "company_reports", "wrong_lengths"]}, "notes": "Schema: every landed column in order, then the query's own; a landed column more or less breaks it."},
+    {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "cik", "type_": "str"}, "notes": "Schema: the landing keeps the publisher's text."},
+    {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "accession_number", "type_": "str"}, "notes": "Schema: the landing keeps the publisher's text."},
+    {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "form", "type_": "str"}, "notes": "Schema: the landing keeps the publisher's text."},
+    {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "is_amendment", "type_": "bool"}, "notes": "Schema: landed as bool."},
+    {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "filing_date", "type_": "str"}, "notes": "Schema: the landing keeps the publisher's text."},
+    {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "report_period", "type_": "str"}, "notes": "Schema: the landing keeps the publisher's text."},
+    {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "concept", "type_": "str"}, "notes": "Schema: the landing keeps the publisher's text."},
+    {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "period_end", "type_": "str"}, "notes": "Schema: the landing keeps the publisher's text."},
+    {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "quarters", "type_": "str"}, "notes": "Schema: the landing keeps the publisher's text."},
+    {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "unit", "type_": "str"}, "notes": "Schema: the landing keeps the publisher's text."},
+    {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "value", "type_": "str"}, "notes": "Schema: the landing keeps the publisher's text."},
+    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "cik"}, "notes": "Key: the filer."},
+    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "accession_number"}, "notes": "Key: the filing."},
+    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "concept"}, "notes": "Key: the figure's concept."},
+    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "period_end"}, "notes": "Key: the figure's period end."},
+    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "quarters"}, "notes": "Key: the figure's length."},
+    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "unit"}, "notes": "Key: the figure's unit."},
+    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "value"}, "notes": "Every fact has its value."},
+    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "form"}, "notes": "Every filing has its form."},
+    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "filing_date"}, "notes": "Every filing has its date."},
+    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "report_period"}, "notes": "Every filing reports a period."},
+    {"type": "expect_compound_columns_to_be_unique", "kwargs": {"column_list": ["accession_number", "concept", "period_end", "quarters", "unit"]}, "notes": "Key: one row per fact per filing."},
+    {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "cik", "regex": "^[1-9]\\d*$"}, "notes": "A CIK is digits without leading zeros."},
+    {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "accession_number", "regex": "^\\d{10}-\\d{2}-\\d{6}$"}, "notes": "An accession number as the SEC writes it."},
+    {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "filing_date", "regex": "^\\d{8}$"}, "notes": "A date is yyyymmdd."},
+    {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "report_period", "regex": "^\\d{8}$"}, "notes": "A date is yyyymmdd."},
+    {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "period_end", "regex": "^\\d{8}$"}, "notes": "A date is yyyymmdd."},
+    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "filed_on"}, "notes": "Every filing day is a day the calendar has."},
+    {"type": "expect_column_sum_to_be_between", "kwargs": {"column": "is_impossible_period_day", "min_value": 0, "max_value": 0}, "notes": "Every report period and period end is a day the calendar has."},
+    {"type": "expect_column_values_to_be_between", "kwargs": {"column": "filed_on", "min_value": 20230101, "max_value": 20260331}, "notes": "Range: filed in the four pinned quarters' span."},
+    {"type": "expect_column_values_to_be_between", "kwargs": {"column": "filed_in_month", "min_value": 1, "max_value": 3}, "notes": "Only reports filed in a first calendar quarter land."},
+    {"type": "expect_column_distinct_values_to_equal_set", "kwargs": {"column": "form", "value_set": ["10-K", "10-K/A"]}, "notes": "Annual reports and their amendments."},
+    {"type": "expect_column_pair_values_to_be_equal", "kwargs": {"column_A": "is_amendment", "column_B": "is_amended_form"}, "notes": "The amendment flag is a form ending in `/A`."},
+    {"type": "expect_column_distinct_values_to_equal_set", "kwargs": {"column": "concept", "value_set": ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"]}, "notes": "The two revenue concepts the companies use."},
+    {"type": "expect_column_distinct_values_to_equal_set", "kwargs": {"column": "quarters", "value_set": ["1", "4"]}, "notes": "The lengths the archives serve for these figures."},
+    {"type": "expect_column_distinct_values_to_equal_set", "kwargs": {"column": "unit", "value_set": ["USD"]}, "notes": "Every figure is in dollars."},
+    {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "value", "regex": "^-?\\d+\\.\\d{4}$"}, "notes": "A value as the archive writes it, four places."},
+    {"type": "expect_column_values_to_be_between", "kwargs": {"column": "value_number", "min_value": 1, "max_value": 1000000000000}, "notes": "Range: positive revenue below a trillion dollars (measured 45.7 million to 109.1 billion)."},
+    {"type": "expect_table_row_count_to_equal", "kwargs": {"value": {"$PARAMETER": "rows"}}, "notes": "Pinned: one row per revenue fact per filing."},
+    {"type": "expect_column_unique_value_count_to_be_between", "kwargs": {"column": "accession_number", "min_value": {"$PARAMETER": "filings"}, "max_value": {"$PARAMETER": "filings"}}, "notes": "Pinned: the filings."},
+    {"type": "expect_column_unique_value_count_to_be_between", "kwargs": {"column": "cik", "min_value": {"$PARAMETER": "companies"}, "max_value": {"$PARAMETER": "companies"}}, "notes": "Pinned: the companies."},
+    {"type": "expect_column_unique_value_count_to_be_between", "kwargs": {"column": "amended_filing", "min_value": {"$PARAMETER": "amended_filings"}, "max_value": {"$PARAMETER": "amended_filings"}}, "notes": "Pinned mess, amendments: the amended reports, landed flagged beside the originals."},
+    {"type": "expect_column_unique_value_count_to_be_between", "kwargs": {"column": "restated_period", "min_value": {"$PARAMETER": "restated_periods"}, "max_value": {"$PARAMETER": "restated_periods"}}, "notes": "Pinned mess, restatements: periods whose revenue differs between two filings (Axon's 2022 and 2023, Pitney Bowes's 2022 and 2023)."},
+    {"type": "expect_column_most_common_value_to_be_in_set", "kwargs": {"column": "company_reports", "value_set": {"$PARAMETER": "company_reports"}}, "notes": "Pinned: each company's report years in the set, with the gaps of a first-quarter-only landing (Target's year ends in January, SoundThinking filed its 2023 report on 1 April, Ameresco's 2025 report is not in the archive, Pitney Bowes amended its 2025 report)."},
+    {"type": "expect_column_unique_value_count_to_be_between", "kwargs": {"column": "report_without_own_revenue", "min_value": {"$PARAMETER": "reports_without_own_revenue"}, "max_value": {"$PARAMETER": "reports_without_own_revenue"}}, "notes": "Pinned: annual reports with no revenue for the period they report, none on the pinned file; a move to another concept would leave one."},
+    {"type": "expect_column_most_common_value_to_be_in_set", "kwargs": {"column": "wrong_lengths", "value_set": {"$PARAMETER": "wrong_lengths"}}, "notes": "Pinned mess, a period length filed wrong, each listed as often as it occurs: L3Harris's 2025 report gives its own year's revenue no four-quarter length, and also serves its 2024 annual revenue as one quarter long."}
+  ]
+}

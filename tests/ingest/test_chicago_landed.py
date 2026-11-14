@@ -93,17 +93,9 @@ def clear_names_are_organisations(path: Path, column: str) -> None:
     assert not any(person_shaped(n) for n in vouched)
 
 
-def test_the_landed_contracts_carry_their_mess_and_no_hashed_name_in_a_description() -> None:
+def test_no_hashed_vendor_is_named_in_a_contract_description_or_code() -> None:
+    """The landed contracts' profile and mess are their quality suite's (`ingest/quality`)."""
     path = landed_file("chicago-contracts")
-    counts = contracts.profile(path)
-    print(counts)
-    assert sum(counts["order_number_formats"].values()) == counts["rows"]
-    assert counts["contracts_with_several_rows"] < counts["contracts"] < counts["rows"]
-    assert 0 < counts["negative_awards"] < counts["rows"]
-    assert 0 < counts["non_numeric_revisions"] < counts["rows"]
-    assert counts["vendors_hashed"] <= counts["hashed_rows"] < counts["rows"]
-    assert counts["hashed_rows_with_contract_number"] <= counts["hashed_rows"]
-    assert counts["hashed_rows_with_specification_number"] <= counts["hashed_rows"]
     clear_names_are_organisations(path, "vendor_name")
     hashed, as_person = hashes(path, "vendor_name"), person_hasher()
     found = {c: holding(cells(path, c), hashed, as_person) for c in contracts.TABLE.landed}
@@ -113,19 +105,10 @@ def test_the_landed_contracts_carry_their_mess_and_no_hashed_name_in_a_descripti
     assert {c: n for c, n in found.items() if c not in unchecked and n} == {}
 
 
-def test_the_landed_payments_carry_their_roll_ups_and_no_hashed_name_in_a_code() -> None:
+def test_no_hashed_payee_is_named_in_a_payment_code() -> None:
+    """The landed payments' profile, roll-ups and mess are their quality suite's
+    (`ingest/quality`)."""
     path = landed_file("chicago-payments")
-    counts = payments.profile(path)
-    print(counts)
-    assert counts["itemised_rows"] + counts["rolled_up_rows"] == counts["rows"]
-    assert sum(counts["rolled_up_by_year"].values()) == counts["rolled_up_rows"]
-    assert 0 < counts["rolled_up_by_year"]["2002"] < counts["rolled_up_rows"]
-    assert counts["earliest_year"] == 2002, "1996 to 2001 live only inside the 2002 bucket"
-    assert counts["unreadable_dates"] == 0
-    assert counts["without_voucher"] == counts["rolled_up_rows"], "only roll-ups lack a voucher"
-    assert 0 < counts["without_contract"] < counts["itemised_rows"]
-    assert counts["payees_hashed"] <= counts["rows_hashed"] < counts["rows"]
-    assert counts["hashed_rows_with_voucher"] <= counts["rows_hashed"]
     clear_names_are_organisations(path, "vendor_name")
     hashed, as_person = hashes(path, "vendor_name"), person_hasher()
     found = {c: holding(cells(path, c), hashed, as_person) for c in payments.TABLE.landed}

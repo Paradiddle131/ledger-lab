@@ -182,21 +182,9 @@ def test_a_sole_proprietor_never_lands(tmp_path: Path) -> None:
         assert clue not in data
 
 
-def test_every_landed_record_has_an_lei_a_legal_name_a_legal_form_and_a_country(
-    tmp_path: Path,
-) -> None:
+def test_the_profile_counts_the_records_of_each_country(tmp_path: Path) -> None:
     counts = profile(landed(tmp_path, APPLE, BARCLAYS, ING))
-    assert counts["incomplete"] == 0
-    assert counts["malformed_leis"] == 0
     assert counts["rows_by_country"] == {"GB": 1, "NL": 1, "US": 1}
-
-
-def test_the_profile_counts_a_record_without_a_legal_form(tmp_path: Path) -> None:
-    formless = {**APPLE, "Entity.LegalForm.EntityLegalFormCode": ""}
-    unknown = {**BARCLAYS, "Entity.LegalForm.EntityLegalFormCode": "9999"}
-    counts = profile(landed(tmp_path, formless, unknown, ING))
-    assert counts["incomplete"] == 1
-    assert counts["legal_form_not_available"] == 1
 
 
 def test_the_step_refuses_a_file_without_a_needed_column() -> None:
@@ -333,14 +321,8 @@ def test_the_step_refuses_an_archive_that_declares_more_than_the_bound_unzipped(
 
 
 @pytest.mark.landed
-def test_the_landed_register_holds_complete_records_for_the_vendors_countries() -> None:
+def test_no_landed_record_is_one_the_step_should_have_left_out() -> None:
+    """Every leave-out rule applied again to the landed records; their keys, counts and what the
+    step left out are the register's quality suite's (`ingest/quality`)."""
     counts = profile(landed_file("gleif-legal-entities"))
-    print(counts)
-    assert counts["incomplete"] == 0
-    assert counts["malformed_leis"] == 0
-    assert counts["duplicate_leis"] == 0
     assert counts["still_to_leave_out"] == {}
-    assert counts["left_out"]["sole proprietor category"] > 0
-    assert counts["left_out"]["partnership 62Y3"] > 0
-    assert set(counts["rows_by_country"]) == set(COUNTRIES)
-    assert min(counts["rows_by_country"].values()) > 100_000

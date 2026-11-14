@@ -309,74 +309,15 @@ def test_the_set_is_the_regulators_dated_quarterly_archives_fetched_as_one() -> 
     assert fetch.CLIENT_NAME == "ledger-lab research-bot", "the regulator's host refuses others"
 
 
-# The fiscal years (by the year of the period each report covers, `/A` for an amendment) whose
-# annual reports the set holds, where they differ from 2022 to 2025: the set is first quarters
-# only, and an archive need not hold every report of its quarter.
-REPORT_GAPS = {
-    "27419": "2023 2024 2025 2026",  # Target's years end in late January
-    "1351636": "2022 2024 2025",  # SoundThinking filed its 2023 report on 1 April 2024
-    "1488139": "2022 2023 2024",  # Ameresco's 2025 report (3 March 2026) is not in the archive
-    "78814": "2022 2023 2024 2025 2025/A",  # Pitney Bowes amended its 2025 report in February
-}
-# Lengths the filer got wrong, as the archives serve them: L3Harris's 2025 report gives its 2025
-# annual revenue no four-quarter length, and its 2024 annual revenue also a one-quarter one.
-WRONG_LENGTHS = [("0000202058-26-000015",), ("0000202058-26-000015", "20241231")]
-
-
 @pytest.mark.landed
-def test_the_landed_filings_keep_every_restated_period_and_amended_report() -> None:
+def test_the_landed_filings_hold_the_listed_companies_and_known_values() -> None:
+    """The filings' keys, report years, restatements, amendments and the lengths filed wrong are
+    their quality suite's (`ingest/quality`); this ties the set to the company list and to the
+    values the regulator's files hold for one restatement and one amendment."""
     con = duckdb.connect()
     con.read_parquet(str(landed_file(SET))).create_view("f")
-    duplicates = con.execute(
-        "select count(*) - count(distinct (accession_number, concept, period_end, quarters, unit))"
-        " from f"
-    )
-    assert duplicates.fetchone() == (0,), "one row per fact per filing"
     ciks = {c["cik"] for c in facts.companies()}
     assert {r[0] for r in con.execute("select distinct cik from f").fetchall()} == ciks
-    without = con.execute(
-        "select accession_number from f group by accession_number, report_period"
-        " having count(*) filter (where period_end = report_period) = 0"
-    ).fetchall()
-    assert without == [], "an annual report with no revenue for the period it reports"
-    reports = dict(
-        con.execute(
-            "select cik, string_agg(year, ' ' order by year) from (select distinct cik,"
-            " left(report_period, 4) || case when is_amendment then '/A' else '' end as year"
-            " from f) group by cik"
-        ).fetchall()
-    )
-    expected = {cik: "2022 2023 2024 2025" for cik in ciks} | REPORT_GAPS
-    assert reports == expected, "a company's reports in the set differ from the stated ones"
-    one_quarter_own = con.execute(
-        "select accession_number from f group by accession_number, report_period"
-        " having count(*) filter (where period_end = report_period and quarters = '4') = 0"
-    ).fetchall()
-    annual_as_one_quarter = con.execute(
-        "select a.accession_number, a.period_end from f a join f b"
-        " using (accession_number, concept, unit, period_end, value)"
-        " where a.quarters = '1' and b.quarters = '4'"
-    ).fetchall()
-    assert sorted(one_quarter_own + annual_as_one_quarter) == WRONG_LENGTHS, (
-        "a report whose own year's revenue has no four-quarter length, or an annual figure"
-        " served with a one-quarter length, beyond the known ones"
-    )
-    counts = con.execute(
-        "select count(*), count(distinct cik), count(distinct accession_number),"
-        " count(distinct accession_number) filter (where is_amendment) from f"
-    ).fetchall()[0]
-    restated = con.execute(
-        "select cik, concept, unit, period_end, quarters,"
-        " list(accession_number || ' ' || filing_date || ' ' || value order by filing_date)"
-        " from f group by all having count(distinct value) > 1 order by all"
-    ).fetchall()
-    concepts = con.execute("select concept, count(distinct cik) from f group by all order by all")
-    print(
-        f"facts {counts[0]}, companies {counts[1]}, filings {counts[2]}, amended {counts[3]},"
-        f" restated periods {len(restated)}: {restated}; companies by concept:"
-        f" {concepts.fetchall()}"
-    )
-    assert counts[3] >= 1 and len(restated) >= 1
     axon = con.execute(
         "select accession_number, filing_date, value from f where cik = ? and concept = ?"
         " and period_end = '20231231' and quarters = '4' order by filing_date",

@@ -179,7 +179,6 @@ class Profile(TypedDict):
     suppliers_hashed: int
     rows_hashed: int
     rows_redacted: int
-    references_hashed: int
 
 
 class SpendError(StepError):
@@ -307,5 +306,4 @@ def profile(path: Path) -> Profile:
         ),
         rows_hashed=one("SELECT count(*) FROM s WHERE supplier LIKE 'person:%'"),
         rows_redacted=one("SELECT count(*) FROM s WHERE supplier = 'REDACTED'"),
-        references_hashed=one("SELECT count(*) FROM s WHERE transaction_number LIKE 'id:%'"),
     )
