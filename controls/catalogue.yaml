@@ -77,7 +77,9 @@ controls:
     proven_by:
       - tests/ingest/test_quality.py::test_each_suite_passes_on_its_fixture
       - tests/ingest/test_quality.py::test_each_suite_fails_on_its_fixture_with_one_planted_break
+      - tests/ingest/test_quality.py::test_the_command_exits_non_zero_on_a_break_and_names_each_landed_file_of_a_set
       - tests/ingest/test_quality.py::test_a_break_in_a_name_column_reports_counts_and_never_the_name
+      - tests/ingest/test_quality.py::test_a_column_that_can_hold_a_name_carries_only_rules_whose_result_is_a_count
     status: implemented
   - id: release-ships-as-one-unit
     layer: Change management

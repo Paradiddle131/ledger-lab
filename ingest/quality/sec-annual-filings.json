@@ -9,38 +9,16 @@
       "restated_periods": 4,
       "reports_without_own_revenue": 0,
       "company_reports": [
-        "1020569 2022 2023 2024 2025",
-        "1022079 2022 2023 2024 2025",
-        "1067701 2022 2023 2024 2025",
-        "1069183 2022 2023 2024 2025",
-        "1116463 2022 2023 2024 2025",
-        "1158463 2022 2023 2024 2025",
-        "1321655 2022 2023 2024 2025",
-        "1351636 2022 2024 2025",
-        "1488139 2022 2023 2024",
-        "1759509 2022 2023 2024 2025",
-        "202058 2022 2023 2024 2025",
-        "21175 2022 2023 2024 2025",
-        "26172 2022 2023 2024 2025",
-        "27419 2023 2024 2025 2026",
-        "277509 2022 2023 2024 2025",
-        "68505 2022 2023 2024 2025",
-        "746838 2022 2023 2024 2025",
-        "78814 2022 2023 2024 2025 2025/A",
-        "887936 2022 2023 2024 2025",
-        "9092 2022 2023 2024 2025"
+        "1020569 2022 2023 2024 2025, 1022079 2022 2023 2024 2025, 1067701 2022 2023 2024 2025, 1069183 2022 2023 2024 2025, 1116463 2022 2023 2024 2025, 1158463 2022 2023 2024 2025, 1321655 2022 2023 2024 2025, 1351636 2022 2024 2025, 1488139 2022 2023 2024, 1759509 2022 2023 2024 2025, 202058 2022 2023 2024 2025, 21175 2022 2023 2024 2025, 26172 2022 2023 2024 2025, 27419 2023 2024 2025 2026, 277509 2022 2023 2024 2025, 68505 2022 2023 2024 2025, 746838 2022 2023 2024 2025, 78814 2022 2023 2024 2025 2025/A, 887936 2022 2023 2024 2025, 9092 2022 2023 2024 2025"
       ],
-      "reports_without_annual_length": [
-        "0000202058-26-000015"
-      ],
-      "annual_figures_as_one_quarter": [
-        "0000202058-26-000015 20241231"
+      "wrong_lengths": [
+        "0000202058-26-000015, 0000202058-26-000015 20241231"
       ]
     },
     "names": []
   },
   "expectations": [
-    {"type": "expect_table_columns_to_match_ordered_list", "kwargs": {"column_list": ["cik", "accession_number", "form", "is_amendment", "filing_date", "report_period", "concept", "period_end", "quarters", "unit", "value", "value_number", "filed_on", "filed_in_month", "is_amended_form", "amended_filing", "company_reports", "restated_period", "report_without_own_revenue", "report_without_annual_length", "annual_figure_as_one_quarter"]}, "notes": "Schema: every landed column in order, then the query's own; a landed column more or less breaks it."},
+    {"type": "expect_table_columns_to_match_ordered_list", "kwargs": {"column_list": ["cik", "accession_number", "form", "is_amendment", "filing_date", "report_period", "concept", "period_end", "quarters", "unit", "value", "value_number", "filed_on", "filed_in_month", "is_impossible_period_day", "is_amended_form", "amended_filing", "restated_period", "report_without_own_revenue", "company_reports", "wrong_lengths"]}, "notes": "Schema: every landed column in order, then the query's own; a landed column more or less breaks it."},
     {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "cik", "type_": "str"}, "notes": "Schema: the landing keeps the publisher's text."},
     {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "accession_number", "type_": "str"}, "notes": "Schema: the landing keeps the publisher's text."},
     {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "form", "type_": "str"}, "notes": "Schema: the landing keeps the publisher's text."},
@@ -68,6 +46,8 @@
     {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "filing_date", "regex": "^\\d{8}$"}, "notes": "A date is yyyymmdd."},
     {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "report_period", "regex": "^\\d{8}$"}, "notes": "A date is yyyymmdd."},
     {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "period_end", "regex": "^\\d{8}$"}, "notes": "A date is yyyymmdd."},
+    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "filed_on"}, "notes": "Every filing day is a day the calendar has."},
+    {"type": "expect_column_sum_to_be_between", "kwargs": {"column": "is_impossible_period_day", "min_value": 0, "max_value": 0}, "notes": "Every report period and period end is a day the calendar has."},
     {"type": "expect_column_values_to_be_between", "kwargs": {"column": "filed_on", "min_value": 20230101, "max_value": 20260331}, "notes": "Range: filed in the four pinned quarters' span."},
     {"type": "expect_column_values_to_be_between", "kwargs": {"column": "filed_in_month", "min_value": 1, "max_value": 3}, "notes": "Only reports filed in a first calendar quarter land."},
     {"type": "expect_column_distinct_values_to_equal_set", "kwargs": {"column": "form", "value_set": ["10-K", "10-K/A"]}, "notes": "Annual reports and their amendments."},
@@ -82,9 +62,8 @@
     {"type": "expect_column_unique_value_count_to_be_between", "kwargs": {"column": "cik", "min_value": {"$PARAMETER": "companies"}, "max_value": {"$PARAMETER": "companies"}}, "notes": "Pinned: the companies."},
     {"type": "expect_column_unique_value_count_to_be_between", "kwargs": {"column": "amended_filing", "min_value": {"$PARAMETER": "amended_filings"}, "max_value": {"$PARAMETER": "amended_filings"}}, "notes": "Pinned mess, amendments: the amended reports, landed flagged beside the originals."},
     {"type": "expect_column_unique_value_count_to_be_between", "kwargs": {"column": "restated_period", "min_value": {"$PARAMETER": "restated_periods"}, "max_value": {"$PARAMETER": "restated_periods"}}, "notes": "Pinned mess, restatements: periods whose revenue differs between two filings (Axon's 2022 and 2023, Pitney Bowes's 2022 and 2023)."},
-    {"type": "expect_column_distinct_values_to_equal_set", "kwargs": {"column": "company_reports", "value_set": {"$PARAMETER": "company_reports"}}, "notes": "Pinned: each company's report years in the set, with the gaps of a first-quarter-only landing (Target's year ends in January, SoundThinking filed its 2023 report on 1 April, Ameresco's 2025 report is not in the archive, Pitney Bowes amended its 2025 report)."},
+    {"type": "expect_column_most_common_value_to_be_in_set", "kwargs": {"column": "company_reports", "value_set": {"$PARAMETER": "company_reports"}}, "notes": "Pinned: each company's report years in the set, with the gaps of a first-quarter-only landing (Target's year ends in January, SoundThinking filed its 2023 report on 1 April, Ameresco's 2025 report is not in the archive, Pitney Bowes amended its 2025 report)."},
     {"type": "expect_column_unique_value_count_to_be_between", "kwargs": {"column": "report_without_own_revenue", "min_value": {"$PARAMETER": "reports_without_own_revenue"}, "max_value": {"$PARAMETER": "reports_without_own_revenue"}}, "notes": "Pinned: annual reports with no revenue for the period they report, none on the pinned file; a move to another concept would leave one."},
-    {"type": "expect_column_distinct_values_to_equal_set", "kwargs": {"column": "report_without_annual_length", "value_set": {"$PARAMETER": "reports_without_annual_length"}}, "notes": "Pinned mess, a period length filed wrong: L3Harris's 2025 report gives its own year's revenue no four-quarter length."},
-    {"type": "expect_column_distinct_values_to_equal_set", "kwargs": {"column": "annual_figure_as_one_quarter", "value_set": {"$PARAMETER": "annual_figures_as_one_quarter"}}, "notes": "Pinned mess, a period length filed wrong: L3Harris's 2025 report also serves its 2024 annual revenue as one quarter long."}
+    {"type": "expect_column_most_common_value_to_be_in_set", "kwargs": {"column": "wrong_lengths", "value_set": {"$PARAMETER": "wrong_lengths"}}, "notes": "Pinned mess, a period length filed wrong, each listed as often as it occurs: L3Harris's 2025 report gives its own year's revenue no four-quarter length, and also serves its 2024 annual revenue as one quarter long."}
   ]
 }

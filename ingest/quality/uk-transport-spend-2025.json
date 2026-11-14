@@ -46,6 +46,7 @@
     {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "transaction_number"}, "notes": "Every row has a reference, in clear, hashed or `#`."},
     {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "amount"}, "notes": "Every payment has an amount."},
     {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "date", "regex": "^\\d{2}/\\d{2}/\\d{4}$"}, "notes": "A date is day, month and year."},
+    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "paid_on"}, "notes": "Every payment is dated with a day the calendar has."},
     {"type": "expect_column_values_to_be_between", "kwargs": {"column": "paid_on", "min_value": 20250401, "max_value": 20260331}, "notes": "Range: fiscal year 2025, April 2025 to March 2026."},
     {"type": "expect_column_values_to_be_between", "kwargs": {"column": "months_of_file", "min_value": 1, "max_value": 1}, "notes": "Every file's rows fall in one month."},
     {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "amount", "regex": "^-?\\d+(?:\\.\\d{1,2})?$"}, "notes": "An amount is the publisher's digits, with no pound sign or thousands commas."},

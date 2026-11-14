@@ -10,8 +10,13 @@ A suite covers the file's schema (its columns in order, and their types), the ke
 null, the shapes and ranges of its values, and its known mess: each mess threshold is an exact
 count measured on the file the pins in `ingest/sources.yaml` serve, a suite parameter
 (`{"$PARAMETER": <name>}`) whose value there is the suite's `meta.pinned`, so a count that moves
-fails the check, and a re-pin, a reviewed change, re-measures it. A test passes the values its own
-fixture holds instead.
+fails the check. Each pinned rule is written so its report line prints the value it observed (a
+count, a sum, a maximum, or a list written as one text and read as the column's most common
+value), never only how many rows broke it. To re-measure after a re-pin: land the source, run
+`uv run python -m ingest.quality <source>`, read each failing pinned rule's observed value,
+confirm the move is the publisher's change and not a broken landing, copy the value into
+`meta.pinned` and run the command again until it passes; the diff of `meta.pinned` is the
+reviewed change. A test passes the values its own fixture holds instead.
 
 Columns that can hold a name, or a keyed hash of one, are the suite's `meta.names`: they carry only
 rules whose result is a count (a test holds every suite to it), and a failed rule's result keeps
@@ -151,7 +156,7 @@ def check(source: str, path: Path, parameters: dict[str, Any] | None = None) -> 
         frame = batch(the, path)
     except duckdb.Error as error:
         # A column the query reads is missing or of another type: a schema break. DuckDB's
-        # message names columns and types, never a value.
+        # message can quote a value, so only its class is reported.
         return [f"FAIL schema: the suite's query cannot read the file ({type(error).__name__})"]
     return report(the, validate(the, frame, parameters))
 
@@ -173,8 +178,10 @@ def report(the: Suite, result: ExpectationSuiteValidationResult) -> list[str]:
         kind, column = config.type, config.kwargs.get("column")
         what = f"{kind} on {column}" if column else kind
         found, observed = outcome.result or {}, (outcome.result or {}).get("observed_value")
-        if raised(outcome.exception_info or {}) or not found:
-            # GX's exception message can quote the data, so only the fact is reported.
+        evaluated = not raised(outcome.exception_info or {}) and bool(found)
+        if not evaluated:
+            # GX's exception message can quote the data, so only the fact is reported, as a
+            # failure whatever GX's own verdict.
             detail = "could not be evaluated"
         elif observed is not None:
             detail = f"observed {observed}"
@@ -185,7 +192,7 @@ def report(the: Suite, result: ExpectationSuiteValidationResult) -> list[str]:
                 f"{found.get('unexpected_count', 0)} values not in the set,"
                 f" {found.get('missing_count', 0)} of the set missing"
             )
-        lines.append(f"{'ok' if outcome.success else 'FAIL'} {what}: {detail}")
+        lines.append(f"{'ok' if outcome.success and evaluated else 'FAIL'} {what}: {detail}")
     return sorted(lines, key=lambda line: (not line.startswith("FAIL"), line))
 
 

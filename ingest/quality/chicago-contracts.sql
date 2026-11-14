@@ -1,9 +1,9 @@
 -- The landed contracts, every column as landed, then what the suite's rules read: the award as a
--- number and the approval day as a yyyymmdd number; how many rows the contract has, and a
+-- number and the approval day as a yyyymmdd number, null for a day no calendar has; how many rows the contract has, and a
 -- contract's number on its first row when it has several; the order number's format (a digit as
 -- 9, a letter as A); whether the award is negative or zero, the revision number not a number, the
 -- row a further copy of a revision already listed, a start or end year outside 1900 to 2099, or
--- the end before the start; whether the vendor id is missing; whether the vendor name is hashed,
+-- the end before the start, or a start or end day no calendar has; whether the vendor id is missing; whether the vendor name is hashed,
 -- and the vendor id hashed where the name is not or the other way round; the hashed name; and
 -- whether a hashed row kept what describes the vendor.
 with numbered as (
@@ -22,7 +22,7 @@ with numbered as (
 select
     * exclude (row_of_contract, row_of_revision),
     try_cast(award_amount as decimal(18, 2)) as award,
-    cast(replace(left(approval_date, 10), '-', '') as integer) as approved_on,
+    cast(strftime(try_strptime(approval_date, '%Y-%m-%dT%H:%M:%S.%g'), '%Y%m%d') as integer) as approved_on,
     case
         when rows_of_contract > 1 and row_of_contract = 1 then purchase_order_contract_number
     end as contract_with_several_rows,
@@ -38,6 +38,10 @@ select
         or left(end_date, 4) not between '1900' and '2099' as integer
     ) as is_implausible_year,
     cast(end_date < start_date as integer) as is_end_before_start,
+    cast(
+        (start_date is not null and try_strptime(start_date, '%Y-%m-%dT%H:%M:%S.%g') is null)
+        or (end_date is not null and try_strptime(end_date, '%Y-%m-%dT%H:%M:%S.%g') is null) as integer
+    ) as is_impossible_start_or_end,
     cast(vendor_id is null as integer) as is_without_vendor_id,
     vendor_name like 'person:%' as is_hashed_vendor,
     cast(
