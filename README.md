@@ -21,9 +21,9 @@ It turns public purchase-to-pay records into certified data products, gives each
 | Dutch central government budget and outturn | a third entity, in euros, with several budget moments a year |
 | European Central Bank reference rates | currency translation |
 | GLEIF legal-entity register | matching vendor names to legal entities |
-| Annual filings of listed companies, from the regulator | an independent figure to tie out against |
+| Annual filings of listed companies, from the regulator | an independent figure to tie out against: the revenue twenty listed vendors reported in their annual reports, each restated or amended value beside the original |
 
-Every figure is a public record, fetched by a script that checks it against a recorded checksum; no data is committed but a sample whose licence allows it and a test needs (a fortnight of ECB rates).
+Every figure is a public record, fetched by a script that checks it against a recorded checksum; no data is committed but a sample whose licence allows it and a test needs (a fortnight of ECB rates, some rows of the Dutch budget statements, some rows of Chicago's contracts and payments, some rows of the UK Department for Transport's spend, and a few rows of the regulator's filings).
 The ledger is derived: an open-source ERP posts the real documents into journal lines, and every derived row says so.
 Individuals among vendors are hashed before anything is written.
 
@@ -38,13 +38,17 @@ Legal-entity records come from the GLEIF golden copy under [CC0 1.0](https://cre
 What lands here is a subset the lab derives from it (three countries, selected fields), not GLEIF's own data, and GLEIF does not endorse this project.
 Records that may name a person (sole proprietors, partnerships that are no separate legal person, and records without a real legal-form code whose legal name is not evidence of an organisation) and person-like other names are left out; legal names of records with a real legal-form code land as the register records them, and a record without a real legal-form code never vouches that a name is an organisation.
 
+Annual filings come from the U.S. Securities and Exchange Commission's [Financial Statement Data Sets](https://www.sec.gov/data-research/sec-markets-data/financial-statement-data-sets): information on sec.gov is public and may be copied or further distributed ([privacy and dissemination](https://www.sec.gov/privacy)); Source: U.S. Securities and Exchange Commission (EDGAR).
+What lands is the lab's subset of four quarterly files (twenty companies' revenue), not the SEC's own data, and the SEC does not endorse this project.
+The fetch sends four requests, one at a time, under a fixed client name, within the SEC's [fair-access rules](https://www.sec.gov/os/accessing-edgar-data).
+
 The UK Department for Transport's spending over £25,000 comes from its monthly files on [GOV.UK](https://www.gov.uk/government/collections/dft-departmental-spending-over-25000): Contains public sector information licensed under the [Open Government Licence v3.0](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).
 What lands is the twelve files of one fiscal year in one shape, with every supplier who may be a person hashed and what describes or locates them left out.
 
 To land a source, run its line below; a source that names people (Chicago's contracts and payments, the UK spend) also needs `LEDGER_LAB_HASH_KEY` set (see `ingest/individuals.py`) and the legal-entity register landed first, since a payee the register vouches for as an organisation lands in clear (see `ingest/entities.py`).
-With one key, a name hashes the same in every landing.
+With one key, a name hashes the same in every landing; a new key changes every hash, and with it the `payment_key` of each payments-mart row whose payee is hashed, since the key hashes the row as landed.
 A set's name lands every source whose name it prefixes (`<set>-<member>`) as one file, through the set's step, once every member has verified.
-The landed tests need the key the files were landed with for Chicago, and the network for the UK spend, whose files they download again; the pages test reads each pinned UK month's GOV.UK page:
+The landed tests need the key the files were landed with for Chicago, and the network for the UK spend, whose files they download again; the pages test reads each pinned UK month's GOV.UK page, and the filings' company-list test builds the vendor matching over the vendors' landed sources and register:
 
 ```bash
 uv run python -m ingest.fetch gleif-legal-entities  # lands landing/gleif-legal-entities as Parquet
@@ -52,6 +56,7 @@ uv run python -m ingest.fetch chicago             # lands landing/chicago-contra
 uv run python -m ingest.fetch ecb-rates           # lands landing/ecb-rates as Parquet
 uv run python -m ingest.fetch nl-government-budget  # lands landing/nl-government-budget as Parquet
 uv run python -m ingest.fetch uk-transport-spend-2025  # lands April 2025 to March 2026 as one Parquet set
+uv run python -m ingest.fetch sec-annual-filings  # lands the listed companies' annual-report revenue from four quarters as Parquet
 uv run pytest -m landed                          # profiles what is landed and checks it for hashed names left in clear
 uv run pytest -m pages                           # fails once GOV.UK lists another file or a change note for a pinned month
 ```
@@ -66,13 +71,14 @@ make check        # lint, types, tests, process-id and owner checks, secret scan
 make fresh-clone  # clone HEAD and prove it holds no secret, identifier or data
 ```
 
-The dbt models build on DuckDB in the session by default, reading the landed Chicago, UK and legal-entity files in place under `LEDGER_LAB_LANDING`; setting `LEDGER_LAB_GCP_PROJECT` (with `uv sync --group bigquery`) moves them to BigQuery:
+The dbt models build on DuckDB in the session by default, reading the landed files in place under `LEDGER_LAB_LANDING`; setting `LEDGER_LAB_GCP_PROJECT` (with `uv sync --group bigquery`) moves them to BigQuery:
 
 ```bash
 uv run dbt build --project-dir models --profiles-dir models
 ```
 
-Currency translation reads the ECB rates the fetch kit landed (`python -m ingest.fetch ecb-rates`), and the build fails on a missing file; the tests pass `--vars '{ecb_rates: sample}'` to read a committed fortnight of real rates instead, and `uv run pytest -m landed` runs the translation rules over the landed file.
+Every model that reads a fetched source reads the file the fetch kit landed (`python -m ingest.fetch ecb-rates`, `python -m ingest.fetch nl-government-budget`, for the payments mart `chicago` and `uk-transport-spend-2025`, and for the vendors' legal entities `chicago`, `uk-transport-spend-2025` and `gleif-legal-entities`), and the build fails on a missing file; the tests pass `--vars '{source_rows: sample}'` to read the committed samples of real rows instead (a fortnight of ECB rates, Dutch budget rows chosen for their mess, and Chicago contract and payment rows and UK spend rows of companies, each landed through its landing step with a test hash key), and `uv run pytest -m landed` runs the translation and budget rules over the landed files.
+The Dutch budget against outturn shows the figures as the file serves them: a zero the file may serve in place of a figure is flagged on its line (`has_doubtful_zero`), and the landed tests count the figures the file serves wrong.
 
 Each source is fetched by name from [`ingest/sources.yaml`](ingest/sources.yaml), which records its URL or pinned query, SHA-256, licence link, publisher and whether it names people; the file lands under `LEDGER_LAB_LANDING` (default `landing/`, outside git) only when its checksum matches, and the command exits non-zero otherwise:
 

@@ -3,6 +3,7 @@
 -- supplier and transaction number as landed (a possible person's both keyed hashes).
 -- The date is rebuilt from its served `dd/mm/yyyy` as an ISO date, and both casts are safe ones,
 -- so a value that does not cast is a null the not-null tests name, never a dropped row.
+-- The `source_rows` var picks the rows: the landed set or the committed sample of real rows.
 select
     source_file,
     source_row,
@@ -14,4 +15,4 @@ select
     {{ dbt.safe_cast('amount', dbt.type_numeric()) }} as amount,
     supplier,
     transaction_number
-from {{ source('landing', 'uk-transport-spend-2025') }}
+from {{ landed_or_sample('landing', 'uk-transport-spend-2025', 'uk_transport_spend_sample') }}

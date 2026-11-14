@@ -1,10 +1,16 @@
-# Real rows of the Department for Transport's spending over £25,000 for fiscal year 2025, one for
-# each UK supplier of the labelled vendor sample (`vendor_sample.yaml`), with two rows of one file
-# sharing the placeholder `#` and one transaction number in two files: Contains public sector
+# Real rows of the Department for Transport's spending over £25,000 for fiscal year 2025: one for
+# each UK supplier of the labelled vendor sample (`vendor_sample.yaml`), two rows of one file sharing
+# the placeholder `#`, one transaction number in two files, two consecutive rows identical in every
+# served cell, and four rows of three companies in clear only on the real register's word. Companies whose name the
+# classifier cannot read as one party and the vendor seeds' register does not vouch for
+# (`HASHED_COMPANIES` in `test_uk_transport.py`) the step hashes with the test key, as a real
+# landing hashes any supplier without evidence. Contains public sector
 # information licensed under the Open Government Licence v3.0. Every supplier is a company in clear
-# in the landed files. Each row is its file name, paying body, date, supplier, transaction number
-# and amount as served; the expense type, expense area, description and postal code are left out.
-# The fixture landing serves them again through the landing step (`uk_transport_sample.py`).
+# in the landed files; no person and no hash is committed here. Each row is its file name, paying
+# body, date, supplier, transaction number and amount as served; the expense type, expense area,
+# description and postal code are left out, since no model reads them. The UK sample seed
+# (`models/seeds/staging/uk_transport/uk_transport_spend_sample.csv`) is these rows as the landing
+# step lands them with a test key, and a test lands them again and holds the seed to it.
 rows:
   - ["dft-spending-over-25000-april-2025.csv", "National Highways", "23/04/2025", "Colas Limited", "1021398", "£310,372.17"]
   - ["dft-spending-over-25000-april-2025.csv", "National Highways", "07/04/2025", "AECOM LIMITED", "1018588", "£146,403.72"]
@@ -57,3 +63,9 @@ rows:
   - ["dft-spending-over-25000-march-2026.csv", "National Highways", "25/03/2026", "Capgemini UK PLC", "1078101", "£999,421.64"]
   - ["dft-spending-over-25000-march-2026.csv", "High Speed Two (HS2) Limited", "20/03/2026", "LEGAL AND GENERAL ASSURANCE SOCIETY LIMITED", "#", "£722,309.00"]
   - ["dft-spending-over-25000-march-2026.csv", "Driver & Vehicle Licensing Agency", "31/03/2026", "ROYAL MAIL GROUP LIMITED", "2000036648", "£160,753.54"]
+  - ["dft-spending-over-25000-may-2025.csv", "High Speed Two (HS2) Limited", "28/05/2025", "FCC RECYCLING (UK) LIMITED", "#", "£4,951,966.99"]
+  - ["dft-spending-over-25000-may-2025.csv", "High Speed Two (HS2) Limited", "28/05/2025", "FCC RECYCLING (UK) LIMITED", "#", "£389,511.70"]
+  - ["dft-spending-over-25000-september-2025.csv", "Driver & Vehicle Licensing Agency", "01/09/2025", "Software AG (UK) Limited", "2000013046", "£25,779.82"]
+  - ["dft-spending-over-25000-november-2025.csv", "Department for Transport", "27/11/2025", "E.ON Drive Solutions UK Limited", "2000023607", "£31,500.00"]
+  - ["dft-spending-25k-jan-26.csv", "Department for Transport", "15/01/2026", "KONECTBUS LTD", "2000027931", "£224,914.25"]
+  - ["dft-spending-25k-jan-26.csv", "Department for Transport", "15/01/2026", "KONECTBUS LTD", "2000027931", "£224,914.25"]

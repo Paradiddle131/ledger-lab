@@ -16,7 +16,8 @@ select
     versions.transaction_number as document_number,
     cast(null as {{ dbt.type_string() }}) as contract_number,
     cast(null as {{ dbt.type_numeric() }}) as award_after_revisions,
-    'uk-transport-spend-2025' as source_table
+    'uk-transport-spend-2025' as source_table,
+    false as is_repeat
 from {{ ref('int_uk_transport__payment_versions') }} as versions
 left join {{ ref('fiscal_calendar') }} as fiscal_calendar
     on

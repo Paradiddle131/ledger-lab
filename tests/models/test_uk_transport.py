@@ -2,11 +2,13 @@
 every landed version of a month kept, and the latest version of each month as payments on the UK's
 April to March periods.
 
-The fixture build lands the committed real rows and invented people through the landing step
-(`uk_transport_sample.py`); the landed tests build the same models over the real landing.
+The sample build reads the UK sample seed: the committed real rows (`uk_transport_sample.yaml`)
+as the landing step lands them with a test key, which a test here lands again and holds the seed
+to. The landed tests build the same models over the real landing.
 """
 
 import calendar
+from collections import Counter
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -18,9 +20,10 @@ import pytest
 
 from ingest import fetch
 from ingest.entities import REGISTER
-from ingest.uk_transport.spend import SET
+from ingest.individuals import person_hasher
+from ingest.uk_transport.spend import COLUMNS, SET
 from tests.models.dbt_build import PROJECT, Build, built, query
-from tests.models.uk_transport_sample import PEOPLE, sample_rows
+from tests.models.uk_transport_sample import TEST_KEY, landed, sample_rows, seed_rows
 
 CONTENT_API = "https://www.gov.uk/api/content/government/publications/dft-spending-over-25000-"
 FILES = PROJECT / "seeds" / "staging" / "uk_transport" / "uk_transport_spend_files.csv"
@@ -39,15 +42,41 @@ SHAPE = [
     "contract_number",
     "award_after_revisions",
     "source_table",
+    "is_repeat",
 ]
+# Companies of the sample whose name the classifier cannot read as one party (a `&`, a `+`, a
+# bracket, no legal form) that the vendor seeds' register does not vouch for: the landing hashes
+# them with the test key, as a real landing hashes any supplier without evidence.
+HASHED_COMPANIES = {
+    "COMPUTACENTER (UK) LIMITED",
+    "E.ON Drive Solutions UK Limited",
+    "FCC RECYCLING (UK) LIMITED",
+    "KUEHNE + NAGEL LIMITED",
+    "LEGAL AND GENERAL ASSURANCE SOCIETY LIMITED",
+    "S&P Global Limited",
+    "Software AG (UK) Limited",
+    "TotalEnergies Gas & Power Limited",
+}
 
 
 def landed_sum(path: Path) -> tuple[int, Decimal]:
     """The landed set's rows and the sum of its amounts, read with Python's own decimal parsing of
     the publisher's digits, not the models' cast."""
-    landed = duckdb.connect().execute("select amount from read_parquet(?)", [str(path)])
-    amounts = [str(a) for (a,) in landed.fetchall()]
+    rows = duckdb.connect().execute("select amount from read_parquet(?)", [str(path)])
+    amounts = [str(a) for (a,) in rows.fetchall()]
     return len(amounts), sum((Decimal(a) for a in amounts), Decimal(0))
+
+
+def test_the_uk_seed_is_the_sample_as_the_landing_lands_it() -> None:
+    """The seed holds exactly what the landing's step writes for the committed rows with the test
+    key: the companies in clear, those the register does not vouch for hashed with that key."""
+    assert Counter(seed_rows()) == Counter(landed())
+    assert not any(c.startswith(("person:", "id:")) for r in sample_rows() for c in r)
+    assert {r[3] for r in sample_rows()} >= HASHED_COMPANIES
+    as_person = person_hasher(TEST_KEY)
+    supplier = COLUMNS.index("supplier")
+    hashed = {r[supplier] for r in seed_rows() if str(r[supplier]).startswith("person:")}
+    assert hashed == {as_person(name) for name in HASHED_COMPANIES}
 
 
 def columns(build: Build, model: str) -> list[str]:
@@ -67,9 +96,8 @@ def test_the_payments_model_has_the_shared_shape_in_order(build: Build) -> None:
 
 
 def test_every_landed_row_is_a_payment_and_the_sums_agree(build: Build) -> None:
-    landing = Path(build.env["LEDGER_LAB_LANDING"]) / SET
-    rows, total = landed_sum(landing)
-    assert rows == len(sample_rows())
+    amounts = [Decimal(r[-1].removeprefix("£").replace(",", "")) for r in sample_rows()]
+    rows, total = len(amounts), sum(amounts, Decimal(0))
     for model in ("stg_uk_transport__spend", "int_uk_transport__payment_versions"):
         assert query(build, f"select count(*), sum(amount) from {model}") == [(rows, total)]  # noqa: S608
     assert query(build, "select count(*), sum(amount) from int_uk_transport__payments") == [
@@ -118,22 +146,49 @@ def test_the_payment_key_is_the_entity_file_and_row_and_unique(build: Build) -> 
     assert shared[0][0] > 1 and shared[0][0] == shared[0][1]
 
 
-def test_a_person_stays_hashed_with_a_hashed_document_number(build: Build) -> None:
+def test_a_hashed_supplier_has_a_hashed_document_number(build: Build) -> None:
     rows = query(
         build,
         "select vendor_name, document_number from int_uk_transport__payments"
-        " where vendor_is_hashed order by payment_date",
+        " where vendor_is_hashed",
     )
-    people = [p for p in PEOPLE if p[3] != "REDACTED"]
-    assert len(rows) == len(people)
+    assert len(rows) == sum(r[3] in HASHED_COMPANIES for r in sample_rows())
     assert all(n.startswith("person:") and d.startswith("id:") for n, d in rows)
-    assert rows[0] == rows[-1], "one person under one number hashes the same in two files"
-    redacted = query(
+    clear = {n for (n,) in query(build, "select vendor_name from int_uk_transport__payments")}
+    assert not clear & HASHED_COMPANIES
+
+
+def test_two_identical_served_rows_stay_two_payments_and_neither_is_a_repeat(
+    build: Build,
+) -> None:
+    rows = query(
         build,
-        "select vendor_is_hashed, document_number like 'id:%' from int_uk_transport__payments"
-        " where vendor_name = 'REDACTED'",
+        "select payment_key, amount from int_uk_transport__payments"
+        " where document_number = '2000027931' order by payment_key",
     )
-    assert redacted == [(False, True)]
+    assert len(rows) == 2 and rows[0][0] != rows[1][0] and rows[0][1] == rows[1][1]
+    repeats = "select count(*) from int_uk_transport__payments where is_repeat"
+    assert query(build, repeats) == [(0,)]
+
+
+def test_the_mart_holds_every_uk_payment_once_in_pounds(build: Build) -> None:
+    per_entity = dict(query(build, "select entity_id, count(*) from payments group by 1"))
+    uk = query(build, "select count(*) from int_uk_transport__payments")[0][0]
+    chicago = query(build, "select count(*) from stg_chicago__payments")[0][0]
+    assert per_entity == {"chicago": chicago, "uk-transport": uk}
+    assert uk == len(sample_rows())
+    assert query(
+        build,
+        "select distinct currency, source_table from payments where entity_id = 'uk-transport'",
+    ) == [("GBP", "uk-transport-spend-2025")]
+    assert query(build, "select count(*), count(distinct payment_key) from payments") == [
+        (chicago + uk, chicago + uk)
+    ]
+    assert query(
+        build,
+        "select count(*) from payments as m join int_uk_transport__payments as u"
+        " using (payment_key) where m.amount = u.amount and m.payment_date = u.payment_date",
+    ) == [(uk,)]
 
 
 def test_the_revision_unit_tests_and_the_rules_ran_and_passed(build: Build) -> None:
@@ -148,6 +203,9 @@ def test_the_revision_unit_tests_and_the_rules_ran_and_passed(build: Build) -> N
         "dates_in_fiscal_calendar_int_uk_transport__payments_payment_date",
         "unique_int_uk_transport__payments_payment_key",
         "not_null_int_uk_transport__payment_versions_published_at",
+        "every_served_payment_is_one_row",
+        "unique_payments_payment_key",
+        "a_vendor_is_flagged_hashed_exactly_when_it_is",
     ):
         assert build.results.get(name) == "pass", name
 
@@ -197,7 +255,7 @@ def real(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Build]:
     for name in (SET, REGISTER, "chicago-contracts", "chicago-payments"):
         if not (landing / name).exists():
             pytest.skip(f"{name} is not landed")
-    yield built(tmp_path_factory.mktemp("dbt"), landing)
+    yield built(tmp_path_factory.mktemp("dbt"), "landed", landing)
 
 
 @pytest.mark.landed
@@ -244,3 +302,43 @@ def test_each_real_month_is_one_uk_period_of_fiscal_2025(real: Build) -> None:
         2753, 2396, 2346, 2586, 2353, 2352, 2715, 2446, 2626, 2426, 2511, 3593
     ]  # fmt: skip
     assert all(lo.month == hi.month for _, _, _, lo, hi in by_period)
+
+
+@pytest.mark.landed
+def test_the_real_mart_holds_each_entity_once_and_no_uk_row_is_a_repeat(real: Build) -> None:
+    per_entity = query(
+        real,
+        "select entity_id, currency, count(*), count(distinct payment_key),"
+        " count(*) filter (where is_repeat) from payments group by all order by all",
+    )
+    print("mart by entity (currency, rows, keys, repeats):", per_entity)
+    assert [r for r in per_entity if r[0] == "uk-transport"] == [
+        ("uk-transport", "GBP", 31_103, 31_103, 0)
+    ]
+    total = query(real, "select count(*), count(distinct payment_key) from payments")[0]
+    assert total[0] == total[1] == sum(r[2] for r in per_entity)
+
+
+@pytest.mark.landed
+def test_the_real_identical_rows_are_consecutive_under_one_number(real: Build) -> None:
+    """The evidence on `is_repeat`: rows identical in every landed cell within their file, 121 rows
+    in 56 groups, every group consecutive rows under one transaction number, 33 of the groups
+    hashed rows whose served descriptions the landing dropped; nothing ties them to a total."""
+    path = Path(real.env["LEDGER_LAB_LANDING"]) / SET
+    cells = ", ".join(c for c in COLUMNS if c not in ("source_file", "source_row"))
+    groups = (
+        duckdb.connect()
+        .execute(
+            "select count(*), max(source_row) - min(source_row) + 1,"  # noqa: S608
+            " case when any_value(transaction_number) = '#' then '#'"
+            " when any_value(transaction_number) like 'id:%' then 'hashed' else 'number' end"
+            f" from read_parquet(?) group by source_file, {cells} having count(*) > 1",
+            [str(path)],
+        )
+        .fetchall()
+    )
+    rows = sum(n for n, _, _ in groups)
+    print("identical groups, rows, extra copies:", len(groups), rows, rows - len(groups))
+    assert (len(groups), rows) == (56, 121)
+    assert all(n == span for n, span, _ in groups), "every group is consecutive rows"
+    assert Counter(kind for _, _, kind in groups) == {"number": 21, "#": 2, "hashed": 33}

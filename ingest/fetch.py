@@ -43,6 +43,7 @@ from ingest import StepError
 from ingest.chicago import together
 from ingest.ecb import rates
 from ingest.entities import REGISTER
+from ingest.filings import facts
 from ingest.gleif import legal_entities
 from ingest.nl_government import budget
 from ingest.uk_transport import spend
@@ -79,6 +80,7 @@ STEPS: dict[str, Callable[[bytes], bytes]] = {
 SET_STEPS: dict[str, Callable[[dict[str, bytes]], bytes | dict[str, bytes]]] = {
     spend.SET: spend.step,
     together.SET: together.step,
+    facts.SET: facts.step,
 }
 # The sets whose steps read the landed legal-entity register; the kit refuses them before any
 # download while it is not landed.
@@ -193,9 +195,10 @@ def land_all(name: str, files: dict[Path, bytes]) -> list[Path]:
     Each file is written whole to a hidden temporary file beside its place; then each file already
     landed there is moved aside to a hidden name, and the new ones are renamed into place. If any
     of that fails, the new files are removed and the old ones moved back, so the landing holds
-    either every new file or every old one. A process killed outright mid-way leaves the hidden
-    files behind, and a place it had emptied stays empty, never holding an old file beside a new
-    one; landing again replaces them all."""
+    either every new file or every old one; if moving them back fails too, the old files are kept
+    under their hidden names, which the error names, never deleted. A process killed outright
+    mid-way leaves the hidden files behind, and a place it had emptied stays empty, never holding
+    an old file beside a new one; landing again replaces them all."""
     partials: dict[Path, Path] = {}
     aside: dict[Path, Path] = {}
     placed: list[Path] = []
@@ -214,11 +217,19 @@ def land_all(name: str, files: dict[Path, bytes]) -> list[Path]:
             partial.replace(path)
             placed.append(path)
     except OSError as error:
-        for landed in placed:
-            landed.unlink(missing_ok=True)
-        for landed, old in aside.items():
-            old.replace(landed)
-        aside.clear()
+        try:
+            for landed in placed:
+                landed.unlink(missing_ok=True)
+            for landed, old in list(aside.items()):
+                old.replace(landed)
+                del aside[landed]
+        except OSError:
+            kept = ", ".join(old.name for old in aside.values())
+            aside.clear()  # the old files stay where they were moved aside
+            raise FetchError(
+                f"{name}: cannot write {path}: {error.strerror}, nor move back what it replaced,"
+                f" which is kept as {kept}"
+            ) from None
         raise FetchError(f"{name}: cannot write {path}: {error.strerror}") from None
     finally:
         for leftover in [*partials.values(), *aside.values()]:

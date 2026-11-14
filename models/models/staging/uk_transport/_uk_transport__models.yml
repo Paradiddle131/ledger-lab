@@ -65,3 +65,27 @@ seeds:
         description: The time the page published the file, in UTC.
         data_tests:
           - not_null
+
+  - name: uk_transport_spend_sample
+    description: >
+      Real rows of the Department's spend for the builds inside `make check`, read when the
+      `source_rows` var is `sample`: the rows in `tests/models/uk_transport_sample.yaml` (companies
+      only; expense type, area, description and postal code left out, since no model reads them)
+      as the landing's step lands them with a test hash key, so its hashed suppliers (companies the
+      test register does not vouch for) carry that key's hashes, never the real one's; a test
+      lands the rows again and holds this file to it. Contains public sector information licensed
+      under the Open Government Licence v3.0.
+    config:
+      column_types:
+        source_file: string
+        source_row: bigint
+        department_family: string
+        entity: string
+        date: string
+        expense_type: string
+        expense_area: string
+        supplier: string
+        transaction_number: string
+        item_text: string
+        amount: string
+        postal_code: string

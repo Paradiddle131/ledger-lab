@@ -42,11 +42,10 @@ def landed_file(name: str) -> Path:
 
 @pytest.fixture(scope="session")
 def build(tmp_path_factory: pytest.TempPathFactory) -> "Build":
-    """The whole dbt project built once over the fixture landing (`tests/models/dbt_build.py`)."""
-    from tests.models.dbt_build import built, fixture_landing
+    """The whole dbt project built once over the committed samples (`tests/models/dbt_build.py`)."""
+    from tests.models.dbt_build import built
 
-    tmp_path = tmp_path_factory.mktemp("dbt")
-    return built(tmp_path, fixture_landing(tmp_path / "landing"))
+    return built(tmp_path_factory.mktemp("dbt"), "sample")
 
 
 def load_access() -> dict[str, Any]:
