@@ -121,6 +121,8 @@ controls:
       - tests/semantics/test_metric_versions.py::test_a_changed_definition_under_the_same_version_fails_the_gate
       - tests/semantics/test_metric_versions.py::test_a_metric_read_in_a_filter_is_part_of_the_definition
       - tests/semantics/test_metric_versions.py::test_a_definition_dbt_reads_otherwise_or_cannot_read_fails_the_gate
+      - tests/semantics/test_metric_versions.py::test_a_metric_reading_a_dbt_var_fails_even_when_only_the_var_changes
+      - tests/semantics/test_metric_versions.py::test_a_metric_on_a_model_entry_is_compared_too
       - tests/semantics/test_metric_versions.py::test_a_file_reached_by_a_link_or_outside_the_tree_fails_the_gate
       - tests/semantics/test_metric_versions.py::test_a_metric_without_a_version_an_owner_or_its_promise_fails_the_comparison
       - tests/semantics/test_metric_versions.py::test_a_version_that_goes_down_fails_the_comparison

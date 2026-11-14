@@ -458,6 +458,26 @@ def test_a_definition_dbt_reads_otherwise_or_cannot_read_fails_the_gate(
         assert each in report, report
 
 
+def test_a_metric_reading_a_dbt_var_fails_even_when_only_the_var_changes(tmp_path: Path) -> None:
+    """A definition that reads a dbt variable is refused on `origin/main` too, so a change of the
+    variable alone cannot move the number under the same version."""
+    main = changed_from(
+        REAL,
+        both(
+            replaced(
+                CONTRACTS,
+                FIXED_AWARD_EXPR,
+                "expr: \"case when award_held_to > {{ var('award_floor') }} then"
+                ' award_held_to end"',
+            ),
+            replaced(PROJECT_FILE, "vars:\n", "vars:\n  award_floor: 0\n"),
+        ),
+    )
+    edit = replaced(PROJECT_FILE, "  award_floor: 0\n", "  award_floor: 1000000\n")
+    with pytest.raises(versions.GateError, match="holds dbt Jinja at measures.0.expr"):
+        versions.check(working(tmp_path, edit, main))
+
+
 def test_a_file_reached_by_a_link_or_outside_the_tree_fails_the_gate(tmp_path: Path) -> None:
     linked = working(tmp_path / "link", lambda files: None)
     outside = tmp_path / "outside.yml"
@@ -680,13 +700,10 @@ def test_no_version_fails_against_a_main_without_versions(committed: Block) -> N
 
 
 PASSES: dict[str, Edit] = {
-    "no change": lambda files: None,
-    "comments, another key order and folding": both(
+    "comments, another key order and folding, and a file moved to another folder dbt reads": both(
         replaced(CONTRACTS, "\nmetrics:", "\n# A comment.\nmetrics:"),
         metric("remaining_commitment", lambda b: None),
-    ),
-    "a metric file moved to another folder dbt reads": moved(
-        CONTRACTS, "models/macros/contracts.yml"
+        moved(CONTRACTS, "models/macros/contracts.yml"),
     ),
 }
 
@@ -794,20 +811,25 @@ def test_two_branches_publishing_one_version_cannot_both_pass(tmp_path: Path) ->
     assert lines(report) == still("spend_against_award", at=2), report
 
 
-def test_the_command_exits_non_zero_on_a_break_and_zero_without(tmp_path: Path) -> None:
-    """`python semantics/versions.py`, as `make metric-versions` runs it, in a clone of its own."""
+def test_the_command_exits_non_zero_on_a_break_and_zero_without(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`python semantics/versions.py`, as `make metric-versions` runs it, in a clone of its own,
+    exits 1 on a break; its entry exits 0 on a pass and 1 when the comparison cannot be made."""
     env = {k: v for k, v in os.environ.items() if k != "LEDGER_LAB_GCP_PROJECT"}
-
-    def gate(repo: Path) -> subprocess.CompletedProcess[str]:
-        command = [sys.executable, "-I", str(repo / "semantics/versions.py")]
-        return subprocess.run(command, cwd=repo, capture_output=True, text=True, env=env)
-
-    same = gate(working(tmp_path / "same", lambda files: None))
-    assert same.returncode == 0, same.stderr
-    assert "16 metrics keep their versions against origin/main" in same.stdout
-    broken = gate(working(tmp_path / "broken", replaced(CONTRACTS, FIXED_AWARD_EXPR, NEW_EXPR)))
+    repo = working(tmp_path, replaced(CONTRACTS, FIXED_AWARD_EXPR, NEW_EXPR))
+    command = [sys.executable, "-I", str(repo / "semantics/versions.py")]
+    broken = subprocess.run(command, cwd=repo, capture_output=True, text=True, env=env)
     assert broken.returncode == 1, broken.stdout
     assert still("fixed_award", "spend_against_award") == lines(broken.stderr)
+
+    def cannot() -> tuple[bool, str]:
+        raise versions.GateError("cannot")
+
+    assert versions.main([], run=lambda: (True, "passes")) == 0
+    assert versions.main([], run=lambda: (False, "breaks")) == 1
+    assert versions.main([], run=cannot) == 1
+    assert capsys.readouterr().err == "breaks\nmetric-versions: cannot\n"
 
 
 def test_every_metric_carries_a_version(build: Build) -> None:
