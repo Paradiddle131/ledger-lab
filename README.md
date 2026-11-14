@@ -67,9 +67,12 @@ Prerequisites: [uv](https://docs.astral.sh/uv/), GNU make, git, and a clone of t
 
 ```bash
 uv sync
-make check        # lint, types, tests, process-id and owner checks, secret scan
+make check        # lint, types, tests, process-id and owner checks, secret scan, contract gate
 make fresh-clone  # clone HEAD and prove it holds no secret, identifier or data
 ```
+
+The contract gate (`make contract`) compares the payments data product's contract, [`models/contracts/payments.odcs.yaml`](models/contracts/payments.odcs.yaml), with the one on `origin/main` as this clone holds it, and fails on a change that breaks a consumer, or when `origin/main` is not fetched (`git fetch origin main`).
+It and the contract tests run the Data Contract CLI pinned in the lock's `contract` group, which uv installs into a throwaway environment from its cache, fetching it once on first use.
 
 The dbt models build on DuckDB in the session by default, reading the landed files in place under `LEDGER_LAB_LANDING`; setting `LEDGER_LAB_GCP_PROJECT` (with `uv sync --group bigquery`) moves them to BigQuery:
 
