@@ -37,6 +37,7 @@ dev = [
   "python-hcl2==8.2.0",
   "pyyaml==6.0.3",
   "rfc8785==0.1.4",
+  "sqlglot==30.31.0",
   "ruff==0.17.5",
   "types-pyyaml==6.0.12.20250915",
 ]

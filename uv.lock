@@ -1338,6 +1338,7 @@ dev = [
     { name = "pyyaml" },
     { name = "rfc8785" },
     { name = "ruff" },
+    { name = "sqlglot" },
     { name = "types-pyyaml" },
 ]
 
@@ -1364,6 +1365,7 @@ dev = [
     { name = "pyyaml", specifier = "==6.0.3" },
     { name = "rfc8785", specifier = "==0.1.4" },
     { name = "ruff", specifier = "==0.17.5" },
+    { name = "sqlglot", specifier = "==30.31.0" },
     { name = "types-pyyaml", specifier = "==6.0.12.20250915" },
 ]
 
