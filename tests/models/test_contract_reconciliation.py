@@ -5,7 +5,11 @@ The reconciliation is a control. It passes while every contract number has exact
 the count and dollars of every class equal a reviewed baseline exactly, so any new or grown break
 fails until a person re-pins the baseline in a reviewed change. `make check` proves the mechanism
 on the committed cut (a planted break moves the cut's pinned table); the control itself is the
-landed run over the full files (`make reconcile-landed`), whose baseline is pinned here.
+landed run over the full files (`make reconcile-landed`), whose baseline is pinned here: each
+class's count and dollars, and for each break class a digest of its contract numbers and their
+excess (`reconciliation_state.py`), so a break that grows on one contract while another shrinks
+fails too. Where an accepted run (`make reconcile-accept`) left its per-contract list beside the
+landing, a failure names the contract numbers that entered, left or changed excess.
 
 The classes are also worked out a second time here, in Python, from the rows the model starts from
 (each contract's revisions and types, each payment the repeat rule does not flag). That second
@@ -24,6 +28,13 @@ import pytest
 
 from ingest.fetch import landing_path
 from tests.models.dbt_build import Build, built, dbt, query
+from tests.models.reconciliation_state import (
+    accepted_path,
+    break_rows,
+    changes,
+    digests,
+    read_accepted,
+)
 from tests.models.test_payments_mart import CUT, land
 
 BREAKS = {
@@ -51,12 +62,21 @@ LANDED_BASELINE = {
     "unpaid": (26_500, Decimal(0)),
     "paid_in_full": (25_288, Decimal("53.43")),
     "no_fixed_award": (3_852, Decimal("2573863451.53")),
-    "unexplained": (1_916, Decimal("2376176323.30")),
+    "unexplained": (1_940, Decimal("2377977241.84")),
     "paid_under_two_names": (301, Decimal("720778722.70")),
     "contract_not_found": (205, Decimal("192143987.81")),
-    "paid_before_fixed_award": (144, Decimal("357313005.79")),
+    "paid_before_fixed_award": (120, Decimal("355512087.25")),
     "reduced_after_payment": (40, Decimal("2327908.21")),
     "negative_award": (28, Decimal("80723676.66")),
+}
+# The same run's digest per break class: SHA-256 of its contract numbers and their excess.
+LANDED_DIGESTS = {
+    "contract_not_found": "bfda103994d3bbab223840e963b65b52778af48db901ec7c8d3cd8cd564948a1",  # noqa: E501  # pragma: allowlist secret
+    "negative_award": "ca0b49c3a55f9ca9b7fc489811a9cc9c2422801139570f8338b6aaaa8ddc059c",  # noqa: E501  # pragma: allowlist secret
+    "paid_under_two_names": "ada984e4bc209b629b2a75fdc51945839f666395ae8381ff25c70426a790c1f2",  # noqa: E501  # pragma: allowlist secret
+    "reduced_after_payment": "ff9537ae11bd260418620e9d30429b59de6b7d19a3a15b328d2e3ea7c2807b8a",  # noqa: E501  # pragma: allowlist secret
+    "paid_before_fixed_award": "e50dab2dab193673cd6b6843f1330b6530408f9ac8bcc902323c4407ccf137ae",  # noqa: E501  # pragma: allowlist secret
+    "unexplained": "c206b699b6024b9127fe29a09e64d32fcd642403b6e5488d3edacfa4d518d6bf",  # noqa: E501  # pragma: allowlist secret
 }
 
 
@@ -145,7 +165,7 @@ def expected_classes(build: Build) -> dict[str, tuple[str, Decimal]]:
             kind = "paid_under_two_names"
         elif at_last is not None and total <= at_last + allowance:
             kind = "reduced_after_payment"
-        elif total - before_fixed <= within:
+        elif fixed_on is not None and total - before_fixed <= within:
             kind = "paid_before_fixed_award"
         else:
             kind = "unexplained"
@@ -290,7 +310,16 @@ def test_the_real_landing_reconciles_every_contract(tmp_path: Path) -> None:
     build = built(tmp_path, "landed", landing)
     table = class_table(build)
     print("contracts and dollars over (paid where not found) by class:", table)
-    assert table == LANDED_BASELINE
+    rows = break_rows(build)
+    accepted = accepted_path(landing)
+    if accepted.exists():
+        report = changes(read_accepted(accepted), rows) or [
+            "no break differs from the accepted run"
+        ]
+    else:
+        report = [f"no accepted run at {accepted}: `make reconcile-accept` writes one"]
+    print("against the accepted run:", *report, sep="\n  ")
+    assert (table, digests(rows)) == (LANDED_BASELINE, LANDED_DIGESTS), "\n".join(report)
     assert reconciled(build) == expected_classes(build)
     # Every payment on a contract number is in the reconciliation once, repeats beside it, and
     # the 452 rows on numbers the contracts table lacks are all there.

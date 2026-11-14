@@ -23,8 +23,9 @@
 --                          unflagged), it is within its award
 --   reduced_after_payment  the paid total is within the award in force at the end of the period
 --                          of the last payment: a later revision cut it below what had been paid
---   paid_before_fixed_award  without what was paid before the award in force first rose above 0,
---                          it is within its award: paid as a blanket, later given a fixed award
+--   paid_before_fixed_award  the award in force rose above 0 at some point, and without what was
+--                          paid before it first did, the contract is within its award: paid as a
+--                          blanket, later given a fixed award
 --   unexplained            none of these
 -- Two tags describe a break without explaining it: a term agreement, and an excess that all sits in
 -- the 2002 row.
@@ -147,6 +148,7 @@ contracts as (
         end as award_held_to,
         contracts.revision_count,
         revisions.nonzero_revisions,
+        awards.first_fixed_on,
         coalesce(paid.payment_rows, 0) as payment_rows,
         coalesce(paid.paid, 0) as paid,
         paid.paid_again_under_another_name,
@@ -169,6 +171,7 @@ not_found as (
         cast(null as {{ dbt.type_numeric() }}) as award_held_to,
         0 as revision_count,
         0 as nonzero_revisions,
+        cast(null as date) as first_fixed_on,
         count(*) as payment_rows,
         sum(amount) as paid,
         sum(case when under_another_name then amount else 0 end)
@@ -213,7 +216,9 @@ classed as (
             when paid - paid_again_under_another_name <= award_held_to + rounding_allowance
                 then 'paid_under_two_names'
             when paid <= award_at_last_payment + rounding_allowance then 'reduced_after_payment'
-            when paid - paid_before_fixed_award <= award_held_to + rounding_allowance
+            when
+                first_fixed_on is not null
+                and paid - paid_before_fixed_award <= award_held_to + rounding_allowance
                 then 'paid_before_fixed_award'
             else 'unexplained'
         end as break_class

@@ -114,8 +114,8 @@ models:
           contract paid over its award, the allowance included: `paid_under_two_names` (within
           its award without the second-name rows), `reduced_after_payment` (within the award in
           force at the end of the last payment's period: a later revision cut the award below
-          what had been paid), `paid_before_fixed_award` (within its award without what was paid
-          before the award first rose above 0), and `unexplained` where none of these holds.
+          what had been paid), `paid_before_fixed_award` (an award that rose above 0 at some
+          point, within it without what was paid before it first did), and `unexplained` where none of these holds.
         data_tests:
           - not_null
           - accepted_values:
@@ -157,7 +157,9 @@ unit_tests:
       its award is over it (JUSTOVER), one 4 cents under ties (JUSTUNDER); a rolled-up year is
       placed at its end (ROLLED is within the award in force on 31 December, not on 1 January);
       and revisions that net to 0 are held to their highest award, so a payment within it after the
-      award was taken back is unspent (NETZEROLATE) and one over it a break (NETZERO).
+      award was taken back is unspent (NETZEROLATE) and one over it a break (NETZERO); an award
+      taken back the day it was made was never fixed, so its payments are no blanket's
+      (SAMEDAY).
     model: chicago_contract_reconciliation
     given:
       - input: ref('int_chicago__contracts')
@@ -172,6 +174,7 @@ unit_tests:
           - {contract_number: ZEROUNPAID, award_after_revisions: 0, revision_count: 1}
           - {contract_number: NETZERO, award_after_revisions: 0, revision_count: 2}
           - {contract_number: NETZEROLATE, award_after_revisions: 0, revision_count: 2}
+          - {contract_number: SAMEDAY, award_after_revisions: 0, revision_count: 2}
           - {contract_number: NEGATIVE, award_after_revisions: -200.0, revision_count: 2}
           - {contract_number: NEGUNPAID, award_after_revisions: -200.0, revision_count: 2}
           - {contract_number: TWONAMES, award_after_revisions: 1000.0, revision_count: 1}
@@ -197,6 +200,8 @@ unit_tests:
           - {contract_number: NETZERO, approved_on: 2021-01-01, award_amount: -500.0}
           - {contract_number: NETZEROLATE, approved_on: 2020-01-01, award_amount: 500.0}
           - {contract_number: NETZEROLATE, approved_on: 2021-01-01, award_amount: -500.0}
+          - {contract_number: SAMEDAY, approved_on: 2002-10-11, award_amount: 1000.0}
+          - {contract_number: SAMEDAY, approved_on: 2002-10-11, award_amount: -1000.0}
           - {contract_number: NEGATIVE, approved_on: 2024-01-10, award_amount: 100.0}
           - {contract_number: NEGATIVE, approved_on: 2024-02-10, award_amount: -300.0}
           - {contract_number: NEGUNPAID, approved_on: 2024-01-10, award_amount: 100.0}
@@ -231,6 +236,7 @@ unit_tests:
           - {payment_key: blanket0, contract_number: BLANKET0, document_number: V4, amount: 300.0, payment_date: 2024-05-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 0, is_repeat: false}
           - {payment_key: netzero, contract_number: NETZERO, document_number: V4, amount: 600.0, payment_date: 2020-06-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 0, is_repeat: false}
           - {payment_key: netzerolate, contract_number: NETZEROLATE, document_number: V4, amount: 450.0, payment_date: 2021-06-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 0, is_repeat: false}
+          - {payment_key: sameday, contract_number: SAMEDAY, amount: 500.0, rolled_up_year: 2002, vendor_name: EXAMPLE A LLC, award_after_revisions: 0, is_repeat: false}
           - {payment_key: negative, contract_number: NEGATIVE, document_number: V5, amount: 50.0, payment_date: 2024-05-01, vendor_name: EXAMPLE A LLC, award_after_revisions: -200.0, is_repeat: false}
           - {payment_key: twonames, contract_number: TWONAMES, document_number: V6, amount: 1000.0, payment_date: 2024-03-01, vendor_name: EXAMPLE A LLC, award_after_revisions: 1000.0, is_repeat: false}
           - {payment_key: twonames-other, contract_number: TWONAMES, document_number: V6, amount: 1000.0, payment_date: 2024-03-01, vendor_name: "EXAMPLE A, LLC", award_after_revisions: 1000.0, is_repeat: false}
@@ -260,6 +266,7 @@ unit_tests:
         - {contract_number: ZEROUNPAID, paid: 0, repeat_rows: 0, break_class: no_fixed_award, is_break: false, is_term_agreement: false, excess_in_2002_row: false}
         - {contract_number: NETZERO, paid: 600.0, repeat_rows: 0, break_class: unexplained, is_break: true, is_term_agreement: false, excess_in_2002_row: false}
         - {contract_number: NETZEROLATE, paid: 450.0, repeat_rows: 0, break_class: unspent, is_break: false, is_term_agreement: false, excess_in_2002_row: false}
+        - {contract_number: SAMEDAY, paid: 500.0, repeat_rows: 0, break_class: unexplained, is_break: true, is_term_agreement: false, excess_in_2002_row: true}
         - {contract_number: NEGATIVE, paid: 50.0, repeat_rows: 0, break_class: negative_award, is_break: true, is_term_agreement: false, excess_in_2002_row: false}
         - {contract_number: NEGUNPAID, paid: 0, repeat_rows: 0, break_class: negative_award, is_break: true, is_term_agreement: false, excess_in_2002_row: false}
         - {contract_number: TWONAMES, paid: 2000.0, repeat_rows: 0, break_class: paid_under_two_names, is_break: true, is_term_agreement: false, excess_in_2002_row: false}
