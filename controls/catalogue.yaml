@@ -76,6 +76,15 @@ controls:
     asserts: Prompt, model, tools and metric definitions ship and roll back together, and a failed gate blocks the release.
     proven_by: [tests/operations/test_release.py::test_failed_gate_blocks_release]
     status: not-implemented
+  - id: breaking-contract-change-stopped
+    layer: Change management
+    owner: group-controller
+    asserts: make check fails when a data contract in the working tree breaks a consumer of the one on origin/main, matched by contract id wherever the file sits (a column removed or renamed, a type changed, a column made nullable, a key or uniqueness dropped, an accepted value added, a bound loosened, a quality rule removed, renamed or changed beyond its wording, a personal classification removed, the contract retired, renamed or unreadable), and when origin/main is not in the clone to compare with; while origin/main holds no contract the first one passes.
+    proven_by:
+      - tests/models/test_payments_contract.py::test_a_breaking_change_fails_the_gate
+      - tests/models/test_payments_contract.py::test_the_gate_matches_contracts_by_id_wherever_they_are
+      - tests/models/test_payments_contract.py::test_a_clone_without_main_fails_and_says_how_to_fetch_it
+    status: implemented
   - id: answer-rebuilt-from-audit
     layer: Accountability
     owner: group-controller

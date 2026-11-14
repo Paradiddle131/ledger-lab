@@ -23,10 +23,11 @@ from test_fx_translation import environment
 from tests.models.dbt_build import dbt
 
 # Only the tests whose every parent is selected: a test of another model that also reads the
-# calendar (`dates_in_fiscal_calendar`) would fail on a model this build leaves out.
+# calendar (`dates_in_fiscal_calendar`) would fail on a model this build leaves out, and so would
+# a model downstream that also reads other products (the group totals).
 SELECTION = [
     "--select",
-    "+budget_against_outturn+",
+    "+budget_against_outturn",
     "fiscal_calendar",
     "--indirect-selection",
     "cautious",

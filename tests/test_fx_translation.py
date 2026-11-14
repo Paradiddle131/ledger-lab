@@ -36,7 +36,15 @@ RULES = [
     "published_rates_keep_the_published_figure",
     "a_rate_is_carried_at_most_four_days",
 ]
-SELECTION = ["--select", "ecb_rates_sample", "fx_published_rates+"]
+# The rates models and the tests whose every parent is one of them: a model of another folder
+# that reads the rates (the group totals) also reads models this build leaves out.
+SELECTION = [
+    "--select",
+    "ecb_rates_sample",
+    "fx_published_rates+,path:models/reference",
+    "--indirect-selection",
+    "cautious",
+]
 
 
 def environment(tmp_path: Path) -> dict[str, str]:
@@ -124,9 +132,10 @@ def test_a_posting_with_rates_translates(translate: Callable[..., list[tuple[Any
         ("'2024-04-04'", "'USD'", "'JPY'", "from USD to JPY on 2024-04-04"),
         ("'2024-04-04'", "'usd'", "'GBP'", "from usd to GBP on 2024-04-04"),
         ("'2024-04-04'", "null", "'GBP'", "from no currency to GBP on 2024-04-04"),
-        ("'2024-03-24'", "'USD'", "'GBP'", "from USD to GBP on 2024-03-24"),
-        ("'2024-04-09'", "'USD'", "'GBP'", "from USD to GBP on 2024-04-09"),
-        ("'2024-04-09'", "'EUR'", "'EUR'", "from EUR to EUR on 2024-04-09"),
+        ("'2023-12-28'", "'USD'", "'GBP'", "from USD to GBP on 2023-12-28"),
+        ("'2024-04-13'", "'USD'", "'GBP'", "from USD to GBP on 2024-04-13"),
+        ("'2026-04-01'", "'USD'", "'GBP'", "from USD to GBP on 2026-04-01"),
+        ("'2026-04-01'", "'EUR'", "'EUR'", "from EUR to EUR on 2026-04-01"),
         ("null", "'USD'", "'GBP'", "from USD to GBP on no date"),
     ],
     ids=[
@@ -135,6 +144,7 @@ def test_a_posting_with_rates_translates(translate: Callable[..., list[tuple[Any
         "lower-case",
         "no-currency",
         "before-first",
+        "five-days-after-a-publication",
         "after-last",
         "euro-after-last",
         "no-date",
@@ -153,14 +163,14 @@ def test_an_amount_no_rate_translates_stops_the_query(
 
 
 def test_a_constant_rate_set_the_rates_lack_stops_the_query(sample: Sample) -> None:
-    query = compiled(sample, "constant_rates_on='2024-04-09'")
+    query = compiled(sample, "constant_rates_on='2026-04-01'")
     probe = (
         "with probe as (select cast('2024-04-04' as date) as posted_on, 'USD' as from_currency,"
         " 'GBP' as to_currency, cast(1 as decimal(28, 6)) as amount) "
     )
     with (
         duckdb.connect(str(sample.path / "ledger_lab.duckdb"), read_only=True) as db,
-        pytest.raises(duckdb.Error, match="no ECB rate from USD to GBP on 2024-04-09"),
+        pytest.raises(duckdb.Error, match="no ECB rate from USD to GBP on 2026-04-01"),
     ):
         db.execute(probe + query).fetchall()
 

@@ -1,0 +1,265 @@
+models:
+  - name: int_group_totals__figures
+    description: >
+      One row per figure an entity brings to the group totals, every payment of the payments mart
+      and every cash-expenditure line of the Dutch budget against outturn, with the span it counts
+      in, its basis and the rule that leaves it out (`left_out_by`, null when `group_totals`
+      counts it); a counted figure carries its translations. Vendors are not carried. Commitment
+      and receipt lines are not figures here. It holds one row per payment, so it sits in the
+      intermediate layer, which no persona reads, and not in the group-totals product, which
+      several personas may read only as aggregates; `group_totals` and `group_totals_left_out`
+      are the product's sums of it.
+    columns:
+      - name: figure_key
+        description: The payment's `payment_key`, or the Dutch line's `budget_line_key`.
+        data_tests:
+          - unique
+          - not_null
+      - name: entity_id
+        data_tests:
+          - not_null
+      - name: basis
+        description: "{{ doc('group_totals_basis') }}"
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [direct-vouchers, contract-payments, payments-year-rollup, payments-over-25k, cash-outturn]
+      - name: fiscal_year
+        description: The figure's fiscal year; null where the calendars do not cover it.
+      - name: fiscal_period
+        description: The payment's fiscal period; null for a figure with a year and no day.
+      - name: period_start
+        description: >
+          The first day of the span the figure counts in: its fiscal period's, or for a figure
+          with a year and no day its fiscal year's; null where the calendars do not cover it.
+      - name: period_end
+        description: The span's last day.
+      - name: payment_date
+        description: The payment's day, whose rates translate it at actual rates; null for a figure with a year and no day.
+      - name: currency
+        description: The entity's own currency.
+        data_tests:
+          - not_null
+      - name: amount
+        description: The figure in its own currency as the entity mart serves it; null on a Dutch line of a year with no outturn served.
+      - name: left_out_by
+        description: "{{ doc('group_totals_left_out_by') }}"
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [repeat, outside-calendars, no-outturn, no-rate]
+      - name: reporting_currency
+        data_tests:
+          - not_null
+      - name: amount_at_actual_rates
+        description: "{{ doc('group_totals_actual_rates') }} Null on a figure left out."
+        data_tests:
+          - not_null:
+              config:
+                where: left_out_by is null
+      - name: amount_at_constant_rates
+        description: The figure at the rates of `constant_rates_on`, rounded to the cent; null on a figure left out.
+        data_tests:
+          - not_null:
+              config:
+                where: left_out_by is null
+      - name: constant_rates_on
+        data_tests:
+          - not_null
+
+unit_tests:
+  - name: only_the_rates_change_between_two_periods
+    description: >
+      Test inputs: the same 1,000 dollars paid by Chicago on 26 March and on 3 April 2024, with
+      the real ECB rates of those days and of the constant-rates day. At actual rates the two
+      periods differ (921.23 and 927.39 euros), because only the rates changed; at constant rates
+      both are 904.98 euros, the dollar's 1.105 per euro on 29 December 2023. The own-currency
+      amount is untouched.
+    model: int_group_totals__figures
+    overrides:
+      vars:
+        group_totals: {reporting_currency: EUR, constant_rates_on: "2023-12-29"}
+    given:
+      - input: ref('payments')
+        rows:
+          - {payment_key: march, entity_id: chicago, currency: USD, payment_date: 2024-03-26, fiscal_year: 2024, fiscal_period: 3, amount: 1000.00, is_repeat: false}
+          - {payment_key: april, entity_id: chicago, currency: USD, payment_date: 2024-04-03, fiscal_year: 2024, fiscal_period: 4, amount: 1000.00, is_repeat: false}
+      - input: ref('budget_against_outturn')
+        rows: []
+      - input: ref('fiscal_periods')
+        rows:
+          - {entity_id: chicago, fiscal_year: 2024, fiscal_period: 3, period_start: 2024-03-01, period_end: 2024-03-31}
+          - {entity_id: chicago, fiscal_year: 2024, fiscal_period: 4, period_start: 2024-04-01, period_end: 2024-04-30}
+      - input: ref('fx_published_rates')
+        rows:
+          - {published_on: 2024-03-01, currency: USD, units_per_euro: 1.0813}
+          - {published_on: 2024-03-01, currency: EUR, units_per_euro: 1}
+          - {published_on: 2024-03-28, currency: USD, units_per_euro: 1.0811}
+          - {published_on: 2024-03-28, currency: EUR, units_per_euro: 1}
+          - {published_on: 2024-04-02, currency: USD, units_per_euro: 1.0749}
+          - {published_on: 2024-04-02, currency: EUR, units_per_euro: 1}
+          - {published_on: 2024-04-30, currency: USD, units_per_euro: 1.0718}
+          - {published_on: 2024-04-30, currency: EUR, units_per_euro: 1}
+      - input: ref('fx_rates')
+        rows:
+          - {rate_on: 2024-03-26, currency: USD, units_per_euro: 1.0855, published_on: 2024-03-26}
+          - {rate_on: 2024-03-26, currency: EUR, units_per_euro: 1, published_on: 2024-03-26}
+          - {rate_on: 2024-04-03, currency: USD, units_per_euro: 1.0783, published_on: 2024-04-03}
+          - {rate_on: 2024-04-03, currency: EUR, units_per_euro: 1, published_on: 2024-04-03}
+          - {rate_on: 2023-12-29, currency: USD, units_per_euro: 1.105, published_on: 2023-12-29}
+          - {rate_on: 2023-12-29, currency: EUR, units_per_euro: 1, published_on: 2023-12-29}
+    expect:
+      rows:
+        - {figure_key: march, amount: 1000.00, left_out_by: null, amount_at_actual_rates: 921.23, amount_at_constant_rates: 904.98}
+        - {figure_key: april, amount: 1000.00, left_out_by: null, amount_at_actual_rates: 927.39, amount_at_constant_rates: 904.98}
+
+  - name: a_figure_with_a_year_and_no_day_takes_the_years_average_rate
+    description: >
+      Test inputs: a Chicago payment the City serves only as a 2023 total and a Dutch 2023 cash
+      outturn line, each 1,000 in its currency, with three of 2023's real ECB publications
+      standing for the year. Both count in the whole fiscal year, with no period; the dollars
+      take the mean of the year's published dollar rates, 1.086633 to six places, so 920.27
+      euros, the euros stay 1,000.00, and at constant rates the dollars are 904.98 euros.
+    model: int_group_totals__figures
+    overrides:
+      vars:
+        group_totals: {reporting_currency: EUR, constant_rates_on: "2023-12-29"}
+    given:
+      - input: ref('payments')
+        rows:
+          - {payment_key: rolled-up, entity_id: chicago, currency: USD, payment_date: null, fiscal_year: 2023, fiscal_period: null, amount: 1000.00, is_repeat: false}
+      - input: ref('budget_against_outturn')
+        rows:
+          - {budget_line_key: outturn, entity_id: nl-government, currency: EUR, fiscal_year: 2023, kind: U, outturn_eur: 1000.00}
+          - {budget_line_key: commitments, entity_id: nl-government, currency: EUR, fiscal_year: 2023, kind: V, outturn_eur: 5000.00}
+      - input: ref('fiscal_periods')
+        rows:
+          - {entity_id: chicago, fiscal_year: 2023, fiscal_period: 1, period_start: 2023-01-01, period_end: 2023-01-31}
+          - {entity_id: chicago, fiscal_year: 2023, fiscal_period: 12, period_start: 2023-12-01, period_end: 2023-12-31}
+          - {entity_id: nl-government, fiscal_year: 2023, fiscal_period: 1, period_start: 2023-01-01, period_end: 2023-01-31}
+          - {entity_id: nl-government, fiscal_year: 2023, fiscal_period: 12, period_start: 2023-12-01, period_end: 2023-12-31}
+      - input: ref('fx_published_rates')
+        rows:
+          - {published_on: 2023-01-02, currency: USD, units_per_euro: 1.0683}
+          - {published_on: 2023-01-02, currency: EUR, units_per_euro: 1}
+          - {published_on: 2023-06-30, currency: USD, units_per_euro: 1.0866}
+          - {published_on: 2023-06-30, currency: EUR, units_per_euro: 1}
+          - {published_on: 2023-12-29, currency: USD, units_per_euro: 1.105}
+          - {published_on: 2023-12-29, currency: EUR, units_per_euro: 1}
+      - input: ref('fx_rates')
+        rows:
+          - {rate_on: 2023-12-29, currency: USD, units_per_euro: 1.105, published_on: 2023-12-29}
+          - {rate_on: 2023-12-29, currency: EUR, units_per_euro: 1, published_on: 2023-12-29}
+    expect:
+      rows:
+        - {figure_key: rolled-up, basis: payments-year-rollup, fiscal_period: null, period_start: 2023-01-01, period_end: 2023-12-31, left_out_by: null, amount_at_actual_rates: 920.27, amount_at_constant_rates: 904.98}
+        - {figure_key: outturn, basis: cash-outturn, fiscal_period: null, period_start: 2023-01-01, period_end: 2023-12-31, left_out_by: null, amount_at_actual_rates: 1000.00, amount_at_constant_rates: 1000.00}
+
+  - name: each_rule_leaves_its_figures_out_and_untranslated
+    description: >
+      Test inputs, one figure per rule beside one that counts: a payment served again, a payment
+      of 2022 and the rolled-up row of 1996 to 2002 (years the calendars do not cover), a Dutch
+      line of a year with no outturn served, and a May 2024 payment, a month with no ECB rates
+      given. Each is left out by its rule with no translation; the March payment counts.
+    model: int_group_totals__figures
+    overrides:
+      vars:
+        group_totals: {reporting_currency: EUR, constant_rates_on: "2023-12-29"}
+    given:
+      - input: ref('payments')
+        rows:
+          - {payment_key: counted, entity_id: chicago, currency: USD, payment_date: 2024-03-26, fiscal_year: 2024, fiscal_period: 3, amount: 250.50, is_repeat: false, contract_number: T26417}
+          - {payment_key: served-again, entity_id: chicago, currency: USD, payment_date: 2024-03-26, fiscal_year: 2024, fiscal_period: 3, amount: 250.50, is_repeat: true, contract_number: null}
+          - {payment_key: in-2022, entity_id: chicago, currency: USD, payment_date: 2022-12-30, fiscal_year: null, fiscal_period: null, amount: 10.00, is_repeat: false, contract_number: null}
+          - {payment_key: rolled-up-2002, entity_id: chicago, currency: USD, payment_date: null, fiscal_year: null, fiscal_period: null, amount: 20.00, is_repeat: false, contract_number: null}
+          - {payment_key: in-may, entity_id: chicago, currency: USD, payment_date: 2024-05-15, fiscal_year: 2024, fiscal_period: 5, amount: 30.00, is_repeat: false, contract_number: null}
+      - input: ref('budget_against_outturn')
+        rows:
+          - {budget_line_key: no-outturn, entity_id: nl-government, currency: EUR, fiscal_year: 2026, kind: U, outturn_eur: null}
+      - input: ref('fiscal_periods')
+        rows:
+          - {entity_id: chicago, fiscal_year: 2024, fiscal_period: 3, period_start: 2024-03-01, period_end: 2024-03-31}
+          - {entity_id: chicago, fiscal_year: 2024, fiscal_period: 5, period_start: 2024-05-01, period_end: 2024-05-31}
+          - {entity_id: nl-government, fiscal_year: 2026, fiscal_period: 1, period_start: 2026-01-01, period_end: 2026-01-31}
+          - {entity_id: nl-government, fiscal_year: 2026, fiscal_period: 12, period_start: 2026-12-01, period_end: 2026-12-31}
+      - input: ref('fx_published_rates')
+        rows:
+          - {published_on: 2024-03-01, currency: USD, units_per_euro: 1.0813}
+          - {published_on: 2024-03-01, currency: EUR, units_per_euro: 1}
+          - {published_on: 2024-03-28, currency: USD, units_per_euro: 1.0811}
+          - {published_on: 2024-03-28, currency: EUR, units_per_euro: 1}
+      - input: ref('fx_rates')
+        rows:
+          - {rate_on: 2024-03-26, currency: USD, units_per_euro: 1.0855, published_on: 2024-03-26}
+          - {rate_on: 2024-03-26, currency: EUR, units_per_euro: 1, published_on: 2024-03-26}
+          - {rate_on: 2023-12-29, currency: USD, units_per_euro: 1.105, published_on: 2023-12-29}
+          - {rate_on: 2023-12-29, currency: EUR, units_per_euro: 1, published_on: 2023-12-29}
+    expect:
+      rows:
+        - {figure_key: counted, basis: contract-payments, left_out_by: null, amount_at_actual_rates: 230.77}
+        - {figure_key: served-again, basis: direct-vouchers, left_out_by: repeat, amount_at_actual_rates: null}
+        - {figure_key: in-2022, basis: direct-vouchers, left_out_by: outside-calendars, amount_at_actual_rates: null}
+        - {figure_key: rolled-up-2002, basis: payments-year-rollup, left_out_by: outside-calendars, amount_at_actual_rates: null}
+        - {figure_key: in-may, basis: direct-vouchers, left_out_by: no-rate, amount_at_actual_rates: null}
+        - {figure_key: no-outturn, basis: cash-outturn, left_out_by: no-outturn, amount_at_actual_rates: null}
+
+
+  - name: a_payment_beyond_the_rates_leaves_its_span_out_whole
+    description: >
+      Test inputs, real ECB dollar rates of January 2023 and of September and October 2026 with
+      the rates cut at 28 October 2026. Chicago's October payments of the 27th and the 29th are
+      both left out, since the 29th has no rate and the span is left out whole, never stopping the
+      build; so is a payment of 1 January 2023, before the first rate. A September payment counts,
+      and a repeat of 29 October filed in September leaves September counted, since a repeat
+      never counts.
+    model: int_group_totals__figures
+    overrides:
+      vars:
+        group_totals: {reporting_currency: EUR, constant_rates_on: "2023-12-29"}
+    given:
+      - input: ref('payments')
+        rows:
+          - {payment_key: october-27, entity_id: chicago, currency: USD, payment_date: 2026-10-27, fiscal_year: 2026, fiscal_period: 10, amount: 100.00, is_repeat: false}
+          - {payment_key: october-29, entity_id: chicago, currency: USD, payment_date: 2026-10-29, fiscal_year: 2026, fiscal_period: 10, amount: 100.00, is_repeat: false}
+          - {payment_key: new-years-day, entity_id: chicago, currency: USD, payment_date: 2023-01-01, fiscal_year: 2023, fiscal_period: 1, amount: 100.00, is_repeat: false}
+          - {payment_key: september, entity_id: chicago, currency: USD, payment_date: 2026-09-15, fiscal_year: 2026, fiscal_period: 9, amount: 100.00, is_repeat: false}
+          - {payment_key: repeat-late, entity_id: chicago, currency: USD, payment_date: 2026-10-29, fiscal_year: 2026, fiscal_period: 9, amount: 100.00, is_repeat: true}
+      - input: ref('budget_against_outturn')
+        rows: []
+      - input: ref('fiscal_periods')
+        rows:
+          - {entity_id: chicago, fiscal_year: 2023, fiscal_period: 1, period_start: 2023-01-01, period_end: 2023-01-31}
+          - {entity_id: chicago, fiscal_year: 2026, fiscal_period: 9, period_start: 2026-09-01, period_end: 2026-09-30}
+          - {entity_id: chicago, fiscal_year: 2026, fiscal_period: 10, period_start: 2026-10-01, period_end: 2026-10-31}
+      - input: ref('fx_published_rates')
+        rows:
+          - {published_on: 2023-01-02, currency: USD, units_per_euro: 1.0683}
+          - {published_on: 2023-01-02, currency: EUR, units_per_euro: 1}
+          - {published_on: 2023-01-31, currency: USD, units_per_euro: 1.0833}
+          - {published_on: 2023-01-31, currency: EUR, units_per_euro: 1}
+          - {published_on: 2026-09-01, currency: USD, units_per_euro: 1.159}
+          - {published_on: 2026-09-01, currency: EUR, units_per_euro: 1}
+          - {published_on: 2026-09-15, currency: USD, units_per_euro: 1.1539}
+          - {published_on: 2026-09-15, currency: EUR, units_per_euro: 1}
+          - {published_on: 2026-09-30, currency: USD, units_per_euro: 1.1355}
+          - {published_on: 2026-09-30, currency: EUR, units_per_euro: 1}
+          - {published_on: 2026-10-01, currency: USD, units_per_euro: 1.1298}
+          - {published_on: 2026-10-01, currency: EUR, units_per_euro: 1}
+          - {published_on: 2026-10-28, currency: USD, units_per_euro: 1.1133}
+          - {published_on: 2026-10-28, currency: EUR, units_per_euro: 1}
+      - input: ref('fx_rates')
+        rows:
+          - {rate_on: 2026-09-15, currency: USD, units_per_euro: 1.1539, published_on: 2026-09-15}
+          - {rate_on: 2026-09-15, currency: EUR, units_per_euro: 1, published_on: 2026-09-15}
+          - {rate_on: 2026-10-27, currency: USD, units_per_euro: 1.1298, published_on: 2026-10-01}
+          - {rate_on: 2026-10-27, currency: EUR, units_per_euro: 1, published_on: 2026-10-01}
+          - {rate_on: 2023-12-29, currency: USD, units_per_euro: 1.105, published_on: 2023-12-29}
+          - {rate_on: 2023-12-29, currency: EUR, units_per_euro: 1, published_on: 2023-12-29}
+    expect:
+      rows:
+        - {figure_key: october-27, left_out_by: no-rate, amount_at_actual_rates: null, amount_at_constant_rates: null}
+        - {figure_key: october-29, left_out_by: no-rate, amount_at_actual_rates: null, amount_at_constant_rates: null}
+        - {figure_key: new-years-day, left_out_by: no-rate, amount_at_actual_rates: null, amount_at_constant_rates: null}
+        - {figure_key: september, left_out_by: null, amount_at_actual_rates: 86.66, amount_at_constant_rates: 90.50}
+        - {figure_key: repeat-late, left_out_by: repeat, amount_at_actual_rates: null, amount_at_constant_rates: null}

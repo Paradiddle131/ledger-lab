@@ -23,7 +23,7 @@ It turns public purchase-to-pay records into certified data products, gives each
 | GLEIF legal-entity register | matching vendor names to legal entities |
 | Annual filings of listed companies, from the regulator | an independent figure to tie out against: the revenue twenty listed vendors reported in their annual reports, each restated or amended value beside the original |
 
-Every figure is a public record, fetched by a script that checks it against a recorded checksum; no data is committed but a sample whose licence allows it and a test needs (a fortnight of ECB rates, some rows of the Dutch budget statements, some rows of Chicago's contracts and payments, some rows of the UK Department for Transport's spend, and a few rows of the regulator's filings).
+Every figure is a public record, fetched by a script that checks it against a recorded checksum; no data is committed but a sample whose licence allows it and a test needs (ECB rates of a fortnight of 2024, a day of 2023 and March 2026, some rows of the Dutch budget statements, some rows of Chicago's contracts and payments, some rows of the UK Department for Transport's spend, and a few rows of the regulator's filings).
 The ledger is derived: an open-source ERP posts the real documents into journal lines, and every derived row says so.
 Individuals among vendors are hashed before anything is written.
 
@@ -67,9 +67,12 @@ Prerequisites: [uv](https://docs.astral.sh/uv/), GNU make, git, and a clone of t
 
 ```bash
 uv sync
-make check        # lint, types, tests, process-id and owner checks, secret scan
+make check        # lint, types, tests, process-id and owner checks, secret scan, contract gate
 make fresh-clone  # clone HEAD and prove it holds no secret, identifier or data
 ```
+
+The contract gate (`make contract`) matches every data contract (`*.odcs.yaml`, today [`models/contracts/payments.odcs.yaml`](models/contracts/payments.odcs.yaml)) with the one on `origin/main` as this clone holds it, by contract id, and fails on a change that breaks a consumer, or when `origin/main` is not fetched (`git fetch origin main`); it runs offline after `uv sync`.
+`make sync` also puts the Data Contract CLI's DuckDB engine (the lock's `contract` group) in uv's cache; the contract tests and `make contract-test`, which runs `datacontract test` over a local dbt build, use it offline on DuckDB 1.5 over a copy of the build in that version's storage format, and the tests skip, saying so, when it is not cached.
 
 The dbt models build on DuckDB in the session by default, reading the landed files in place under `LEDGER_LAB_LANDING`; setting `LEDGER_LAB_GCP_PROJECT` (with `uv sync --group bigquery`) moves them to BigQuery:
 
@@ -77,8 +80,9 @@ The dbt models build on DuckDB in the session by default, reading the landed fil
 uv run dbt build --project-dir models --profiles-dir models
 ```
 
-Every model that reads a fetched source reads the file the fetch kit landed (`python -m ingest.fetch ecb-rates`, `python -m ingest.fetch nl-government-budget`, for the payments mart `chicago` and `uk-transport-spend-2025`, and for the vendors' legal entities `chicago`, `uk-transport-spend-2025` and `gleif-legal-entities`), and the build fails on a missing file; the tests pass `--vars '{source_rows: sample}'` to read the committed samples of real rows instead (a fortnight of ECB rates, Dutch budget rows chosen for their mess, and Chicago contract and payment rows and UK spend rows of companies, each landed through its landing step with a test hash key), and `uv run pytest -m landed` runs the translation and budget rules over the landed files.
+Every model that reads a fetched source reads the file the fetch kit landed (`python -m ingest.fetch ecb-rates`, `python -m ingest.fetch nl-government-budget`, for the payments mart `chicago` and `uk-transport-spend-2025`, and for the vendors' legal entities `chicago`, `uk-transport-spend-2025` and `gleif-legal-entities`), and the build fails on a missing file; the tests pass `--vars '{source_rows: sample}'` to read the committed samples of real rows instead (ECB rates of a fortnight of 2024, a day of 2023 and March 2026, Dutch budget rows chosen for their mess, and Chicago contract and payment rows and UK spend rows of companies, each landed through its landing step with a test hash key), and `uv run pytest -m landed` runs the translation and budget rules over the landed files.
 The Dutch budget against outturn shows the figures as the file serves them: a zero the file may serve in place of a figure is flagged on its line (`has_doubtful_zero`), and the landed tests count the figures the file serves wrong.
+The group totals sum each entity's spend by fiscal period, or by year where the source gives only a year, in euros at actual and at constant rates, each row naming what its figure is (`basis`: Chicago's direct vouchers, contract payments and yearly roll-ups, the UK department's payments over £25,000, the Dutch government's cash-expenditure outturn), and count what they leave out, by rule, beside them (`group_totals_left_out`).
 
 Each source is fetched by name from [`ingest/sources.yaml`](ingest/sources.yaml), which records its URL or pinned query, SHA-256, licence link, publisher and whether it names people; the file lands under `LEDGER_LAB_LANDING` (default `landing/`, outside git) only when its checksum matches, and the command exits non-zero otherwise:
 
