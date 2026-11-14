@@ -17,6 +17,7 @@
     'contract_number',
     'award_after_revisions',
     'source_table',
+    'is_repeat',
 ] %}
 
 {% for entity in entities %}

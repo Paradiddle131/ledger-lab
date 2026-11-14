@@ -51,5 +51,6 @@ select
     department_name,
     contract_number,
     vendor_name,
-    vendor_name like 'person:%' as vendor_is_hashed
+    vendor_name like 'person:%' as vendor_is_hashed,
+    copy_number
 from numbered

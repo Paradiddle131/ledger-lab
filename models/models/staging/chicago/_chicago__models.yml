@@ -12,7 +12,8 @@ models:
       - name: revision_number
         description: >
           `0` for the original award, `1`, `2`, ... for later revisions, and the document number of
-          a modification or time extension imported from the City's legacy system (`T1`, `P90853`).
+          a modification or time extension imported from the City's legacy system (`C514026`,
+          `P90853`).
         data_tests:
           - not_null
       - name: specification_number
@@ -27,8 +28,6 @@ models:
         description: The vendor's name in clear, or `person:` and its keyed hash, as landed.
         data_tests:
           - not_null
-      - name: vendor_id
-        description: The City's vendor id in clear, or `id:` and its keyed hash on a hashed vendor's row.
       - name: vendor_is_hashed
         description: True when the vendor's name is a keyed hash.
       - name: approved_on
@@ -86,14 +85,19 @@ models:
           - not_null
       - name: vendor_is_hashed
         description: True when the payee's name is a keyed hash.
+      - name: copy_number
+        description: >
+          1 on a row, and 2, 3, ... on each further row identical to it in every landed column; the
+          key numbers copies by it, and `int_chicago__payments` flags every copy after the first.
 
 seeds:
   - name: chicago_contracts_sample
     description: >
       Real rows of the City's contracts for the builds inside `make check`, read when the
       `source_rows` var is `sample`: the cut in `tests/models/chicago_sample.yaml` (companies only,
-      descriptions and contract links left out) as the landing's step lands it with a test hash
-      key, so its one hashed vendor carries that key's hash, never the real one's; a test lands the
+      descriptions, contract links, vendor ids and places left out, since no model reads them) as
+      the landing's step lands it with a test hash key, so its hashed vendors (companies the test
+      register does not vouch for) carry that key's hashes, never the real one's; a test lands the
       cut again and holds this file to it.
     config:
       column_types:

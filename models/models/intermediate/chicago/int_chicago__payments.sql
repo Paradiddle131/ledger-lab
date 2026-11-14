@@ -6,8 +6,40 @@
 -- year that is exactly its calendar year (the City's year runs January to December) and no
 -- period, and the 2002 row, which holds 1996 to 2002, takes neither. A year the calendars do not
 -- cover has neither.
+-- Every served row stays, and a row that repeats another is flagged, in this order: a copy after
+-- the first of rows identical in every column (`exact`); a row without a department beside one
+-- that has a department and is otherwise the same (`without_department`); a rolled-up row whose
+-- amount equals to the cent the unflagged dated payments of its vendor, contract and year
+-- (`rolled_up_itemised`). The first row of each group is the one left unflagged.
 with payments as (
-    select * from {{ ref('stg_chicago__payments') }}
+    select
+        *,
+        count(department_name) over (
+            partition by
+                voucher_number, amount, payment_date, rolled_up_year, contract_number, vendor_name
+        ) as rows_with_department
+    from {{ ref('stg_chicago__payments') }}
+),
+
+same_payment as (
+    select
+        *,
+        case
+            when copy_number > 1 then 'exact'
+            when department_name is null and rows_with_department > 0 then 'without_department'
+        end as same_payment_kind
+    from payments
+),
+
+dated_years as (
+    select
+        vendor_name,
+        contract_number,
+        extract(year from payment_date) as paid_in_year,
+        sum(amount) as paid
+    from same_payment
+    where payment_date is not null and same_payment_kind is null
+    group by vendor_name, contract_number, extract(year from payment_date)
 ),
 
 {%- set year = 'cast(payments.rolled_up_year as ' ~ dbt.type_string() ~ ')' %}
@@ -21,6 +53,21 @@ fiscal_years as (
     from {{ ref('fiscal_periods') }}
     where entity_id = 'chicago'
     group by entity_id, fiscal_year
+),
+
+flagged as (
+    select
+        payments.*,
+        coalesce(
+            payments.same_payment_kind,
+            case when dated_years.paid = payments.amount then 'rolled_up_itemised' end
+        ) as repeat_kind
+    from same_payment as payments
+    left join dated_years
+        on
+            payments.rolled_up_year = dated_years.paid_in_year
+            and payments.vendor_name = dated_years.vendor_name
+            and payments.contract_number = dated_years.contract_number
 )
 
 select
@@ -37,10 +84,12 @@ select
     nullif(payments.contract_number, 'DV') as contract_number,
     contracts.award_after_revisions,
     'chicago-payments' as source_table,
+    payments.repeat_kind is not null as is_repeat,
+    payments.repeat_kind,
     payments.rolled_up_year is not null as is_rolled_up,
     payments.rolled_up_year,
     payments.department_name
-from payments
+from flagged as payments
 left join {{ ref('fiscal_calendar') }} as fiscal_calendar
     on
         fiscal_calendar.entity_id = 'chicago'

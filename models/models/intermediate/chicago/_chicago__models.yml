@@ -2,10 +2,11 @@ models:
   - name: int_chicago__contract_revisions
     description: >
       One row per contract and revision of the City of Chicago's contracts: the original award or
-      one change to it. A revision the publisher serves on several rows (41 on the pinned files,
-      each under two spellings of the vendor or a hashed and a clear one, with the same amount and
-      day) counts once; rows of one revision that disagree on the amount or the day would make two
-      rows here, which the unique test refuses.
+      one change to it. A revision the publisher serves on several rows counts once: 41 on the
+      pinned files, all with one amount and day, 31 of them under two vendor names and 10 under
+      one (4 exact repeats, the rest differing by vendor id, department or another column); rows
+      of one revision that disagree on the amount or the day would make two rows here, which the
+      unique test refuses.
     data_tests:
       - unique:
           arguments:
@@ -44,8 +45,11 @@ models:
           each revision's amount, each revision counted once, since every row of the contracts
           table is a change to the award, not a new total (the publisher marks reductions by
           negative amounts, and paid totals match the sum to the cent, not the latest row). A
-          revision whose number is not a number (`T1`) is a modification from the legacy system and
-          counts like any other.
+          revision whose number is not a number (`C514026`) is a modification from the legacy
+          system and counts like any other. An award of 0 is not a break: a blanket contract
+          awarded $0 "depends upon requirements" (the City's description), with no fixed award
+          (5,328 contracts on the pinned files, 2,125 of them paid $2.73bn in all); 28 contracts
+          have a negative award, their reductions exceeding what the rows served award.
         data_tests:
           - not_null
       - name: revision_count
@@ -89,6 +93,19 @@ models:
         description: "{{ doc('payment_award_after_revisions') }}"
       - name: source_table
         description: "{{ doc('payment_source_table') }}"
+      - name: is_repeat
+        description: "{{ doc('payment_is_repeat') }}"
+      - name: repeat_kind
+        description: >
+          Why a row is a repeat, null on a first row: `exact`, a copy after the first of rows
+          identical in every column (2,560 rows on the pinned files); `without_department`, a row
+          with no department beside an otherwise identical row that has one (7,300); or
+          `rolled_up_itemised`, a rolled-up year whose amount equals to the cent the unflagged
+          dated payments of its vendor, contract and year (4).
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [exact, without_department, rolled_up_itemised]
       - name: is_rolled_up
         description: >
           True on a row the publisher rolled up: the payments of one vendor, contract and year in
@@ -99,3 +116,30 @@ models:
           Null on an itemised payment.
       - name: department_name
         description: The City department that paid, where served.
+
+unit_tests:
+  - name: the_2002_row_takes_no_fiscal_year_whatever_the_calendars_cover
+    description: >
+      Real rolled-up rows of 2002 (which holds 1996 to 2002) and 2003, against calendars that cover
+      both years: 2003 is exactly the fiscal year 2003, while the 2002 row spans seven fiscal years
+      and takes none, so no calendar ever counts 1996 to 2002 as 2002.
+    model: int_chicago__payments
+    given:
+      - input: ref('stg_chicago__payments')
+        rows:
+          - {payment_key: kone-2002, amount: 1600, rolled_up_year: 2002, department_name: DEPT OF GENERAL SERVICES, contract_number: E010532, vendor_name: KONE INC., vendor_is_hashed: false, copy_number: 1}
+          - {payment_key: urs-2003, amount: 21574.54, rolled_up_year: 2003, contract_number: T26417, vendor_name: URS CORPORATION, vendor_is_hashed: false, copy_number: 1}
+      - input: ref('fiscal_periods')
+        rows:
+          - {entity_id: chicago, fiscal_year: 2002, fiscal_period: 1, period_start: 2002-01-01, period_end: 2002-01-31}
+          - {entity_id: chicago, fiscal_year: 2002, fiscal_period: 12, period_start: 2002-12-01, period_end: 2002-12-31}
+          - {entity_id: chicago, fiscal_year: 2003, fiscal_period: 1, period_start: 2003-01-01, period_end: 2003-01-31}
+          - {entity_id: chicago, fiscal_year: 2003, fiscal_period: 12, period_start: 2003-12-01, period_end: 2003-12-31}
+      - input: ref('fiscal_calendar')
+        rows: []
+      - input: ref('int_chicago__contracts')
+        rows: []
+    expect:
+      rows:
+        - {payment_key: kone-2002, fiscal_year: null, fiscal_period: null, is_repeat: false}
+        - {payment_key: urs-2003, fiscal_year: 2003, fiscal_period: null, is_repeat: false}

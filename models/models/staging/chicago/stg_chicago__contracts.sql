@@ -12,7 +12,6 @@ select
     procurement_type,
     department,
     vendor_name,
-    vendor_id,
     vendor_name like 'person:%' as vendor_is_hashed,
     cast(substr(approval_date, 1, 10) as date) as approved_on,
     cast(substr(start_date, 1, 10) as date) as starts_on,

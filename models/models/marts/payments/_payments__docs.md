@@ -1,6 +1,6 @@
 {% docs payment_key %}
 A key naming one payment, unique across entities: a hash of the entity and every landed column of the payment's row, numbered among rows identical in all of them.
-It is the same in every landing made with the same hash key; a row the publisher changes gets a new key.
+It is the same in every landing made with the same hash key; a new hash key changes it on every row whose payee is hashed, and a row the publisher changes gets a new key.
 {% enddocs %}
 
 {% docs payment_entity_id %}
@@ -48,7 +48,14 @@ A number the contracts table lacks stays, with no award.
 
 {% docs payment_award_after_revisions %}
 The contract's award once every revision is applied, a decimal in the entity's currency; null where the payment has no contract or its contract number finds none.
-For Chicago it is the sum of the award amounts of the contract's original award and every revision, each revision counted once: every row of the contracts table is a change to the award, not a new total, so a negative amount takes money off, and a revision numbered by the legacy system (`T1`) counts like any other.
+For Chicago it is the sum of the award amounts of the contract's original award and every revision, each revision counted once: every row of the contracts table is a change to the award, not a new total, so a negative amount takes money off, and a revision numbered by the legacy system (`C514026`) counts like any other.
+An award of 0 is no fixed award, not a break: the City describes a blanket contract awarded $0 as one that "depends upon requirements", ordered as needed (5,328 contracts on the pinned files, 2,125 of them paid $2.73bn in all); 28 contracts have a negative award.
+{% enddocs %}
+
+{% docs payment_is_repeat %}
+True on a row that repeats another served row of the same entity, so a sum that leaves repeats out counts each payment once; false on the first row of each group and wherever an entity has no rule for repeats.
+For Chicago a row is a repeat when it is a copy after the first of rows identical in every landed column (2,560 rows on the pinned files), when it has no department beside an otherwise identical row that has one (the row with the department is the first; 7,300 rows), or when it is a rolled-up year whose amount equals to the cent the year's other dated payments of its vendor and contract (the dated rows are the first; 4 rows).
+These are 9,864 of 475,609 rows and $3.999bn; that they are the same payment served again rests on paid totals, not on the City saying so: with repeats left out, 21,960 contracts are paid exactly their award after revisions, against 21,264 with them, and 849 contracts are paid exactly twice their award with them.
 {% enddocs %}
 
 {% docs payment_source_table %}

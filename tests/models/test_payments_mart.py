@@ -48,7 +48,10 @@ COMMON = [
     "contract_number",
     "award_after_revisions",
     "source_table",
+    "is_repeat",
 ]
+# The vendors of contract 8878, private companies, whose second revision is served twice.
+REPEATED_REVISION_COMPANIES = {"V3 COMPANIES OF ILLINOIS, LIMITED", "V3 COMPANIES, LIMITED"}
 # Companies of the cut with no legal form the classifier accepts as one party (a `&`, a joined
 # name, `Company` alone) that the vendor seeds' register does not vouch for: the landing hashes
 # them with the test key, as a real landing hashes any payee without evidence.
@@ -125,14 +128,14 @@ def payments_where(build: Build, where: str = "true", *params: object) -> list[d
 
 
 def test_the_cuts_vendors_are_companies_named_in_the_tree() -> None:
-    """Every vendor of the cut is a public company of the labelled vendor sample or one of the
-    companies the landing hashes for want of a vouching register record, so a person's row
-    cannot slip in unseen."""
+    """Every vendor of the cut is a public company of the labelled vendor sample, one of the
+    companies the landing hashes for want of a vouching register record, or a company of the
+    repeated revision, so a person's row cannot slip in unseen."""
     companies = {
         v["name"] for v in yaml.safe_load(SAMPLE.read_text())["vendors"] if v["entity"] == "chicago"
     }
     vendors = {r["vendor_name"] for r in CUT["contracts"] + CUT["payments"]}
-    assert vendors <= companies | HASHED_COMPANIES
+    assert vendors <= companies | HASHED_COMPANIES | REPEATED_REVISION_COMPANIES
     assert vendors >= HASHED_COMPANIES
     cells = [v for r in CUT["contracts"] + CUT["payments"] for v in r.values()]
     assert not any(v.startswith(("person:", "id:")) for v in cells), "no hash is committed"
@@ -149,10 +152,17 @@ def test_the_cuts_vendors_are_companies_named_in_the_tree() -> None:
         "a_payment_is_dated_by_a_day_or_a_year",
         "every_served_payment_is_one_row",
         "a_vendor_is_flagged_hashed_exactly_when_it_is",
+        "a_repeat_leaves_its_first_row_unflagged",
+        "accepted_values_int_chicago__payments_repeat_kind__exact__without_department__rolled_up_itemised",
     ],
 )
 def test_each_payments_rule_ran_and_passed(build: Build, rule: str) -> None:
     assert build.results.get(rule) == "pass"
+
+
+def test_the_2002_unit_test_ran_and_passed(build: Build) -> None:
+    name = "int_chicago__payments::the_2002_row_takes_no_fiscal_year_whatever_the_calendars_cover"
+    assert any("PASS" in line and name in line for line in build.stdout.splitlines())
 
 
 def test_the_mart_has_the_shared_columns_in_order_with_decimal_amounts(build: Build) -> None:
@@ -196,6 +206,50 @@ def test_the_award_after_revisions_sums_every_revision_once(build: Build) -> Non
     assert any(Decimal(r["award_amount"]) < 0 for r in maximus)
     assert sum(not r["revision_number"].isdigit() for r in maximus) == 2
     assert found["D0952390332"] == Decimal("537719.70")
+    # Revision 2 of contract 8878 is served twice, under two vendor names: it counts once.
+    v3 = [r for r in CUT["contracts"] if r["purchase_order_contract_number"] == "8878"]
+    assert Counter(r["revision_number"] for r in v3) == {"0": 1, "2": 2}
+    assert found["8878"] == Decimal("1251062")
+    assert found["8878"] != sum(Decimal(r["award_amount"]) for r in v3)
+
+
+def repeats_of_the_cut() -> Counter[str]:
+    """The repeats among the cut's payments by kind, by the rule's own definition."""
+    rows = CUT["payments"]
+    with_department = Counter(
+        tuple(sorted((k, v) for k, v in p.items() if k != "department_name"))
+        for p in rows
+        if p.get("department_name")
+    )
+    kinds: Counter[str] = Counter()
+    for row, n in Counter(tuple(sorted(p.items())) for p in rows).items():
+        kinds["exact"] += n - 1
+        rest = tuple((k, v) for k, v in row if k != "department_name")
+        if "department_name" not in dict(row) and with_department[rest]:
+            kinds["without_department"] += 1
+    return kinds
+
+
+def test_a_payment_served_again_is_kept_and_flagged(build: Build) -> None:
+    kinds = dict(
+        query(
+            build,
+            "select repeat_kind, count(*) from int_chicago__payments"
+            " where is_repeat group by repeat_kind",
+        )
+    )
+    expected = repeats_of_the_cut()
+    assert kinds == {k: n for k, n in expected.items() if n}
+    assert kinds.keys() == {"exact", "without_department"}
+    assert query(build, "select count(*) from payments") == [(len(CUT["payments"]),)]
+    paid = query(
+        build,
+        "select sum(amount) from payments where contract_number = '76213' and not is_repeat",
+    )
+    once = {
+        (p["check_date"], p["amount"]) for p in CUT["payments"] if p["contract_number"] == "76213"
+    }
+    assert paid == [(sum(Decimal(a) for _, a in once),)]
 
 
 @pytest.mark.parametrize("contract", ["18942", "17466"])
@@ -293,7 +347,7 @@ def test_the_mart_currency_is_the_entitys_own(build: Build, access: dict[str, An
 @pytest.mark.parametrize("table", TABLES)
 def test_each_chicago_seed_is_the_cut_as_the_landing_lands_it(tmp_path: Path, table: str) -> None:
     """The seeds hold exactly what the landing's step writes for the cut with the test key: the
-    companies in clear, the one firm the register does not vouch for hashed with that key."""
+    companies in clear, those the register does not vouch for hashed with that key."""
     land(CUT, tmp_path)
     con = duckdb.connect()
     landed = con.execute(f"select * from read_parquet('{tmp_path / table}')").fetchall()  # noqa: S608
@@ -421,3 +475,45 @@ def test_the_real_landing_builds_the_payments_mart(tmp_path: Path) -> None:
         "select sum(amount) from payments where contract_number in ('P011551', '7116')"
         " group by contract_number order by contract_number",
     ) == [(Decimal("147938.00"),), (Decimal("1560856.10"),)]
+    repeats = {
+        (kind, rolled): (n, total)
+        for kind, rolled, n, total in query(
+            build,
+            "select repeat_kind, is_rolled_up, count(*), sum(amount) from int_chicago__payments"
+            " where is_repeat group by all",
+        )
+    }
+    print("repeats by kind:", repeats)
+    assert repeats == {
+        ("exact", False): (2_398, Decimal("1760586515.05")),
+        ("exact", True): (162, Decimal("76866731.54")),
+        ("without_department", False): (3_869, Decimal("148723005.74")),
+        ("without_department", True): (3_431, Decimal("2005570237.83")),
+        ("rolled_up_itemised", True): (4, Decimal("7482958.82")),
+    }
+    # Leaving the repeats out, more contracts are paid exactly their award: the evidence that a
+    # repeat is the same payment served again rests on these totals, not on the City.
+    paid_exactly = query(
+        build,
+        "with paid as (select contract_number, sum(amount) as raw,"
+        " sum(case when is_repeat then 0 else amount end) as firsts from payments"
+        " where contract_number is not null group by 1)"
+        " select count(*) filter (where raw = award_after_revisions),"
+        " count(*) filter (where firsts = award_after_revisions),"
+        " count(*) filter (where award_after_revisions <> 0 and raw = 2 * award_after_revisions)"
+        " from paid join int_chicago__contracts using (contract_number)",
+    )
+    print("contracts paid exactly their award (with repeats, without, twice):", paid_exactly)
+    assert paid_exactly == [(21_264, 21_960, 849)]
+    zero_and_negative = query(
+        build,
+        "with paid as (select contract_number, sum(amount) as paid from payments"
+        " where contract_number is not null group by 1)"
+        " select count(*) filter (where award_after_revisions = 0),"
+        " count(paid) filter (where award_after_revisions = 0),"
+        " sum(paid) filter (where award_after_revisions = 0),"
+        " count(*) filter (where award_after_revisions < 0)"
+        " from int_chicago__contracts left join paid using (contract_number)",
+    )
+    print("zero awards, of them paid, paid on them, negative awards:", zero_and_negative)
+    assert zero_and_negative == [(5_328, 2_125, Decimal("2725874886.39"), 28)]
