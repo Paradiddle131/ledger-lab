@@ -642,6 +642,39 @@ def test_a_contract_at_a_path_git_quotes_is_compared(tmp_path: Path, path: str) 
     assert "classifies personal and is classified nothing" in report
 
 
+GONE = f"contract payments ({PATH} on origin/main) is gone or has a new id"
+REFUSED: dict[str, tuple[dict[str, str], str]] = {
+    "the contract's id changed": (
+        {PATH: at_two(lambda c: c.update(id="payments-v2"), [GONE])},
+        GONE,
+    ),
+    "the contract retired": ({}, GONE),
+    "the unchanged contract beside a broken copy with its id at models/contracts/a.odcs.yaml": (
+        {PATH: CONTRACT.read_text(), "models/contracts/a.odcs.yaml": changed(drop("amount"))},
+        "contract payments is in both ",
+    ),
+    "the unchanged contract beside a broken copy with its id at models/contracts/zz.odcs.yaml": (
+        {PATH: CONTRACT.read_text(), "models/contracts/zz.odcs.yaml": changed(drop("amount"))},
+        "contract payments is in both ",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(REFUSED))
+def test_no_version_declares_a_contract_gone_or_doubled(published_repo: Path, name: str) -> None:
+    files, says = REFUSED[name]
+    ok, report = gate.check(with_files(published_repo, files))
+    assert not ok, report
+    assert says in report
+
+
+def test_no_version_declares_an_unreadable_contract(published_repo: Path) -> None:
+    text = at_two(remove_the_payee_name, BREAKS) + "schema: [\n"
+    ok, report = gate.check(with_files(published_repo, {PATH: text}))
+    assert not ok
+    assert f"{gate.CONTRACT} is unreadable" in report
+
+
 def test_a_schema_rename_hides_no_break_and_in_place_each_needs_its_line(
     published_repo: Path,
 ) -> None:

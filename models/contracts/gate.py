@@ -1,47 +1,67 @@
 """`make contract`: fail when a data contract breaks a consumer of the one on `origin/main`.
 
 Every `*.odcs.yaml` file `origin/main` holds, anywhere in its tree, is matched by its contract id
-with one in the working tree, wherever that one now sits, and a change is breaking when:
+with one in the working tree, wherever that one now sits; paths are listed NUL-separated, so a
+path git would quote is read too. Each contract matched is compared with the Data Contract CLI and
+the gate's rules on quality rules; a break of these kinds may be declared by a new major version:
 
-- the Data Contract CLI's `breaking` comparison, from a consumer's point of view, finds one: data
-  a consumer could have relied on may now arrive otherwise (a column removed or renamed, any type
-  changed, a column made nullable, a key or uniqueness dropped, an accepted value added, a bound
-  loosened, a quality rule the CLI can grade loosened or removed);
+- the CLI's `breaking` comparison, from a consumer's point of view, finds one: data a consumer
+  could have relied on may now arrive otherwise (a column removed or renamed, any type changed, a
+  column made nullable, a key or uniqueness dropped, an accepted value added, a bound loosened, a
+  quality rule the CLI can grade loosened or removed);
 - a quality rule `origin/main` holds is gone, under its id at the same place, or is changed in
   anything but its wording (`description`, `name`), since the CLI cannot grade a changed SQL query;
-  a rule is tightened by adding a new one beside it;
-- a column `origin/main` classifies `personal` is classified otherwise, which lowers its handling,
-  or is gone beside an added column not classified `personal`;
-- a schema `origin/main` holds is gone or renamed, or its table is under another schema;
-- a column holds nested properties, which the gate does not read;
-- a contract `origin/main` holds is gone from the working tree, or no longer has its id;
-- a contract cannot be read.
+  a rule is tightened by adding a new one beside it.
 
 Not breaking: an optional column added, a nullable column made required, an accepted value
 removed, a bound tightened, a description changed, a column newly classified `personal`, a new rule
 or a new contract.
 
 A deliberate break passes only under a new major version that lists it. When a contract's
-`version` has a major number above the one on `origin/main`, its ODCS `customProperties` entry
-`breakingChanges` lists each break of the first two kinds above as `change` (the break exactly as
+`version` is MAJOR.MINOR.PATCH with a major number above the one on `origin/main`, its ODCS
+`customProperties` entry `breakingChanges` lists each such break as `change` (the break exactly as
 this gate reports it, without the contract id) and `reason`, and the gate passes when the breaks it
 finds equal the breaks listed: it fails on a break not listed, a listed break that did not happen,
 an entry without a reason, or a list under a major version that did not go up, where the list is
 not read. The list is compared with `origin/main`'s contract, so once a new major version is on
 `origin/main` its list excuses nothing: the next break needs the next major version and a list of
-its own breaks. These stay breaking whatever the version, and no list can excuse them:
+its own breaks.
 
-- a column `origin/main` classifies `personal` classified otherwise: the classification decides
-  how the column is masked, not what a consumer reads;
-- a column `origin/main` classifies `personal` gone in a change that adds any column not
-  classified `personal`: a rename cannot be told from a removal and an addition, so each added
-  column is the removed one's possible successor (the removal alone stays declarable);
-- a schema gone or renamed, or a schema's `physicalName` now under another schema: a table gone
-  is a new contract, and the CLI's one `Removed schema` line would excuse every break under it;
-- a column holding nested `properties` or `items`: the gate reads one level of columns, so a field
-  a level down could hide its classification;
+Before those, every contract of the working tree, new ones included, and every contract on
+`origin/main` is read as properties, each by its logical names (contract id, schema name, property
+name) and by what it describes: its table, the schema entry's `physicalName` (else its name), and
+its column, the property's `physicalName` (else its name). A name is normalised by taking off one
+pair of double quotes wrapping a part whole and lower-casing it; a table may be `table` or
+`<schema>.table` where `<schema>` is the `schema` of one of the contract's servers, and a column
+holds no dot. These fail whatever the version, and no list can excuse them:
+
+- in any contract of the tree: a name that cannot be normalised (any other quote, white space,
+  an empty part, a table of more than two parts or under a schema no server names, a column with a
+  dot); two schema entries of one name (ignoring case); two properties of one schema with one name
+  (ignoring case) or over one column; nested `properties` or `items` on a property, since the gate
+  reads one level; and two schema entries, in one contract or across the tree, over one table;
+- a column `origin/main` classifies `personal` (by normalised table and column) that a property in
+  the tree describes without `classification: personal`, whatever it says instead;
+- a table `origin/main` describes that the tree describes under another contract or schema name,
+  or a column it describes under another property name: the CLI compares by logical names, so a
+  removal it reports there would hide what changed in the same table or column;
+- a column `origin/main` classifies `personal` that nothing in the tree describes, while the tree
+  adds anywhere (new contracts included) a column `origin/main` does not describe and that is not
+  classified `personal`: within one change a rename cannot be told from a removal and an addition,
+  so each such addition is the removed one's possible successor; the removal alone stays
+  declarable;
+- a schema `origin/main` holds, by its exact name, gone from its contract, since the CLI's one
+  `Removed schema` line would excuse every break under it;
 - a contract gone or with a new id, a contract unreadable (to YAML or to the CLI), and two
   contracts with one id: none leaves one contract to hold a version and a list.
+
+A contract already on `origin/main` whose shape the first rule refuses fails every change until a
+change fixes it; the gate cannot let such a shape onto `origin/main`, since it refuses it in a new
+contract too. The gate reads contracts, not data: a classification can still be lost across two
+changes (an unclassified column added in one, the personal column removed in a later major
+version), and a column whose values the models copy under a new physical name is outside it. What
+covers those is review of the contract with the masking tags, and the tests that hold the contract
+equal to the dbt project.
 
 The comparison reads `origin/main` from the local clone and runs the CLI in this environment, so
 it needs no network. A clone that does not hold `origin/main` cannot be compared, so the gate fails
@@ -138,6 +158,25 @@ def rules(contract: Contract) -> dict[str, dict[str, Any]]:
             for n, rule in enumerate(owner.get("quality") or []):
                 found[f"{place}/{rule.get('id') or f'#{n} (no id)'}"] = rule
     return found
+
+
+def personal(contract: Contract) -> set[str]:
+    """Every column the contract classifies `personal`, as `<schema>.<column>`."""
+    return {
+        f"{schema['name']}.{p['name']}"
+        for schema in contract.get("schema") or []
+        for p in schema.get("properties") or []
+        if p.get("classification") == "personal"
+    }
+
+
+def columns(contract: Contract) -> set[str]:
+    """Every column of the contract, as `<schema>.<column>`."""
+    return {
+        f"{schema['name']}.{p['name']}"
+        for schema in contract.get("schema") or []
+        for p in schema.get("properties") or []
+    }
 
 
 def breaks(before: Contract, after: Contract) -> tuple[list[str], list[str]]:
