@@ -700,11 +700,13 @@ SHAPES = {
             where entity_id = 'chicago' and not is_repeat and payment_date is not null
               and document_number is not null)""",
     "one-row-then-its-payee": """
+        select count(*) = 1 and bool_and(vendor_is_hashed) and bool_and(document_number like 'id:%')
+        from payments where entity_id = 'uk-transport' and payment_date = $day""",
+    "filter-on-the-masked-value": """
         select count(*) = 1 and bool_and(vendor_is_hashed) from payments
         where entity_id = 'uk-transport' and payment_date = $day""",
 }
 SHAPES["identity-changes-mid-session"] = SHAPES["earlier-result-recalled"]
-SHAPES["filter-on-the-masked-value"] = SHAPES["one-row-then-its-payee"]
 
 
 def rests_on(doc: dict[str, Any], database: Path) -> dict[str, bool]:

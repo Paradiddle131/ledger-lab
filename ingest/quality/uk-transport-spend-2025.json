@@ -9,7 +9,8 @@
       "hidden_rows": 12009,
       "hashed_suppliers": 1099,
       "redacted_rows": 1,
-      "placeholder_references": 1745,
+      "placeholder_references": 2535,
+      "hashed_references_on_clear_rows": 0,
       "identical_copies": 65
     },
     "names": [
@@ -23,7 +24,7 @@
     ]
   },
   "expectations": [
-    {"type": "expect_table_columns_to_match_ordered_list", "kwargs": {"column_list": ["source_file", "source_row", "department_family", "entity", "date", "expense_type", "expense_area", "supplier", "transaction_number", "item_text", "amount", "postal_code", "amount_value", "paid_on", "paid_in_month", "months_of_file", "is_hidden_supplier", "is_hashed_reference", "is_hidden_row_describing_supplier", "hashed_supplier", "is_redacted", "is_placeholder_reference", "is_identical_copy"]}, "notes": "Schema: every landed column in order, then the query's own; a landed column more or less breaks it."},
+    {"type": "expect_table_columns_to_match_ordered_list", "kwargs": {"column_list": ["source_file", "source_row", "department_family", "entity", "date", "expense_type", "expense_area", "supplier", "transaction_number", "item_text", "amount", "postal_code", "amount_value", "paid_on", "paid_in_month", "months_of_file", "is_hidden_supplier", "is_hidden_row_describing_supplier", "is_hidden_row_with_clear_reference", "is_hashed_reference_of_no_hidden_row", "is_hashed_reference_on_clear_row", "hashed_supplier", "is_redacted", "is_placeholder_reference", "is_identical_copy"]}, "notes": "Schema: every landed column in order, then the query's own; a landed column more or less breaks it."},
     {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "source_file", "type_": "str"}, "notes": "Schema: the landing keeps the publisher's text."},
     {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "source_row", "type_": "int64"}, "notes": "Schema: landed as int64."},
     {"type": "expect_column_values_to_be_of_type", "kwargs": {"column": "department_family", "type_": "str"}, "notes": "Schema: the landing keeps the publisher's text."},
@@ -43,7 +44,7 @@
     {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "entity"}, "notes": "The paying body, on every row."},
     {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "date"}, "notes": "Every payment is dated."},
     {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "supplier"}, "notes": "Every row names its supplier, in clear, hashed or `REDACTED`."},
-    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "transaction_number"}, "notes": "Every row has a reference, in clear, hashed or `#`."},
+    {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "transaction_number"}, "notes": "Every row has a reference, in clear, hashed or a placeholder."},
     {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "amount"}, "notes": "Every payment has an amount."},
     {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "date", "regex": "^\\d{2}/\\d{2}/\\d{4}$"}, "notes": "A date is day, month and year."},
     {"type": "expect_column_values_to_not_be_null", "kwargs": {"column": "paid_on"}, "notes": "Every payment is dated with a day the calendar has."},
@@ -54,7 +55,8 @@
     {"type": "expect_column_distinct_values_to_equal_set", "kwargs": {"column": "department_family", "value_set": ["Department for Transport"]}, "notes": "The Department's own family, the payer."},
     {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "supplier", "regex": "^(?:person:[0-9a-f]{64}|(?!person:).+)$"}, "notes": "A hashed name is `person:` and 64 hex digits; no clear name starts with `person:`."},
     {"type": "expect_column_values_to_match_regex", "kwargs": {"column": "transaction_number", "regex": "^(?:id:[0-9a-f]{64}|(?!id:).+)$"}, "notes": "A hashed reference is `id:` and 64 hex digits; no clear one starts with `id:`."},
-    {"type": "expect_column_pair_values_to_be_equal", "kwargs": {"column_A": "is_hidden_supplier", "column_B": "is_hashed_reference"}, "notes": "A transaction number is hashed on exactly the rows whose supplier is hashed or redacted."},
+    {"type": "expect_column_values_to_be_between", "kwargs": {"column": "is_hidden_row_with_clear_reference", "min_value": 0, "max_value": 0}, "notes": "A hashed or redacted row's transaction number is a keyed hash or a placeholder, never a number in clear."},
+    {"type": "expect_column_values_to_be_between", "kwargs": {"column": "is_hashed_reference_of_no_hidden_row", "min_value": 0, "max_value": 0}, "notes": "A transaction number is hashed only where a hashed or redacted row of its paying body carries it."},
     {"type": "expect_column_values_to_be_between", "kwargs": {"column": "is_hidden_row_describing_supplier", "min_value": 0, "max_value": 0}, "notes": "A hashed or redacted row keeps no description or postcode."},
     {"type": "expect_table_row_count_to_equal", "kwargs": {"value": {"$PARAMETER": "rows"}}, "notes": "Pinned: every served row of the year, headers aside."},
     {"type": "expect_column_unique_value_count_to_be_between", "kwargs": {"column": "source_file", "min_value": {"$PARAMETER": "files"}, "max_value": {"$PARAMETER": "files"}}, "notes": "Pinned mess, twelve files: one file a month."},
@@ -63,7 +65,8 @@
     {"type": "expect_column_sum_to_be_between", "kwargs": {"column": "is_hidden_supplier", "min_value": {"$PARAMETER": "hidden_rows"}, "max_value": {"$PARAMETER": "hidden_rows"}}, "notes": "Pinned: rows whose supplier is hashed (12,008) or redacted; it moves with the register and the classifier."},
     {"type": "expect_column_unique_value_count_to_be_between", "kwargs": {"column": "hashed_supplier", "min_value": {"$PARAMETER": "hashed_suppliers"}, "max_value": {"$PARAMETER": "hashed_suppliers"}}, "notes": "Pinned: the distinct hashed suppliers; the same count under any key."},
     {"type": "expect_column_sum_to_be_between", "kwargs": {"column": "is_redacted", "min_value": {"$PARAMETER": "redacted_rows"}, "max_value": {"$PARAMETER": "redacted_rows"}}, "notes": "Pinned: rows the Department redacted."},
-    {"type": "expect_column_sum_to_be_between", "kwargs": {"column": "is_placeholder_reference", "min_value": {"$PARAMETER": "placeholder_references"}, "max_value": {"$PARAMETER": "placeholder_references"}}, "notes": "Pinned: rows whose reference is the placeholder `#`."},
+    {"type": "expect_column_sum_to_be_between", "kwargs": {"column": "is_placeholder_reference", "min_value": {"$PARAMETER": "placeholder_references"}, "max_value": {"$PARAMETER": "placeholder_references"}}, "notes": "Pinned: rows whose reference is a placeholder, `#` (2,474, every High Speed Two row) or `DIRECT DEBIT` (61), on any row."},
+    {"type": "expect_column_sum_to_be_between", "kwargs": {"column": "is_hashed_reference_on_clear_row", "min_value": {"$PARAMETER": "hashed_references_on_clear_rows"}, "max_value": {"$PARAMETER": "hashed_references_on_clear_rows"}}, "notes": "Pinned: organisation rows whose transaction number is hashed because a hidden row of the same paying body carries it; none on the pinned files, where no body's number is shared by its hidden and clear rows; it moves with the register and the classifier."},
     {"type": "expect_column_sum_to_be_between", "kwargs": {"column": "is_identical_copy", "min_value": {"$PARAMETER": "identical_copies"}, "max_value": {"$PARAMETER": "identical_copies"}}, "notes": "Pinned mess, identical rows: further copies of a row identical to another of its file in every landed cell (121 rows in 56 groups)."}
   ]
 }

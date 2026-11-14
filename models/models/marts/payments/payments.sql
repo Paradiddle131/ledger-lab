@@ -43,9 +43,9 @@ select
     {% endfor -%}
     case when not shared.vendor_is_hashed then shared.vendor_name end as vendor_organisation_name,
     case when shared.vendor_is_hashed then shared.vendor_name end as vendor_person_key,
-    -- Only Chicago's numbers: the UK landing replaces a hashed row's number by a keyed hash, so a
-    -- clear UK number cannot be told apart from one a hashed payee's line of the same transaction
-    -- carries. A placeholder (`Multiple`) names no document, so it is no reference.
+    -- Only Chicago's numbers, as the published contract's rule holds the column for the UK: the
+    -- UK landing already hashes every number a hashed row carries on every row of its body. A
+    -- placeholder (`Multiple`) names no document, so it is no reference.
     case
         when
             shared.entity_id = 'chicago'

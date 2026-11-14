@@ -1,6 +1,7 @@
 -- One row per landed row of the Department for Transport's spend: the file and position it was
 -- served at, its payment date, its amount typed as a decimal from the publisher's digits, and the
--- supplier and transaction number as landed (a possible person's both keyed hashes).
+-- supplier and transaction number as landed (a possible person's name a keyed hash, and a number
+-- their row carries a keyed hash on every row of its paying body).
 -- The date is rebuilt from its served `dd/mm/yyyy` as an ISO date, and both casts are safe ones,
 -- so a value that does not cast is a null the not-null tests name, never a dropped row.
 -- The `source_rows` var picks the rows: the landed set or the committed sample of real rows.

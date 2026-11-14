@@ -34,7 +34,14 @@
         "properties": {
           "id": {"$ref": "#/$defs/slug"},
           "scope": {"enum": ["entity", "group"]},
-          "holds": {"$ref": "#/$defs/text"}
+          "holds": {"$ref": "#/$defs/text"},
+          "tables": {
+            "description": "The warehouse tables the models build for the product; absent while they build none.",
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}
+          }
         }
       }
     },

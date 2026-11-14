@@ -49,6 +49,11 @@ models:
           - accepted_values:
               arguments:
                 values: [repeat, outside-calendars, no-outturn, no-rate]
+      - name: payee
+        description: >
+          The payment's payee as the payments mart publishes it, an organisation's name or a
+          person's keyed hash; null on a Dutch budget line. Personal, so no persona reads this
+          layer; the marts publish only a count of distinct payees.
       - name: reporting_currency
         data_tests:
           - not_null

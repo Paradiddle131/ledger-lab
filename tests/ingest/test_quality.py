@@ -180,7 +180,8 @@ FIXTURE_COUNTS: dict[str, dict[str, Any]] = {
         "hidden_rows": 9,
         "hashed_suppliers": 8,
         "redacted_rows": 0,
-        "placeholder_references": 13,
+        "placeholder_references": 16,
+        "hashed_references_on_clear_rows": 0,
         "identical_copies": 1,
     },
 }
@@ -274,7 +275,7 @@ RULES = {
     "gleif-legal-entities": 70,
     "nl-government-budget": 37,
     "sec-annual-filings": 47,
-    "uk-transport-spend-2025": 42,
+    "uk-transport-spend-2025": 44,
 }
 # Arguments that let a rule pass on a share of the rows, or on rows a condition picks.
 WEAKENING = {"mostly", "row_condition", "condition_parser"}
@@ -493,6 +494,24 @@ PLANTS: list[tuple[str, str, list[str], str]] = [
             " where rowid = (select max(rowid) from t)"
         ],
         "expect_column_sum_to_be_between on is_identical_copy",
+    ),
+    (
+        "uk-transport-spend-2025",
+        "mess",
+        [
+            "update t set transaction_number = '1021398' where rowid ="
+            " (select min(rowid) from t where supplier like 'person:%')"
+        ],
+        "expect_column_values_to_be_between on is_hidden_row_with_clear_reference",
+    ),
+    (
+        "uk-transport-spend-2025",
+        "mess",
+        [
+            "update t set transaction_number = 'id:' || repeat('0', 64) where rowid ="
+            " (select min(rowid) from t where supplier not like 'person:%')"
+        ],
+        "expect_column_values_to_be_between on is_hashed_reference_of_no_hidden_row",
     ),
 ]
 
