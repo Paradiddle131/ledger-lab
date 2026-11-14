@@ -2,7 +2,9 @@
 -- entity's fiscal periods, or its whole fiscal year for figures the source gives only by year,
 -- summing the figures that count (`int_group_totals__figures` with no rule leaving them out) in the
 -- entity's own currency and in the reporting currency at actual and at constant rates. A group
--- total for a span is the sum of its rows across entities, read with each row's basis.
+-- total for a span is the sum of its rows across entities, read with each row's basis. `payees`
+-- counts the distinct payees the row sums, a figure with no payee (a Dutch budget line) counting
+-- as its own, so the access rules can hold a minimum group of payees, not of payments.
 select
     {{ dbt.concat([
         'entity_id', "'-'",
@@ -17,6 +19,7 @@ select
     period_end,
     basis,
     count(*) as figures,
+    count(distinct coalesce(payee, figure_key)) as payees,
     currency,
     sum(amount) as amount,
     reporting_currency,

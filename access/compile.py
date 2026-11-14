@@ -83,7 +83,7 @@ class Aggregate:
     group_by: tuple[str, ...]
     sums: tuple[str, ...]
     units: str
-    # `count_distinct` or `sum`, over the column `units_of`.
+    # `count_distinct` or `max`, over the column `units_of`.
     count: str
     units_of: str
     minimum: int
@@ -202,18 +202,29 @@ def compile_persona(
             raise CompileError(f"{persona} reads {product} both by rows and in aggregate")
         if not tables_of[product]:
             continue  # the models build no table of it yet: nothing to aggregate
-        views = aggregates["products"].get(product)
-        if not views:
+        entry = aggregates["products"].get(product)
+        if not entry or not entry["tables"]:
             raise CompileError(f"{product}: an aggregate grant with no aggregate table")
-        for view in views:
+        if not isinstance(entry["entity_rows"], bool):
+            raise CompileError(f"{product}: entity_rows must be true or false")
+        for view in entry["tables"]:
             if view["from"] not in tables_of[product]:
                 raise CompileError(f"{view['name']}: {view['from']} is not a table of {product}")
             source = _columns_of(schema, view["from"])
             units = view["units"]
-            count = "count_distinct" if "count_distinct" in units else "sum"
+            count = "count_distinct" if "count_distinct" in units else "max"
             if count not in units or set(units) != {"name", count}:
                 raise CompileError(f"{view['name']}: units count no column it knows: {units}")
-            shown = [*view["group_by"], *view["sum"]]
+            group_by = list(view["group_by"])
+            sums = list(view["sum"])
+            if entry["entity_rows"]:
+                group_by += view["entity_group_by"]
+                sums += view.get("entity_sum", [])
+            elif ENTITY in group_by:
+                raise CompileError(f"{view['name']}: all-entity figures grouped by {ENTITY}")
+            shown = [*group_by, *sums]
+            if units["name"] in shown or len(shown) != len(set(shown)):
+                raise CompileError(f"{view['name']}: a column is shown twice: {shown}")
             for name in [*shown, units[count]]:
                 if name not in source:
                     raise CompileError(f"{view['name']}: {view['from']} has no column {name}")
@@ -232,8 +243,8 @@ def compile_persona(
                     view["name"],
                     view["from"],
                     entities,
-                    tuple(view["group_by"]),
-                    tuple(view["sum"]),
+                    tuple(group_by),
+                    tuple(sums),
                     units["name"],
                     count,
                     units[count],
@@ -290,7 +301,7 @@ def statements(plan: Plan) -> list[str]:
             )
         else:
             of = quote(table.units_of)
-            units = f"count(distinct {of})" if table.count == "count_distinct" else f"sum({of})"
+            units = f"count(distinct {of})" if table.count == "count_distinct" else f"max({of})"
             keys = ", ".join(quote(c) for c in table.group_by)
             sums = "".join(f", sum({quote(c)}) as {quote(c)}" for c in table.sums)
             source = f"{SOURCE}.main.{quote(table.source)}"

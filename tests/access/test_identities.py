@@ -65,7 +65,7 @@ def expected_aggregates(access: Doc, aggregates: Doc, persona: str) -> set[str]:
         for grant in access["grants"]
         if grant["persona"] == persona and grant["access"] == "aggregate"
         if tables_of(access)[grant["product"]]
-        for view in aggregates["products"][grant["product"]]
+        for view in aggregates["products"][grant["product"]]["tables"]
     }
 
 
@@ -116,7 +116,7 @@ def test_aggregate_draft_and_post_alone_reach_no_rows(
     } - set(expected(access, persona))
     held = tables(as_persona(persona), persona)
     for product in rowless:
-        views = {v["name"] for v in aggregates["products"].get(product, [])}
+        views = {v["name"] for v in aggregates["products"].get(product, {}).get("tables", [])}
         # The persona holds no table of the product but its aggregate tables, when it has them.
         assert held & ({*tables_of(access)[product]} | views) <= views, product
 

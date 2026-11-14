@@ -11,7 +11,7 @@
   },
   "properties": {
     "minimum_group": {
-      "description": "The fewest units a group may hold to be shown.",
+      "description": "The fewest payees a group may hold to be shown.",
       "type": "integer",
       "minimum": 2
     },
@@ -19,27 +19,40 @@
       "type": "object",
       "propertyNames": {"$ref": "#/$defs/slug"},
       "additionalProperties": {
-        "type": "array",
-        "minItems": 1,
-        "items": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["name", "from", "group_by", "sum", "units"],
-          "properties": {
-            "name": {"$ref": "#/$defs/name"},
-            "from": {"$ref": "#/$defs/name"},
-            "group_by": {"$ref": "#/$defs/names"},
-            "sum": {"$ref": "#/$defs/names"},
-            "units": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["entity_rows", "tables"],
+        "properties": {
+          "entity_rows": {
+            "description": "Whether the grain keeps each entity apart (adding entity_group_by and entity_sum).",
+            "type": "boolean"
+          },
+          "tables": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["name"],
-              "minProperties": 2,
-              "maxProperties": 2,
+              "required": ["name", "from", "group_by", "sum", "entity_group_by", "units"],
               "properties": {
                 "name": {"$ref": "#/$defs/name"},
-                "count_distinct": {"$ref": "#/$defs/name"},
-                "sum": {"$ref": "#/$defs/name"}
+                "from": {"$ref": "#/$defs/name"},
+                "group_by": {"$ref": "#/$defs/names"},
+                "sum": {"$ref": "#/$defs/names"},
+                "entity_group_by": {"$ref": "#/$defs/names"},
+                "entity_sum": {"$ref": "#/$defs/names"},
+                "units": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["name"],
+                  "minProperties": 2,
+                  "maxProperties": 2,
+                  "properties": {
+                    "name": {"$ref": "#/$defs/name"},
+                    "count_distinct": {"$ref": "#/$defs/name"},
+                    "max": {"$ref": "#/$defs/name"}
+                  }
+                }
               }
             }
           }

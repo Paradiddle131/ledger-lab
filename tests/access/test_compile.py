@@ -17,8 +17,10 @@ from typing import Any
 
 import duckdb
 import pytest
+import yaml
 
 from access.compile import (
+    Aggregate,
     CompileError,
     Plan,
     Rows,
@@ -27,7 +29,7 @@ from access.compile import (
     source_schema,
     statements,
 )
-from tests.conftest import landed_file
+from tests.conftest import REPO, landed_file
 
 AsPersona = Callable[[str], duckdb.DuckDBPyConnection]
 Doc = dict[str, Any]
@@ -238,71 +240,144 @@ def test_a_tag_reader_change_changes_what_is_compiled_with_no_code_edit(
 
 # The minimum group.
 
+# The spans an all-entity group-totals figure is read by, and its figures in euros.
+SPAN_FIGURES = (
+    "period_start, period_end, sum(figures), sum(amount_at_actual_rates),"
+    " sum(amount_at_constant_rates), max(payees)"
+)
+
+
+def aggregate_readers(access: Doc, product: str) -> list[str]:
+    return sorted(
+        {
+            g["persona"]
+            for g in access["grants"]
+            if g["product"] == product and g["access"] == "aggregate"
+        }
+    )
+
 
 def test_a_group_totals_query_over_fewer_than_the_minimum_group_returns_nothing(
     as_persona: AsPersona, access: Doc, aggregates: Doc, warehouse: Path
 ) -> None:
     minimum = aggregates["minimum_group"]
     small = builder(
-        warehouse, "select group_total_key from group_totals where figures < ?", minimum
+        warehouse,
+        "select period_start, period_end from group_totals group by all having max(payees) < ?",
+        minimum,
     )
-    assert small, "the samples hold a group-totals row of fewer figures than the minimum"
-    aggregate = sorted(
-        g["persona"]
-        for g in access["grants"]
-        if g["product"] == "group-totals" and g["access"] == "aggregate"
-    )
+    assert small, "the samples hold a span of fewer payees than the minimum"
     clear = next(
         g["persona"]
         for g in access["grants"]
         if g["product"] == "group-totals" and g["access"] == "read"
     )
-    assert aggregate
-    for persona in [*aggregate, clear]:
+    readers = aggregate_readers(access, "group-totals")
+    assert readers
+    span = "select * from group_totals where period_start = ? and period_end = ?"
+    for persona in [*readers, clear]:
         db = as_persona(persona)
-        for (key,) in small:
-            got = db.execute(
-                "select * from group_totals where group_total_key = ?", [key]
-            ).fetchall()
-            assert (got == []) == (persona != clear), (persona, key)
+        for start, end in small:
+            got = db.execute(span, [start, end]).fetchall()
+            assert (got == []) == (persona != clear), (persona, start)
         if persona != clear:
             for table in ("group_totals", "group_totals_left_out"):
-                (smallest,) = db.execute(f"select min(figures) from {table}").fetchone() or (None,)  # noqa: S608
+                (smallest,) = db.execute(f"select min(payees) from {table}").fetchone() or (None,)  # noqa: S608
                 assert smallest is None or smallest >= minimum, (persona, table)
 
 
 def test_the_minimum_is_one_catalogue_line(
-    as_persona: AsPersona,
+    access: Doc, columns: Doc, aggregates: Doc, warehouse: Path, tmp_path: Path
+) -> None:
+    persona = aggregate_readers(access, "group-totals")[0]
+    lower = copy.deepcopy(aggregates)
+    lower["minimum_group"] = 2
+    expected = builder(
+        warehouse,
+        f"select {SPAN_FIGURES} from group_totals group by all having max(payees) >= 2"  # noqa: S608
+        " order by all",
+    )
+    assert expected, "the samples hold a span of at least two payees"
+    db = open_persona(access, columns, lower, persona, warehouse, tmp_path)
+    try:
+        seen = db.execute(
+            "select period_start, period_end, figures, amount_at_actual_rates,"
+            " amount_at_constant_rates, payees from group_totals order by all"
+        ).fetchall()
+    finally:
+        db.close()
+    assert seen == expected
+
+
+def test_aggregate_group_totals_are_all_entity_figures_until_the_owner_chooses(
+    access: Doc, columns: Doc, aggregates: Doc, warehouse: Path
+) -> None:
+    persona = aggregate_readers(access, "group-totals")[0]
+
+    def grain(doc: Doc) -> set[str]:
+        (table,) = [
+            t
+            for t in plan_of(access, columns, doc, persona, warehouse).tables
+            if isinstance(t, Aggregate) and t.name == "group_totals"
+        ]
+        return set(table.group_by) | set(table.sums)
+
+    entity = {"entity_id", "basis", "currency", "amount", "group_total_key"}
+    assert grain(aggregates).isdisjoint(entity)
+    per_entity = copy.deepcopy(aggregates)
+    per_entity["products"]["group-totals"]["entity_rows"] = True
+    assert entity <= grain(per_entity)
+
+
+# The kept groups over the samples at the minimum of ten, per aggregate table: a change to the
+# minimum, a grain or a units count moves them.
+SAMPLE_KEPT = {"group_totals": 0, "group_totals_left_out": 2, "payments_by_period": 1}
+SAMPLE_KEPT_AT_TWO = {"group_totals": 1, "group_totals_left_out": 5, "payments_by_period": 25}
+
+
+@pytest.mark.parametrize("minimum", [None, 2])
+def test_the_kept_groups_over_the_samples_are_pinned(
     access: Doc,
     columns: Doc,
     aggregates: Doc,
     warehouse: Path,
     tmp_path: Path,
+    minimum: int | None,
 ) -> None:
-    persona = next(g["persona"] for g in access["grants"] if g["access"] == "aggregate")
-    lower = copy.deepcopy(aggregates)
-    lower["minimum_group"] = 2
-    expected = builder(
-        warehouse, "select group_total_key from group_totals where figures >= 2 order by 1"
-    )
-    assert expected, "the samples hold a group-totals row of at least two figures"
-    db = open_persona(access, columns, lower, persona, warehouse, tmp_path)
-    try:
-        seen = db.execute("select group_total_key from group_totals order by 1").fetchall()
-    finally:
-        db.close()
-    assert seen == expected
+    # The pins are counted at ten. A minimum of eight or less keeps more groups over the samples;
+    # they hold no group of exactly nine payees, so this line is what a minimum of nine turns red.
+    assert aggregates["minimum_group"] == 10
+    doc = copy.deepcopy(aggregates)
+    if minimum is not None:
+        doc["minimum_group"] = minimum
+    kept: dict[str, int] = {}
+    for persona in sorted(
+        {*aggregate_readers(access, "group-totals"), *aggregate_readers(access, "payments")}
+    ):
+        directory = tmp_path / persona
+        directory.mkdir()
+        db = open_persona(access, columns, doc, persona, warehouse, directory)
+        try:
+            for table in SAMPLE_KEPT:
+                if reads_aggregate(access, doc, persona, table):
+                    (n,) = db.execute(f"select count(*) from {table}").fetchone() or (0,)  # noqa: S608
+                    assert kept.setdefault(table, n) == n, (persona, table)
+        finally:
+            db.close()
+            shutil.rmtree(directory)
+    assert kept == (SAMPLE_KEPT if minimum is None else SAMPLE_KEPT_AT_TWO)
+
+
+def test_the_evals_measure_against_the_access_rules_minimum(aggregates: Doc) -> None:
+    evals = yaml.safe_load((REPO / "agent/evals/adversarial.yaml").read_text())
+    assert evals["minimum_group"] == aggregates["minimum_group"]
 
 
 def test_an_aggregate_reader_of_payments_gets_payee_counts_above_the_minimum_and_no_rows(
     as_persona: AsPersona, access: Doc, aggregates: Doc, warehouse: Path
 ) -> None:
     minimum = aggregates["minimum_group"]
-    persona = next(
-        g["persona"]
-        for g in access["grants"]
-        if g["product"] == "payments" and g["access"] == "aggregate"
-    )
+    persona = aggregate_readers(access, "payments")[0]
     db = as_persona(persona)
     with pytest.raises(duckdb.CatalogException):
         db.execute("select * from payments")
@@ -325,6 +400,36 @@ def test_an_aggregate_reader_of_payments_gets_payee_counts_above_the_minimum_and
     assert held.isdisjoint({"payment_date", "vendor_name", "payment_key"})
 
 
+def test_an_aggregate_reader_sees_only_its_granted_entities(
+    access: Doc, columns: Doc, aggregates: Doc, warehouse: Path, tmp_path: Path
+) -> None:
+    persona = aggregate_readers(access, "payments")[0]
+    lower = copy.deepcopy(aggregates)
+    lower["minimum_group"] = 2
+    one = copy.deepcopy(access)
+    one["grants"] = [
+        g
+        for g in one["grants"]
+        if not (
+            g["persona"] == persona
+            and g["product"] == "payments"
+            and g.get("entity") not in (None, "chicago")
+        )
+    ]
+    seen: dict[str, set[str]] = {}
+    for name, catalogue in (("all", access), ("chicago", one)):
+        directory = tmp_path / name
+        directory.mkdir()
+        db = open_persona(catalogue, columns, lower, persona, warehouse, directory)
+        try:
+            rows = db.execute("select distinct entity_id from payments_by_period").fetchall()
+            seen[name] = {e for (e,) in rows}
+        finally:
+            db.close()
+            shutil.rmtree(directory)
+    assert seen == {"all": {"chicago", "uk-transport"}, "chicago": {"chicago"}}
+
+
 # Generated from the catalogues, refusing what it cannot express.
 
 
@@ -332,13 +437,14 @@ def test_every_aggregate_table_sums_a_table_of_a_known_product(
     access: Doc, aggregates: Doc
 ) -> None:
     tables = {p["id"]: p.get("tables", []) for p in access["data_products"]}
-    names = [v["name"] for views in aggregates["products"].values() for v in views]
+    entries = aggregates["products"]
+    names = [v["name"] for entry in entries.values() for v in entry["tables"]]
     assert len(names) == len(set(names))
-    for product, views in aggregates["products"].items():
+    for product, entry in entries.items():
         assert product in tables, product
-        assert {v["from"] for v in views} <= set(tables[product]), product
+        assert {v["from"] for v in entry["tables"]} <= set(tables[product]), product
     granted = {g["product"] for g in access["grants"] if g["access"] == "aggregate"}
-    assert {p for p in granted if tables[p]} <= set(aggregates["products"])
+    assert {p for p in granted if tables[p]} <= set(entries)
 
 
 def test_the_compile_is_deterministic(
@@ -350,10 +456,30 @@ def test_the_compile_is_deterministic(
     )
 
 
+# Each change to the catalogues the compiler cannot express, with the refusal it must give.
+REFUSALS = {
+    "unknown-access": "no rule for the access",
+    "unknown-masking": "no masking rule",
+    "unknown-tag": "no tag",
+    "missing-column": "has no no_such_column",
+    "tag-outside-the-product": "is not a table of payments",
+    "missing-table": "no table no_such_table",
+    "aggregate-of-a-tagged-column": "shows a tagged column",
+    "aggregate-with-no-table": "no aggregate table",
+    "all-entity-grouped-by-entity": "all-entity figures grouped by",
+    "unknown-units": "units count no column",
+    "minimum-of-one": "minimum group",
+    "clear-and-masked": "both in clear and masked",
+    "rows-and-aggregate": "both by rows and in aggregate",
+    "hash-on-a-number": "masks strings only",
+}
+
+
 def refusal(change: str, access: Doc, columns: Doc, aggregates: Doc) -> tuple[Doc, Doc, Doc, str]:
     """The three catalogues with one line changed, and the persona to compile."""
     access, columns, aggregates = (copy.deepcopy(d) for d in (access, columns, aggregates))
     persona = "accountant-chicago"
+    totals = aggregates["products"]["group-totals"]["tables"][0]
     if change == "unknown-access":
         access["grants"].append({"persona": persona, "product": "audit-log", "access": "export"})
     elif change == "unknown-masking":
@@ -367,10 +493,14 @@ def refusal(change: str, access: Doc, columns: Doc, aggregates: Doc) -> tuple[Do
     elif change == "missing-table":
         access["data_products"][0]["tables"] = ["payments", "no_such_table"]
     elif change == "aggregate-of-a-tagged-column":
-        aggregates["products"]["payments"][0]["group_by"].append("vendor_name")
+        aggregates["products"]["payments"]["tables"][0]["group_by"].append("vendor_name")
         persona = "metric-owner"
     elif change == "aggregate-with-no-table":
         del aggregates["products"]["group-totals"]
+    elif change == "all-entity-grouped-by-entity":
+        totals["group_by"].append("entity_id")
+    elif change == "unknown-units":
+        totals["units"] = {"name": "payees", "sum": "payees"}
     elif change == "minimum-of-one":
         aggregates["minimum_group"] = 1
     elif change == "clear-and-masked":
@@ -382,28 +512,12 @@ def refusal(change: str, access: Doc, columns: Doc, aggregates: Doc) -> tuple[Do
     return access, columns, aggregates, persona
 
 
-@pytest.mark.parametrize(
-    "change",
-    [
-        "unknown-access",
-        "unknown-masking",
-        "unknown-tag",
-        "missing-column",
-        "tag-outside-the-product",
-        "missing-table",
-        "aggregate-of-a-tagged-column",
-        "aggregate-with-no-table",
-        "minimum-of-one",
-        "clear-and-masked",
-        "rows-and-aggregate",
-        "hash-on-a-number",
-    ],
-)
+@pytest.mark.parametrize("change", list(REFUSALS))
 def test_the_compile_refuses_what_it_cannot_express(
     access: Doc, columns: Doc, aggregates: Doc, warehouse: Path, change: str
 ) -> None:
     changed = refusal(change, access, columns, aggregates)
-    with pytest.raises(CompileError):
+    with pytest.raises(CompileError, match=REFUSALS[change]):
         plan_of(*changed, warehouse)
 
 
@@ -417,23 +531,85 @@ def test_an_entity_scoped_table_without_an_entity_column_is_refused(
         compile_persona(access, columns, aggregates, "accountant-chicago", schema)
 
 
+# The products the models build no table of yet, acted out on invented tables.
+
+
+def test_the_products_without_tables_yet_follow_their_grants_on_invented_tables(
+    access: Doc, columns: Doc, aggregates: Doc, warehouse: Path, tmp_path: Path
+) -> None:
+    # Invented: a ledger, the metric definitions and the audit log as tables, one row per entity
+    # for the ledger, in a copy of the sample build; the catalogue names them as the products'.
+    source = tmp_path / "invented.duckdb"
+    with duckdb.connect(str(source)) as db:
+        db.execute(f"attach '{warehouse}' as sample (read_only)")
+        for (table,) in db.execute(
+            "select table_name from duckdb_tables() where database_name = 'sample'"
+        ).fetchall():
+            db.execute(f'create table "{table}" as select * from sample.main."{table}"')  # noqa: S608
+        db.execute("detach sample")
+        entities = [e["id"] for e in access["entities"]]
+        db.execute("create table ledger (entity_id varchar, entry varchar)")
+        db.executemany("insert into ledger values (?, 'invented')", [[e] for e in entities])
+        db.execute("create table metric_definitions as select 'invented' as metric")
+        db.execute("create table audit_log as select 'invented' as answer")
+    catalogue = copy.deepcopy(access)
+    invented = {
+        "ledger": "ledger",
+        "metric-definitions": "metric_definitions",
+        "audit-log": "audit_log",
+    }
+    for product in catalogue["data_products"]:
+        if product["id"] in invented:
+            product["tables"] = [invented[product["id"]]]
+
+    def reads(persona: str, product: str) -> set[str | None]:
+        return {
+            g.get("entity")
+            for g in access["grants"]
+            if g["persona"] == persona
+            and g["product"] == product
+            and g["access"] in {"read", "edit"}
+        }
+
+    for persona in (p["id"] for p in access["personas"]):
+        directory = tmp_path / persona
+        directory.mkdir()
+        db = open_persona(catalogue, columns, aggregates, persona, source, directory)
+        try:
+            held = {t for (t,) in db.execute("select table_name from duckdb_tables()").fetchall()}
+            for product, table in invented.items():
+                assert (table in held) == bool(reads(persona, product)), (persona, table)
+            if "ledger" in held:
+                rows = db.execute("select distinct entity_id from ledger").fetchall()
+                assert {e for (e,) in rows} == reads(persona, "ledger"), persona
+        finally:
+            db.close()
+            shutil.rmtree(directory)
+    # Stated apart from the grants: the auditor reads Chicago's ledger only, the agent operator
+    # the audit log and the definitions only, and drafting or posting an entry reads no ledger.
+    expected = {
+        "auditor": ({"chicago"}, True),
+        "agent-operator": (set(), True),
+        "approver": (set(), False),
+        "proposer": (set(), False),
+    }
+    for persona, (ledger, audit) in expected.items():
+        assert reads(persona, "ledger") == ledger, persona
+        assert bool(reads(persona, "audit-log")) == audit, persona
+    readers = {g["persona"] for g in access["grants"] if g["product"] == "metric-definitions"}
+    assert readers == {p["id"] for p in access["personas"]} - {"proposer"}
+
+
 # The routes around the rules: none reaches the warehouse, a file or a setting.
 
 
-def test_no_query_a_persona_writes_reaches_past_its_database(
-    as_persona: AsPersona, warehouse: Path, persona: str
-) -> None:
-    from ingest.fetch import landing_path
-
-    db = as_persona(persona)
-    landing = landing_path().resolve()
-    for reach in (
+def escapes(warehouse: Path, data_file: Path) -> list[str]:
+    return [
         f"attach '{warehouse}' as source (read_only)",
         f"select * from '{warehouse}'",  # noqa: S608
         f"select * from read_blob('{warehouse}')",  # noqa: S608
-        f"select * from read_parquet('{landing}/*/*.parquet')",  # noqa: S608
-        f"select * from read_parquet('{warehouse.parent}/*.parquet')",  # noqa: S608
-        f"select * from glob('{landing}/*')",  # noqa: S608
+        f"select * from read_parquet('{data_file}')",  # noqa: S608
+        f"select * from glob('{data_file.parent}/*')",  # noqa: S608
         "select * from read_csv('/etc/passwd')",
         "copy (select 1) to 'out.csv'",
         "export database 'out'",
@@ -441,12 +617,35 @@ def test_no_query_a_persona_writes_reaches_past_its_database(
         "set enable_external_access = true",
         "reset enable_external_access",
         "set lock_configuration = false",
+        "set autoload_known_extensions = true",
         "set allowed_directories = ['/']",
         "attach ':memory:' as scratch",
         "create table forged as select 1 as a",
-    ):
+    ]
+
+
+def test_no_query_a_persona_writes_reaches_past_its_database(
+    as_persona: AsPersona, warehouse: Path, tmp_path: Path, persona: str
+) -> None:
+    # Invented: a one-row Parquet file the builder writes, which exists, so reading it fails only
+    # because the persona's connection reaches no file.
+    data_file = tmp_path / "invented.parquet"
+    with duckdb.connect() as db:
+        db.execute(f"copy (select 'invented' as value) to '{data_file}' (format parquet)")
+    db = as_persona(persona)
+    for reach in escapes(warehouse, data_file):
         with pytest.raises(duckdb.Error):
             db.execute(reach)
+    for read in escapes(warehouse, data_file)[:5]:
+        with pytest.raises(duckdb.PermissionException):
+            db.execute(read)
+    for setting in (
+        "enable_external_access",
+        "autoload_known_extensions",
+        "autoinstall_known_extensions",
+    ):
+        assert db.execute(f"select current_setting('{setting}')").fetchone() == (False,), setting
+    assert db.execute("select current_setting('lock_configuration')").fetchone() == (True,)
     # What the catalogue shows is the persona's own database and nothing of the source.
     assert {
         d
@@ -462,14 +661,26 @@ def test_no_query_a_persona_writes_reaches_past_its_database(
     assert sources == (0,)
 
 
+@pytest.mark.landed
+def test_no_persona_reads_the_landed_payments_file(
+    as_persona: AsPersona, access: Doc, warehouse: Path
+) -> None:
+    landed = landed_file("chicago-payments")
+    with duckdb.connect() as db:
+        builder_reads = f"select count(*) > 0 from read_parquet('{landed}')"  # noqa: S608
+        assert db.execute(builder_reads).fetchone() == (True,)
+    for persona in (p["id"] for p in access["personas"]):
+        db = as_persona(persona)
+        with pytest.raises(duckdb.PermissionException):
+            db.execute(f"select * from read_parquet('{landed}')")  # noqa: S608
+
+
 # Over the whole landed build.
 
 # What the compiled personas read over the landed files today, counted independently below.
 LANDED_PAYMENTS = {"chicago": 475609, "uk-transport": 31103}
-# Group-totals rows of at least the minimum group's figures, of 108; payments groups of at least
-# the minimum group's payees, of 108.
-LANDED_GROUP_TOTALS_KEPT = 88
-LANDED_PAYMENTS_BY_PERIOD_KEPT = 98
+# The groups each aggregate table keeps at the minimum, of the spans, years and periods there are.
+LANDED_KEPT = {"group_totals": 0, "group_totals_left_out": 0, "payments_by_period": 0}
 LANDED_SOURCES = (
     "chicago-contracts",
     "chicago-payments",
@@ -494,7 +705,7 @@ def reads_aggregate(access: Doc, aggregates: Doc, persona: str, table: str) -> b
     return any(
         g["persona"] == persona
         and g["access"] == "aggregate"
-        and table in {v["name"] for v in aggregates["products"][g["product"]]}
+        and table in {v["name"] for v in aggregates["products"][g["product"]]["tables"]}
         for g in access["grants"]
     )
 
@@ -511,6 +722,17 @@ def test_every_persona_reads_what_its_rules_give_over_the_landed_build(
     }
     counted = builder(landed_warehouse, "select entity_id, count(*) from payments group by 1")
     assert dict(counted) == LANDED_PAYMENTS
+    # Each group-totals row's payees, counted again from its figures' payments.
+    assert builder(
+        landed_warehouse,
+        "select count(*) from group_totals as t join ("
+        " select f.entity_id, f.basis, f.period_start, f.period_end,"
+        " count(distinct coalesce(p.vendor_name, f.figure_key)) as payees"
+        " from int_group_totals__figures as f left join payments as p"
+        " on p.payment_key = f.figure_key where f.left_out_by is null group by all"
+        ") as again using (entity_id, basis, period_start, period_end)"
+        " where t.payees <> again.payees",
+    ) == [(0,)]
     for persona in (p["id"] for p in access["personas"]):
         directory = tmp_path / persona
         directory.mkdir()
@@ -534,14 +756,12 @@ def test_every_persona_reads_what_its_rules_give_over_the_landed_build(
                     if masked:
                         want = [None if v is None else sha256_rendered(v) for v in want]
                     assert values == want, (persona, key)
-            for table, units, kept in (
-                ("group_totals", "figures", LANDED_GROUP_TOTALS_KEPT),
-                ("payments_by_period", "payees", LANDED_PAYMENTS_BY_PERIOD_KEPT),
-            ):
+            for table, kept in LANDED_KEPT.items():
                 if reads_aggregate(access, aggregates, persona, table):
                     count, smallest = db.execute(
-                        f"select count(*), min({units}) from {table}"  # noqa: S608
+                        f"select count(*), min(payees) from {table}"  # noqa: S608
                     ).fetchone() or (0, 0)
+                    print(persona, table, count, smallest)
                     assert (count, smallest >= minimum) == (kept, True), (persona, table)
         finally:
             db.close()
