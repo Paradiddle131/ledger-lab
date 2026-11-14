@@ -10,6 +10,7 @@ the real catalogues with one line changed, or on an invented source schema, labe
 import base64
 import copy
 import hashlib
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from access.compile import (
     source_schema,
     statements,
 )
+from tests.conftest import landed_file
 
 AsPersona = Callable[[str], duckdb.DuckDBPyConnection]
 Doc = dict[str, Any]
@@ -53,7 +55,9 @@ def accountants(access: Doc) -> dict[str, str]:
 
 def tagged(columns: Doc) -> dict[str, str]:
     """The payments mart's tagged columns, each with its tag."""
-    return {c.partition(".")[2]: tag for c, tag in columns["products"]["payments"]["columns"].items()}
+    return {
+        c.partition(".")[2]: tag for c, tag in columns["products"]["payments"]["columns"].items()
+    }
 
 
 def reader(columns: Doc, tag: str, kind: str) -> str:
@@ -74,7 +78,9 @@ def test_an_entity_accountant_sees_no_other_entitys_row(
         db = as_persona(persona)
         seen = db.execute("select entity_id, count(*) from payments group by entity_id").fetchall()
         own = builder(
-            warehouse, "select entity_id, count(*) from payments where entity_id = ? group by 1", entity
+            warehouse,
+            "select entity_id, count(*) from payments where entity_id = ? group by 1",
+            entity,
         )
         assert seen == own, persona
         others = builder(
@@ -90,7 +96,12 @@ def test_the_row_rule_follows_the_grants_with_no_code_edit(
 ) -> None:
     catalogue = copy.deepcopy(access)
     catalogue["grants"].append(
-        {"persona": "accountant-chicago", "entity": "uk-transport", "product": "payments", "access": "read"}
+        {
+            "persona": "accountant-chicago",
+            "entity": "uk-transport",
+            "product": "payments",
+            "access": "read",
+        }
     )
     (rows,) = [
         t
@@ -108,7 +119,9 @@ def test_a_masked_column_returns_masked_values(
 ) -> None:
     for column, tag in tagged(columns).items():
         rule = next(t["masking"] for t in columns["tags"] if t["id"] == tag)
-        assert rule == "hash", "the payments mart's tags all hash today; another rule needs its case"
+        assert rule == "hash", (
+            "the payments mart's tags all hash today; another rule needs its case"
+        )
         stored = dict(
             builder(warehouse, f"select payment_key, {column} from payments")  # noqa: S608
         )
@@ -140,11 +153,14 @@ def test_a_filter_on_a_masked_column_sees_the_masked_value(
     assert db.execute(count, [name]).fetchone() == (0,)
     assert db.execute(count, [sha256_rendered(name)]).fetchone() == (payments,)
     # Equal stored values mask alike, so a masked column still joins and counts.
-    assert db.execute(
-        "select count(distinct vendor_name) from payments"
-    ).fetchone() == builder(
-        warehouse, "select count(distinct vendor_name) from payments where entity_id = ?", entity
-    )[0]
+    assert (
+        db.execute("select count(distinct vendor_name) from payments").fetchone()
+        == builder(
+            warehouse,
+            "select count(distinct vendor_name) from payments where entity_id = ?",
+            entity,
+        )[0]
+    )
 
 
 def test_a_persona_that_reads_a_tag_neither_way_gets_no_column(
@@ -156,7 +172,12 @@ def test_a_persona_that_reads_a_tag_neither_way_gets_no_column(
         tag["masked"].remove(persona)
     db = open_persona(access, neither, aggregates, persona, warehouse, tmp_path)
     try:
-        held = {c for (c,) in db.execute("select column_name from duckdb_columns() where table_name = 'payments'").fetchall()}
+        held = {
+            c
+            for (c,) in db.execute(
+                "select column_name from duckdb_columns() where table_name = 'payments'"
+            ).fetchall()
+        }
         assert held and held.isdisjoint(tagged(columns))
         for column in tagged(columns):
             with pytest.raises(duckdb.BinderException):
@@ -173,7 +194,9 @@ def test_last_four_and_nullify_mask_as_bigquerys_rules(
     persona = reader(columns, "individual-id", "masked")
     invented = copy.deepcopy(columns)
     invented["tags"][0]["masking"] = rule
-    invented["products"]["payments"]["columns"]["payments.contract_number"] = invented["tags"][0]["id"]
+    invented["products"]["payments"]["columns"]["payments.contract_number"] = invented["tags"][0][
+        "id"
+    ]
     if persona not in invented["tags"][0]["masked"]:
         pytest.fail("the first tag's masked readers lack the persona")
     stored = dict(builder(warehouse, "select payment_key, contract_number from payments"))
@@ -238,7 +261,9 @@ def test_a_group_totals_query_over_fewer_than_the_minimum_group_returns_nothing(
     for persona in [*aggregate, clear]:
         db = as_persona(persona)
         for (key,) in small:
-            got = db.execute("select * from group_totals where group_total_key = ?", [key]).fetchall()
+            got = db.execute(
+                "select * from group_totals where group_total_key = ?", [key]
+            ).fetchall()
             assert (got == []) == (persona != clear), (persona, key)
         if persona != clear:
             for table in ("group_totals", "group_totals_left_out"):
@@ -288,20 +313,41 @@ def test_an_aggregate_reader_of_payments_gets_payee_counts_above_the_minimum_and
         f" group by all having count(distinct vendor_name) >= ? order by all",
         minimum,
     )
-    assert db.execute(f"select {grain}, amount, payees from payments_by_period order by all").fetchall() == expected  # noqa: S608
+    seen = f"select {grain}, amount, payees from payments_by_period order by all"  # noqa: S608
+    assert db.execute(seen).fetchall() == expected
     # The grain holds no day and no payee: a narrower question has no column to filter on.
-    held = {c for (c,) in db.execute("select column_name from duckdb_columns() where table_name = 'payments_by_period'").fetchall()}
+    held = {
+        c
+        for (c,) in db.execute(
+            "select column_name from duckdb_columns() where table_name = 'payments_by_period'"
+        ).fetchall()
+    }
     assert held.isdisjoint({"payment_date", "vendor_name", "payment_key"})
 
 
 # Generated from the catalogues, refusing what it cannot express.
 
 
+def test_every_aggregate_table_sums_a_table_of_a_known_product(
+    access: Doc, aggregates: Doc
+) -> None:
+    tables = {p["id"]: p.get("tables", []) for p in access["data_products"]}
+    names = [v["name"] for views in aggregates["products"].values() for v in views]
+    assert len(names) == len(set(names))
+    for product, views in aggregates["products"].items():
+        assert product in tables, product
+        assert {v["from"] for v in views} <= set(tables[product]), product
+    granted = {g["product"] for g in access["grants"] if g["access"] == "aggregate"}
+    assert {p for p in granted if tables[p]} <= set(aggregates["products"])
+
+
 def test_the_compile_is_deterministic(
     access: Doc, columns: Doc, aggregates: Doc, warehouse: Path, persona: str
 ) -> None:
     first = statements(plan_of(access, columns, aggregates, persona, warehouse))
-    assert first == statements(plan_of(copy.deepcopy(access), columns, aggregates, persona, warehouse))
+    assert first == statements(
+        plan_of(copy.deepcopy(access), columns, aggregates, persona, warehouse)
+    )
 
 
 def refusal(change: str, access: Doc, columns: Doc, aggregates: Doc) -> tuple[Doc, Doc, Doc, str]:
@@ -402,9 +448,101 @@ def test_no_query_a_persona_writes_reaches_past_its_database(
         with pytest.raises(duckdb.Error):
             db.execute(reach)
     # What the catalogue shows is the persona's own database and nothing of the source.
-    assert {d for (d,) in db.execute("select database_name from duckdb_databases() where not internal").fetchall()} == {persona}
+    assert {
+        d
+        for (d,) in db.execute(
+            "select database_name from duckdb_databases() where not internal"
+        ).fetchall()
+    } == {persona}
     assert db.execute("select sql from duckdb_views() where not internal").fetchall() == []
     sources = db.execute(
-        "select count(*) from duckdb_tables() where sql ilike '%warehouse%' or sql ilike '%ledger_lab%'"
+        "select count(*) from duckdb_tables()"
+        " where sql ilike '%warehouse%' or sql ilike '%ledger_lab%'"
     ).fetchone()
     assert sources == (0,)
+
+
+# Over the whole landed build.
+
+# What the compiled personas read over the landed files today, counted independently below.
+LANDED_PAYMENTS = {"chicago": 475609, "uk-transport": 31103}
+# Group-totals rows of at least the minimum group's figures, of 108; payments groups of at least
+# the minimum group's payees, of 108.
+LANDED_GROUP_TOTALS_KEPT = 88
+LANDED_PAYMENTS_BY_PERIOD_KEPT = 98
+LANDED_SOURCES = (
+    "chicago-contracts",
+    "chicago-payments",
+    "gleif-legal-entities",
+    "uk-transport-spend-2025",
+    "ecb-rates",
+    "nl-government-budget",
+)
+
+
+@pytest.fixture(scope="module")
+def landed_warehouse(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    from ingest.fetch import landing_path
+    from tests.models.dbt_build import built
+
+    for name in LANDED_SOURCES:
+        landed_file(name)
+    return built(tmp_path_factory.mktemp("dbt-landed"), "landed", landing_path().resolve()).database
+
+
+def reads_aggregate(access: Doc, aggregates: Doc, persona: str, table: str) -> bool:
+    return any(
+        g["persona"] == persona
+        and g["access"] == "aggregate"
+        and table in {v["name"] for v in aggregates["products"][g["product"]]}
+        for g in access["grants"]
+    )
+
+
+@pytest.mark.landed
+def test_every_persona_reads_what_its_rules_give_over_the_landed_build(
+    access: Doc, columns: Doc, aggregates: Doc, landed_warehouse: Path, tmp_path: Path
+) -> None:
+    minimum = aggregates["minimum_group"]
+    personal = "vendor_name, document_number, vendor_person_key"
+    stored = {
+        key: list(row)
+        for key, *row in builder(landed_warehouse, f"select payment_key, {personal} from payments")  # noqa: S608
+    }
+    counted = builder(landed_warehouse, "select entity_id, count(*) from payments group by 1")
+    assert dict(counted) == LANDED_PAYMENTS
+    for persona in (p["id"] for p in access["personas"]):
+        directory = tmp_path / persona
+        directory.mkdir()
+        db = open_persona(access, columns, aggregates, persona, landed_warehouse, directory)
+        try:
+            held = {t for (t,) in db.execute("select table_name from duckdb_tables()").fetchall()}
+            entities = {
+                g["entity"]
+                for g in access["grants"]
+                if g["persona"] == persona and g["product"] == "payments" and g["access"] == "read"
+            }
+            assert ("payments" in held) == bool(entities), persona
+            if entities:
+                seen = db.execute("select entity_id, count(*) from payments group by 1").fetchall()
+                assert dict(seen) == {e: n for e, n in LANDED_PAYMENTS.items() if e in entities}
+                masked = persona not in columns["tags"][0]["clear"]
+                for key, *values in db.execute(
+                    f"select payment_key, {personal} from payments"  # noqa: S608
+                ).fetchall():
+                    want = stored[key]
+                    if masked:
+                        want = [None if v is None else sha256_rendered(v) for v in want]
+                    assert values == want, (persona, key)
+            for table, units, kept in (
+                ("group_totals", "figures", LANDED_GROUP_TOTALS_KEPT),
+                ("payments_by_period", "payees", LANDED_PAYMENTS_BY_PERIOD_KEPT),
+            ):
+                if reads_aggregate(access, aggregates, persona, table):
+                    count, smallest = db.execute(
+                        f"select count(*), min({units}) from {table}"  # noqa: S608
+                    ).fetchone() or (0, 0)
+                    assert (count, smallest >= minimum) == (kept, True), (persona, table)
+        finally:
+            db.close()
+            shutil.rmtree(directory)

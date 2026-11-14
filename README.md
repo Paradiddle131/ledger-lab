@@ -150,6 +150,9 @@ uv run python -m access.review <path>       # or writes it to <path>
 
 The report is derived, so it is never committed; `tests/access/test_review.py` generates it and checks its content.
 
+On the local engine, `access/compile.py` builds one DuckDB file per persona from a dbt build: only its entities' rows, each tagged column clear, masked or left out as `access/columns.yaml` says, and for an aggregate grant only the aggregate tables of `access/aggregates.yaml`, whose groups hold at least the minimum group.
+The `as_persona` test fixture connects to it read-only, with no other file, extension or setting within reach, and deletes it when the test ends; the files hold derived data and are never committed.
+
 ## Licence
 
 [MIT](LICENSE).
