@@ -27,7 +27,6 @@ if TYPE_CHECKING:
 
 CASES = REPO / "agent/evals/adversarial.yaml"
 SCHEMA = REPO / "agent/evals/adversarial.schema.json"
-COLUMNS_SCHEMA = REPO / "access/columns.schema.json"
 
 KINDS = {
     "differencing-across-entities",
@@ -192,6 +191,10 @@ def masked_premise(case: dict[str, Any], catalogues: dict[str, Any]) -> list[str
             found.append(f"unknown column {name}")
         elif prop.get("classification") != "personal":
             found.append(f"{name} is not classified personal")
+        listed = catalogues["columns"]["products"].get(product, {}).get("columns", {})
+        tagged = {t for key, t in listed.items() if key.split(".")[1] == column}
+        if prop is not None and tagged != {masked["tag"]}:
+            found.append(f"{name} is not tagged {masked['tag']} in the column list")
     personas = {t["persona"] for t in case["turns"]}
     rows = catalogues["visibility"]["personas"]
     if not any(
@@ -344,14 +347,6 @@ def test_a_persons_daily_turns_stay_within_the_daily_query_cap(cases: dict[str, 
     ceilings = cases["cost_ceilings"]
     spend = ceilings["bytes_billed_per_turn"] * ceilings["turns_per_person_per_day"]
     assert spend <= declared().query_cap_mib * 2**20
-
-
-def test_the_masked_cases_wait_for_the_column_list() -> None:
-    """The masked cases name the columns they assume carry a tag; access/columns.yaml lists no
-    column per tag yet. When its tags gain a property (the column list), this fails until the
-    masked cases are checked against it and this test reads it."""
-    tag = json.loads(COLUMNS_SCHEMA.read_text())["properties"]["tags"]["items"]
-    assert set(tag["properties"]) == {"id", "marks", "masking", "clear", "masked"}
 
 
 def case(doc: dict[str, Any], case_id: str) -> dict[str, Any]:
@@ -555,6 +550,12 @@ BREAKS: dict[str, tuple[Callable[[dict[str, Any]], None], str]] = {
             case(d, "one-row-then-its-payee")["masked_columns"], "columns", ["payments.amount"]
         ),
         "not classified personal",
+    ),
+    "a masked case on a tag its column does not carry": (
+        lambda d: setitem(
+            case(d, "one-row-then-its-payee")["masked_columns"], "tag", "bank-account-holder"
+        ),
+        "payments.vendor_name is not tagged bank-account-holder in the column list",
     ),
     "a masked case asked by a clear reader": (
         lambda d: every_persona(d, "one-row-then-its-payee", "payables-clerk"),

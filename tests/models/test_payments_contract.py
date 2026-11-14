@@ -21,7 +21,10 @@ import pytest
 import yaml
 from datacontract.data_contract import DataContract
 
+from ingest.entities import Register
 from ingest.fetch import landing_path
+from ingest.individuals import is_organisation, person_hasher
+from ingest.uk_transport.spend import BODIES
 from models.contracts import engine, gate
 from tests.models.dbt_build import PROJECT, Build, built, query
 
@@ -665,3 +668,89 @@ def test_the_real_landing_keeps_the_contract(tmp_path: Path) -> None:
     )
     print("UK rows whose document number is a keyed hash:", keyed[0][0])
     assert keyed == [(12_009,)]
+    split_payees_and_documents(build, landing)
+
+
+# The landed files' own count of hashed and clear payees, and of document numbers a clear column
+# may show: on a clear payee's row, no keyed hash, and carried by no hashed payee's row.
+LANDED_SPLIT = """
+with rows as (
+    select 'chicago' as entity_id, vendor_name like 'person:%' as hashed,
+        voucher_number as number
+    from read_parquet($chicago)
+    union all
+    select 'uk-transport', supplier like 'person:%', transaction_number
+    from read_parquet($uk)
+)
+select entity_id, count(*) filter (where hashed), count(*) filter (where not hashed),
+    count(*) filter (where not hashed and number not like 'id:%' and number not in (
+        select number from rows as h
+        where h.hashed and h.entity_id = rows.entity_id and number is not null))
+from rows group by entity_id
+"""
+
+
+def split_payees_and_documents(build: Build, landing: Path) -> None:
+    """The split columns on the real landing: as many person keys, organisation names and clear
+    document numbers per entity as the landed files' own counts give; every clear name an
+    organisation by the landing's own classifier and register; no clear name whose person hash is a
+    key; and no clear document number that a hashed payee's row carries."""
+    files = {
+        "chicago": str(landing / "chicago-payments"),
+        "uk": str(landing / "uk-transport-spend-2025"),
+    }
+    served = {e: rest for e, *rest in duckdb.connect().execute(LANDED_SPLIT, files).fetchall()}
+    print("landed hashed, clear and clear-document rows by entity:", served)
+    assert served == {
+        "chicago": [350_698, 124_911, 84_783],
+        "uk-transport": [12_008, 19_095, 19_094],
+    }
+    split = {
+        e: rest
+        for e, *rest in query(
+            build,
+            "select entity_id, count(vendor_person_key), count(vendor_organisation_name),"
+            " count(document_reference), count(document_key),"
+            " count(*) filter (where (vendor_person_key is null)"
+            " = (vendor_organisation_name is null))"
+            " from payments group by 1",
+        )
+    }
+    print(
+        "person keys, organisation names, document references, document keys, rows with not"
+        " exactly one of name and key, by entity:",
+        split,
+    )
+    assert split == {
+        e: [*served[e], keys, 0] for e, keys in (("chicago", 0), ("uk-transport", 12_009))
+    }
+    names: dict[str, set[str]] = {e: set() for e in split}
+    keys: dict[str, set[str]] = {e: set() for e in split}
+    for e, name, key in query(
+        build,
+        "select distinct entity_id, vendor_organisation_name, vendor_person_key from payments",
+    ):
+        (names if key is None else keys)[e].add(name if key is None else key)
+    register = Register.landed()
+    known = {
+        "chicago": register.vouched(names["chicago"]),
+        "uk-transport": {*BODIES, *register.vouched(names["uk-transport"])},
+    }
+    # Counts only, so a failure prints no name: the UK department's own placeholder names no one,
+    # and every other clear name is an organisation.
+    not_organisations = {
+        e: {n for n in names[e] if not is_organisation(n, known[e])} for e in names
+    }
+    assert "REDACTED" in not_organisations["uk-transport"]
+    not_organisations["uk-transport"].discard("REDACTED")
+    print("clear names, person keys by entity:", {e: (len(names[e]), len(keys[e])) for e in names})
+    assert {e: len(n) for e, n in not_organisations.items()} == {"chicago": 0, "uk-transport": 0}
+    as_person = person_hasher()
+    unhashed = {e: len({as_person(n) for n in names[e]} & keys[e]) for e in names}
+    assert unhashed == {"chicago": 0, "uk-transport": 0}
+    assert query(
+        build,
+        "select count(*) from payments as r where r.document_reference is not null and exists"
+        " (select 1 from payments as h where h.vendor_is_hashed and h.entity_id = r.entity_id"
+        " and h.document_number = r.document_reference)",
+    ) == [(0,)]
