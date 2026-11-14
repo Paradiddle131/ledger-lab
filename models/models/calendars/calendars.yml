@@ -55,6 +55,20 @@ models:
         data_tests:
           - not_null
 
+  - name: metric_time_spine
+    description: >
+      One row per day from 1 January of the first fiscal year to the end of the year after the
+      last (the `fiscal_spine` macro the calendars use): the time spine MetricFlow reads metric
+      time from.
+    time_spine:
+      standard_granularity_column: date_day
+    columns:
+      - name: date_day
+        granularity: day
+        data_tests:
+          - unique
+          - not_null
+
 seeds:
   - name: fiscal_year_starts
     description: The month each entity's fiscal year starts in; ids as in access/personas.yaml.

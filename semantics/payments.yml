@@ -1,0 +1,111 @@
+semantic_models:
+  - name: payments
+    description: >
+      One row per payment of every entity, as the payments mart serves it, in the entity's own
+      currency; a row the source serves again stays, flagged `is_repeat`.
+    model: ref('payments')
+    defaults:
+      agg_time_dimension: payment_date
+    entities:
+      - name: payment
+        type: primary
+        expr: payment_key
+    dimensions:
+      - name: payment_date
+        type: time
+        type_params:
+          time_granularity: day
+      - name: entity_id
+        type: categorical
+      - name: currency
+        type: categorical
+      - name: fiscal_year
+        type: categorical
+      - name: fiscal_period
+        type: categorical
+      - name: source_table
+        type: categorical
+    measures:
+      - name: payment_rows
+        description: Payment rows as served, repeats included.
+        agg: count
+        expr: payment_key
+      - name: repeat_rows
+        description: Payment rows that repeat another served row.
+        agg: sum
+        expr: case when is_repeat then 1 else 0 end
+      - name: payment_amount
+        description: The amount of the rows as served, repeats included, in the entity's currency.
+        agg: sum
+        expr: amount
+      - name: repeat_amount
+        description: The amount of the rows that repeat another served row.
+        agg: sum
+        expr: case when is_repeat then amount else 0 end
+
+metrics:
+  - name: duplicate_payment_rate
+    label: Duplicate-payment rate
+    description: >
+      The share of the City of Chicago's served payment rows that repeat another served row
+      (`is_repeat`): the publisher serving one payment twice, not the City paying twice, which
+      nothing in the files shows. Chicago only, the one entity with a rule for repeats.
+    type: ratio
+    type_params:
+      numerator: chicago_repeat_rows
+      denominator: chicago_payment_rows
+    config:
+      meta: {owner: metric-owner, term: duplicate-payment-rate}
+
+  - name: duplicate_payment_amount_rate
+    label: Duplicate-payment rate by amount
+    description: >
+      The share of the dollars the City of Chicago's served payment rows add up to that sits on
+      rows repeating another served row: the publisher serving one payment twice, not the City
+      paying twice. Chicago only, the one entity with a rule for repeats.
+    type: ratio
+    type_params:
+      numerator: chicago_repeat_amount
+      denominator: chicago_payment_amount
+    config:
+      meta: {owner: metric-owner, term: duplicate-payment-rate}
+
+  - name: chicago_payment_rows
+    label: Chicago payment rows served
+    description: The City of Chicago's payment rows as served, repeats included.
+    type: simple
+    type_params:
+      measure: payment_rows
+    filter: "{{ Dimension('payment__entity_id') }} = 'chicago'"
+    config:
+      meta: {owner: metric-owner, term: duplicate-payment-rate}
+
+  - name: chicago_repeat_rows
+    label: Chicago payment rows served again
+    description: The City of Chicago's payment rows that repeat another served row.
+    type: simple
+    type_params:
+      measure: repeat_rows
+    filter: "{{ Dimension('payment__entity_id') }} = 'chicago'"
+    config:
+      meta: {owner: metric-owner, term: duplicate-payment-rate}
+
+  - name: chicago_payment_amount
+    label: Chicago payments served, in dollars
+    description: The US dollars of the City of Chicago's payment rows as served, repeats included.
+    type: simple
+    type_params:
+      measure: payment_amount
+    filter: "{{ Dimension('payment__entity_id') }} = 'chicago'"
+    config:
+      meta: {owner: metric-owner, term: duplicate-payment-rate}
+
+  - name: chicago_repeat_amount
+    label: Chicago payments served again, in dollars
+    description: The US dollars of the City of Chicago's payment rows that repeat another served row.
+    type: simple
+    type_params:
+      measure: repeat_amount
+    filter: "{{ Dimension('payment__entity_id') }} = 'chicago'"
+    config:
+      meta: {owner: metric-owner, term: duplicate-payment-rate}

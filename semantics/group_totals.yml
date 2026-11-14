@@ -1,0 +1,79 @@
+semantic_models:
+  - name: group_totals
+    description: >
+      One row per entity, span and basis of the group totals, in the reporting currency at
+      constant rates; the basis says what each figure is, and unlike bases never add up.
+    model: ref('group_totals')
+    defaults:
+      agg_time_dimension: period_start
+    entities:
+      - name: group_total
+        type: primary
+        expr: group_total_key
+    dimensions:
+      - name: period_start
+        type: time
+        type_params:
+          time_granularity: month
+      - name: entity_id
+        type: categorical
+      - name: basis
+        type: categorical
+      - name: fiscal_year
+        type: categorical
+      - name: fiscal_period
+        type: categorical
+      - name: reporting_currency
+        type: categorical
+      - name: constant_rates_on
+        type: categorical
+    measures:
+      - name: amount_at_constant_rates
+        description: The rows' figures in the reporting currency at the constant rates' day.
+        agg: sum
+      - name: bases
+        description: How many different bases the rows hold.
+        agg: count_distinct
+        expr: basis
+
+metrics:
+  - name: constant_currency_spend
+    label: Constant-currency spend
+    description: >
+      What the entities spent, in the reporting currency (EUR) at the ECB rates of one fixed day
+      (the group totals' `constant_rates_on`), so a change between spans shows spending moving and
+      not the rates: the group totals' figures, with what they leave out (`group_totals_left_out`)
+      left out here too.
+      It is a figure only where every row it sums has one basis, so group by `group_total__basis`
+      (or by an entity with a single basis); a query that would add unlike bases, such as the
+      Dutch cash outturn and Chicago's payments, returns no figure.
+    type: derived
+    type_params:
+      expr: case when spend_bases = 1 then spend_at_constant_rates end
+      metrics:
+        - name: spend_at_constant_rates
+        - name: spend_bases
+    config:
+      meta: {owner: metric-owner, term: constant-currency}
+
+  - name: spend_at_constant_rates
+    label: Spend at constant rates, any basis
+    description: >
+      The group totals' figures at constant rates summed whatever their basis: an input of
+      `constant_currency_spend`, which is the figure to read; on its own it adds unlike bases.
+    type: simple
+    type_params:
+      measure: amount_at_constant_rates
+    config:
+      meta: {owner: metric-owner, term: constant-currency}
+
+  - name: spend_bases
+    label: Bases summed
+    description: >
+      How many different bases the summed group-totals rows hold: an input of
+      `constant_currency_spend`, which gives a figure only where this is 1.
+    type: simple
+    type_params:
+      measure: bases
+    config:
+      meta: {owner: metric-owner, term: constant-currency}

@@ -117,7 +117,91 @@ models:
       - name: department_name
         description: The City department that paid, where served.
 
+  - name: int_chicago__contract_spend
+    description: >
+      One row per contract of the City of Chicago: its award after revisions beside what was paid
+      against it, each payment counted once (repeats left out), and, for a contract with a fixed
+      award (above 0), the award not yet paid and what was paid over it, neither below 0. The
+      spend-against-award and remaining-commitment metrics read it (`semantics/contracts.yml`).
+      A payment whose contract number the contracts table lacks belongs to no row here.
+    columns:
+      - name: contract_number
+        description: The contract number, as served.
+        data_tests:
+          - unique
+          - not_null
+      - name: award_kind
+        description: >
+          `fixed` for an award after revisions above 0; `none` for 0, a contract with no fixed
+          award (a blanket contract ordered as needed); `negative` where the revisions take more
+          off than the rows served award.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [fixed, none, negative]
+      - name: award_after_revisions
+        description: The contract's award after revisions, in US dollars.
+        data_tests:
+          - not_null
+      - name: paid
+        description: What was paid against the contract, each payment once, refunds negative; 0 when nothing was.
+        data_tests:
+          - not_null
+      - name: payments
+        description: How many payments that is.
+      - name: fixed_award
+        description: The award after revisions on a fixed-award contract; null on any other.
+      - name: paid_against_fixed_award
+        description: What was paid on a fixed-award contract; null on any other.
+      - name: unpaid_award
+        description: On a fixed-award contract, the award less what was paid, or 0 when paid in full or over; null on any other.
+      - name: paid_over_award
+        description: On a fixed-award contract, what was paid less the award, or 0 when paid within it; null on any other.
+      - name: first_approved_on
+        description: The day the contract's first revision was approved.
+      - name: ends_on
+        description: >
+          The latest end date any of the contract's revisions serves, as served (some are far off
+          or missing); null when none serves one.
+
 unit_tests:
+  - name: a_contracts_unpaid_and_overpaid_award_never_go_below_zero
+    description: >
+      Test inputs: a contract paid under its award, one paid over it (with a repeat that must not
+      count and a refund that must), one with no fixed award and one with a negative award, both
+      paid, and one never paid: the unpaid part and the part paid over are each 0 or more, and
+      exist only where the award is fixed.
+    model: int_chicago__contract_spend
+    given:
+      - input: ref('int_chicago__contracts')
+        rows:
+          - {contract_number: under, award_after_revisions: 1000.00, first_approved_on: 2020-01-02}
+          - {contract_number: over, award_after_revisions: 500.00, first_approved_on: 2020-01-02}
+          - {contract_number: blanket, award_after_revisions: 0, first_approved_on: 2020-01-02}
+          - {contract_number: cut, award_after_revisions: -20.00, first_approved_on: 2020-01-02}
+          - {contract_number: unpaid, award_after_revisions: 80.00, first_approved_on: 2020-01-02}
+      - input: ref('int_chicago__payments')
+        rows:
+          - {contract_number: under, amount: 300.25, is_repeat: false}
+          - {contract_number: over, amount: 700.00, is_repeat: false}
+          - {contract_number: over, amount: -50.00, is_repeat: false}
+          - {contract_number: over, amount: 700.00, is_repeat: true}
+          - {contract_number: blanket, amount: 40.00, is_repeat: false}
+          - {contract_number: cut, amount: 10.00, is_repeat: false}
+          - {contract_number: null, amount: 99.00, is_repeat: false}
+      - input: ref('stg_chicago__contracts')
+        rows:
+          - {contract_number: under, ends_on: 2030-12-31}
+          - {contract_number: under, ends_on: 2031-06-30}
+    expect:
+      rows:
+        - {contract_number: under, award_kind: fixed, paid: 300.25, payments: 1, fixed_award: 1000.00, paid_against_fixed_award: 300.25, unpaid_award: 699.75, paid_over_award: 0, ends_on: 2031-06-30}
+        - {contract_number: over, award_kind: fixed, paid: 650.00, payments: 2, fixed_award: 500.00, paid_against_fixed_award: 650.00, unpaid_award: 0, paid_over_award: 150.00, ends_on: null}
+        - {contract_number: blanket, award_kind: none, paid: 40.00, payments: 1, fixed_award: null, paid_against_fixed_award: null, unpaid_award: null, paid_over_award: null, ends_on: null}
+        - {contract_number: cut, award_kind: negative, paid: 10.00, payments: 1, fixed_award: null, paid_against_fixed_award: null, unpaid_award: null, paid_over_award: null, ends_on: null}
+        - {contract_number: unpaid, award_kind: fixed, paid: 0, payments: 0, fixed_award: 80.00, paid_against_fixed_award: 0, unpaid_award: 80.00, paid_over_award: 0, ends_on: null}
+
   - name: the_2002_row_takes_no_fiscal_year_whatever_the_calendars_cover
     description: >
       Real rolled-up rows of 2002 (which holds 1996 to 2002) and 2003, against calendars that cover

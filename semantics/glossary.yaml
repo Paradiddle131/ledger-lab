@@ -28,6 +28,26 @@ terms:
     definition: Spending promised under a contract or order but not yet invoiced, which the budget already counts as used.
     owner: payables-clerk
     see_also: [award, outturn]
+  - id: spend-against-award
+    term: Spend against award
+    definition: The share of a contract's award that has been paid so far; above one when the contract was paid more than it was awarded.
+    owner: payables-clerk
+    see_also: [award, remaining-commitment]
+  - id: remaining-commitment
+    term: Remaining commitment
+    definition: The part of a contract's award not yet paid, which the award still allows to be spent; never below zero, since paying over an award leaves nothing to commit.
+    owner: payables-clerk
+    see_also: [award, commitment, spend-against-award]
+  - id: days-to-pay
+    term: Days to pay
+    definition: The days from the date an invoice or voucher is entered to the date it is paid; it needs both dates for each payment.
+    owner: payables-clerk
+    see_also: [voucher, procure-to-pay]
+  - id: duplicate-payment-rate
+    term: Duplicate-payment rate
+    definition: The share of payments, by count or by amount, recorded more than once, whether paid twice or only listed twice.
+    owner: payables-clerk
+    see_also: [voucher, three-way-match]
   - id: accrual
     term: Accrual
     definition: An entry that books a cost or income in the period it belongs to, before the invoice or payment arrives.

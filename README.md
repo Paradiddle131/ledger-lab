@@ -85,6 +85,17 @@ Every model that reads a fetched source reads the file the fetch kit landed (`py
 The Dutch budget against outturn shows the figures as the file serves them: a zero the file may serve in place of a figure is flagged on its line (`has_doubtful_zero`), and the landed tests count the figures the file serves wrong.
 The group totals sum each entity's spend by fiscal period, or by year where the source gives only a year, in euros at actual and at constant rates, each row naming what its figure is (`basis`: Chicago's direct vouchers, contract payments and yearly roll-ups, the UK department's payments over £25,000, the Dutch government's cash-expenditure outturn), and count what they leave out, by rule, beside them (`group_totals_left_out`).
 
+The governed metrics are MetricFlow definitions in `semantics/*.yml`, each owned by a persona and named by a glossary term in its `meta`: spend against award, remaining commitment and what was paid over award (the City of Chicago's contracts with a fixed award), the duplicate-payment rate by rows and by amount (Chicago's payments the publisher serves twice), and constant-currency spend (the group totals at one day's rates, a figure only where the rows share one basis, so group it by `group_total__basis`).
+Days to pay is not defined: every public file serves one date per payment.
+The build writes the semantic manifest `mf` reads (`models/target/semantic_manifest.json`); `mf` asks PyPI for a newer release of itself on each run, which fails quietly offline:
+
+```bash
+uv run dbt build --project-dir models --profiles-dir models
+DBT_PROJECT_DIR=models DBT_PROFILES_DIR=models uv run mf validate-configs
+DBT_PROJECT_DIR=models DBT_PROFILES_DIR=models uv run mf query --metrics spend_against_award,remaining_commitment
+DBT_PROJECT_DIR=models DBT_PROFILES_DIR=models uv run mf query --metrics constant_currency_spend --group-by group_total__basis,group_total__fiscal_year
+```
+
 Each source is fetched by name from [`ingest/sources.yaml`](ingest/sources.yaml), which records its URL or pinned query, SHA-256, licence link, publisher and whether it names people; the file lands under `LEDGER_LAB_LANDING` (default `landing/`, outside git) only when its checksum matches, and the command exits non-zero otherwise:
 
 ```bash

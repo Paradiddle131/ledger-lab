@@ -1,0 +1,101 @@
+semantic_models:
+  - name: chicago_contracts
+    description: >
+      One row per contract of the City of Chicago: its award after revisions beside what was paid
+      against it, each payment counted once (repeats left out).
+    model: ref('int_chicago__contract_spend')
+    defaults:
+      agg_time_dimension: first_approved_on
+    entities:
+      - name: contract
+        type: primary
+        expr: contract_number
+    dimensions:
+      - name: award_kind
+        type: categorical
+      - name: first_approved_on
+        type: time
+        type_params:
+          time_granularity: day
+      - name: ends_on
+        type: time
+        type_params:
+          time_granularity: day
+    measures:
+      - name: fixed_award
+        description: The award after revisions of contracts with a fixed award (above 0).
+        agg: sum
+      - name: paid_against_fixed_award
+        description: What was paid against contracts with a fixed award, repeats left out.
+        agg: sum
+      - name: unpaid_award
+        description: Per contract with a fixed award, the award not yet paid, never below 0.
+        agg: sum
+      - name: paid_over_award
+        description: Per contract with a fixed award, what was paid beyond the award, never below 0.
+        agg: sum
+
+metrics:
+  - name: spend_against_award
+    label: Spend against award
+    description: >
+      The share of the City of Chicago's fixed contract awards that has been paid: what was paid
+      against contracts with a fixed award (above 0), each payment once, over those contracts'
+      awards after revisions. A contract awarded 0 has no fixed award and is left out, as is one
+      whose revisions take its award below 0; a contract paid over its award counts its whole
+      payment, so a group of contracts can pass 1.
+    type: ratio
+    type_params:
+      numerator: paid_against_fixed_award
+      denominator: fixed_award
+    config:
+      meta: {owner: metric-owner, term: spend-against-award}
+
+  - name: remaining_commitment
+    label: Remaining commitment
+    description: >
+      The part of the City of Chicago's fixed contract awards not yet paid: per contract with a
+      fixed award (above 0), its award after revisions less what was paid against it, never below
+      0, summed. It is what the awards still allow, not money owed or due: a contract past its end
+      date keeps what it never paid (filter by `contract__ends_on` for the contracts still
+      running), and what contracts were paid beyond their award is `paid_over_award`, never
+      netted here.
+    type: simple
+    type_params:
+      measure: unpaid_award
+    config:
+      meta: {owner: metric-owner, term: remaining-commitment}
+
+  - name: paid_over_award
+    label: Paid over award
+    description: >
+      What the City of Chicago paid beyond the award on contracts with a fixed award (above 0):
+      per contract, what was paid against it less its award after revisions, never below 0,
+      summed; the part `remaining_commitment` never nets away.
+    type: simple
+    type_params:
+      measure: paid_over_award
+    config:
+      meta: {owner: metric-owner, term: remaining-commitment}
+
+  - name: fixed_award
+    label: Fixed award
+    description: >
+      The awards after revisions of the City of Chicago's contracts with a fixed award (above 0),
+      in US dollars: the denominator of `spend_against_award`.
+    type: simple
+    type_params:
+      measure: fixed_award
+    config:
+      meta: {owner: metric-owner, term: award}
+
+  - name: paid_against_fixed_award
+    label: Paid against fixed award
+    description: >
+      What was paid against the City of Chicago's contracts with a fixed award (above 0), each
+      payment once, in US dollars: the numerator of `spend_against_award`.
+    type: simple
+    type_params:
+      measure: paid_against_fixed_award
+    config:
+      meta: {owner: metric-owner, term: spend-against-award}

@@ -5,7 +5,9 @@ version: "0.0.0"
 config-version: 2
 profile: ledger_lab
 
-model-paths: ["models"]
+# `../semantics` holds the MetricFlow semantic models and metrics, which dbt parses from here into
+# the semantic manifest `mf` reads.
+model-paths: ["models", "../semantics"]
 clean-targets: ["target"]
 
 flags:
