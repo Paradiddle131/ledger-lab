@@ -22,10 +22,18 @@ A supplier who is or may be a person (the pseudonymiser's classifier finds no ev
 organisation; the Department's bodies in `BODIES` and the names the legal-entity register vouches
 for, `ingest/entities.py`, are known ones) leaves only as a keyed hash
 (`person:`). Their row, and a row the Department itself redacted (supplier `REDACTED`), also keeps
-no description and no postal code, and its transaction number leaves as a keyed identifier hash
-(`id:`, the shared one): a reference carried only by such rows never appears in clear, while one
-the Department also gives clear rows (a payment-run number, the placeholder `#`) stays clear there,
-and the keyed hash does not tie that clear copy to the hashed row.
+no description and no postal code. A transaction number such a row carries leaves as a keyed
+identifier hash (`id:`, the shared one) on every row of the set that carries it, an organisation's
+included, so no clear number is one a hashed row also carries, and the same number gets the same
+hash on all its lines. A paying body numbers its own transactions, and on the real files no number
+is shared by a hashed and a clear row of one body: the 89 numbers this hashes on 135 organisation
+rows (of 49 organisations) are other bodies' numbers that 114 hashed rows (of 77 suppliers) also
+carry, hashed all the same, since the public file finds a row by its number alone. The keyed hash
+therefore ties every line carrying a number, whichever body numbered it. An organisation row whose
+number is hashed keeps its description and postal code: on the real files neither leads to the
+hashed rows (one description, a single word on 3,272 rows of 419 suppliers, is also a hashed line's,
+and no postal code is). The Department's placeholders for no number (`PLACEHOLDERS`) stay as served
+on every row.
 
 On every row of the set, a description, expense type or expense area is blanked when a run of its
 words is, in any order, a hashed supplier's name or a person a description introduces by initials
@@ -55,10 +63,11 @@ LIMITED` in clear) stays in clear, as the pseudonymiser allows.
 The landed tests (`pytest -m landed`, left out of `make check`) download the files again and
 assert that every month lands once with every served row; that no hashed name, squashed by their
 own spelling to letters and digits in either word order, starts at a word in any clear cell other
-than a supplier; that a hashed or redacted row keeps no description, postcode or clear reference;
-and that no reference carried only by hashed rows sits in clear. They only count clear supplier
-cells containing a hashed name, where an organisation's name may hold one by design, and
-references shared by hashed and clear rows. A pages test (`pytest -m pages`) asserts that no pinned
+than a supplier; that a hashed or redacted row keeps no description, postcode or clear reference
+but a placeholder; and that no served number a hashed row carries sits in clear on any row, nor
+does any clear number hash, by the step's own hasher, to a hashed row's keyed number. They only
+count clear supplier cells containing a hashed name, where an organisation's name may hold one by
+design. A pages test (`pytest -m pages`) asserts that no pinned
 month's GOV.UK page lists another file or a change note. Neither the step nor the tests see a
 hashed name reduced to a surname or initials, split by other words, or written run together, a
 person named by a surname alone or by initials without an introducer the year ever uses, or a name
@@ -152,6 +161,10 @@ FREE_TEXT = ("expense_type", "expense_area", "item_text")
 # Blanked on a hashed or redacted row: what describes or locates the supplier.
 PERSONAL = ("item_text", "postal_code")
 REDACTED = "redacted"
+# What the Department writes in the transaction number where it gives none: `#` (every row of
+# High Speed Two) and `DIRECT DEBIT` (a way of paying). Each names no document, so it lands as
+# served on every row; hashed, it would read as one transaction of every payee it stands beside.
+PLACEHOLDERS = ("#", "DIRECT DEBIT")
 # What looks like a person's name in a description: up to two capital initials, each with a dot or
 # a space after it, then a word of letters with a capital first, ending at a word's end; a figure,
 # `&` or another capital straight after an initial makes it a code (`L&P`, `A14`, `HS2`).
@@ -234,6 +247,7 @@ def scrub(rows: list[dict[str, str]], register: Register, env: Mapping[str, str]
     known = (*BODIES, *register.vouched(suppliers))
     clear = {s for s in suppliers if is_organisation(s, known)}
     hashed: set[str] = set()
+    hidden: set[str] = set()  # the numbers a hashed or redacted row carries
     for row in rows:
         supplier = normalise(row["supplier"])
         redacted = supplier == REDACTED
@@ -241,9 +255,13 @@ def scrub(rows: list[dict[str, str]], register: Register, env: Mapping[str, str]
             if not redacted:
                 hashed.add(row["supplier"])
                 row["supplier"] = as_person(row["supplier"])
-            row["transaction_number"] = as_id(row["transaction_number"])
+            hidden.add(row["transaction_number"].strip())
             for column in PERSONAL:
                 row[column] = ""
+    hidden -= set(PLACEHOLDERS)
+    for row in rows:
+        if row["transaction_number"].strip() in hidden:
+            row["transaction_number"] = as_id(row["transaction_number"])
     found = HashedNames(hashed | introduced)
     for row in rows:
         for column in FREE_TEXT:
