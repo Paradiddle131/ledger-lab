@@ -19,7 +19,9 @@
 #
 # Two duty rules the cells cannot express:
 # - an approver never approves an entry they prompted, which is a property of each entry;
-# - the audit log the agent operator reads holds the agents' answers, which can quote their data.
+# - the audit log the agent operator reads holds each answer's query text in clear but its question,
+#   result and answer only as seals (agent/audit.schema.json), so, with every value taken from a
+#   question or a result bound as a parameter, it shows the operator no data value.
 
 personas:
   # Books and reconciles one entity: its payments in clear, no other entity's rows, the group only

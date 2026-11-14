@@ -122,7 +122,7 @@ controls:
   - id: answer-rebuilt-from-audit
     layer: Accountability
     owner: group-controller
-    asserts: One answer can be rebuilt end to end from its audit record alone, by someone who did not produce it.
+    asserts: One answer can be rebuilt end to end from its audit record alone (agent/audit.schema.json), by someone who did not produce it, re-running the record's query as its persona over the build it names (its commit, variables and target over the landed files it lists by digest) and matching the result, the question and the answer to the record's seals, with the record's chain verified up to it.
     proven_by: [tests/agent/test_audit.py::test_answer_rebuilt_from_its_audit_record]
     status: not-implemented
   - id: spend-is-capped
