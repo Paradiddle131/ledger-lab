@@ -2,12 +2,18 @@
 definition changes against `origin/main` under the same version, or a metric loses its version or
 its owner (`semantics/versions.py`).
 
-Each case runs the gate itself over a temporary git repository whose `origin/main` holds the
-committed dbt project file and metric definitions; the working tree's change is made inside the
-test, so every edited definition here is invented for the test.
+Each case runs the gate over a temporary git repository whose `origin/main` holds the committed dbt
+project and metric definitions; the working tree's change is made inside the test, so every edited
+definition here is invented for the test. The gate parses both trees with dbt itself, so the cases
+that turn on how dbt reads a tree (paths, `.dbtignore`, project configuration, filters, time
+spines) run whole; the rules of the comparison alone run on the semantic manifest dbt wrote for the
+committed tree, changed in place.
 """
 
+import copy
+import os
 import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -16,19 +22,38 @@ import pytest
 import yaml
 
 from semantics import versions
-from tests.models.dbt_build import PROJECT, Build
+from tests.models.dbt_build import Build
 from tests.semantics.metric_cli import manifest
 
 FOLDER = "semantics/metricflow"
-PROJECT_FILE = "models/dbt_project.yml"
-REAL = {
-    PROJECT_FILE: (PROJECT / "dbt_project.yml").read_text(),
-    **{f"{FOLDER}/{p.name}": p.read_text() for p in sorted((versions.REPO / FOLDER).glob("*.yml"))},
-}
+PROJECT_FILE = versions.PROJECT_FILE
+GATE_FILES = ["semantics/versions.py", "semantics/offline/refusal.py"]
+
+
+def tracked(*paths: str) -> dict[str, str]:
+    listed = subprocess.run(
+        ["git", "ls-files", "-z", *paths],  # noqa: S607
+        cwd=versions.REPO,
+        capture_output=True,
+        check=True,
+    ).stdout.decode()
+    return {p: (versions.REPO / p).read_text() for p in listed.split("\0") if p}
+
+
+# The committed dbt project, its metric definitions and the gate itself.
+REAL = tracked("models", FOLDER, *GATE_FILES)
 CONTRACTS = f"{FOLDER}/contracts.yml"
 PAYMENTS = f"{FOLDER}/payments.yml"
+CALENDARS = "models/models/calendars/calendars.yml"
 Block = dict[str, Any]
 Edit = Callable[[dict[str, str]], None]
+GIT = ["git", "-c", "user.name=test", "-c", "user.email=test@example.com"]
+GIT += ["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"]
+
+
+def run(repo: Path, *args: str) -> str:
+    done = subprocess.run([*GIT, *args], cwd=repo, check=True, capture_output=True, text=True)
+    return done.stdout
 
 
 def git_repo(tmp_path: Path, main: dict[str, str] | None) -> Path:
@@ -36,20 +61,18 @@ def git_repo(tmp_path: Path, main: dict[str, str] | None) -> Path:
     working tree starts as `main`."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    git = ["git", "-c", "user.name=test", "-c", "user.email=test@example.com"]
-    git += ["-c", "commit.gpgsign=false"]
-
-    def run(*args: str) -> None:
-        subprocess.run([*git, *args], cwd=repo, check=True, capture_output=True)
-
-    run("init", "--quiet")
+    run(repo, "init", "--quiet")
     (repo / "README.md").write_text("a clone\n")
     write(repo, main or {})
-    run("add", ".")
-    run("commit", "--quiet", "-m", "main")
+    commit(repo, "main")
     if main is not None:
-        run("update-ref", "refs/remotes/origin/main", "HEAD")
+        run(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
     return repo
+
+
+def commit(repo: Path, message: str) -> None:
+    run(repo, "add", "-A")
+    run(repo, "commit", "--quiet", "--allow-empty", "-m", message)
 
 
 def write(repo: Path, files: dict[str, str]) -> None:
@@ -58,15 +81,36 @@ def write(repo: Path, files: dict[str, str]) -> None:
         (repo / path).write_text(text)
 
 
+def apply(repo: Path, edit: Edit, files: dict[str, str]) -> None:
+    """The working tree of `repo`, which holds `files`, changed by `edit`."""
+    changed = dict(files)
+    edit(changed)
+    for path in files.keys() - changed.keys():
+        (repo / path).unlink()
+    write(repo, {p: t for p, t in changed.items() if files.get(p) != t})
+
+
 def working(tmp_path: Path, edit: Edit, main: dict[str, str] = REAL) -> Path:
-    """A clone of `main` whose working tree is `main` changed by `edit` (in place, on a copy)."""
+    """A clone of `main` whose working tree is `main` changed by `edit`."""
     repo = git_repo(tmp_path, main)
+    apply(repo, edit, main)
+    return repo
+
+
+def changed_from(main: dict[str, str], edit: Edit) -> dict[str, str]:
     files = dict(main)
     edit(files)
-    for path in main.keys() - files.keys():
-        (repo / path).unlink()
-    write(repo, files)
-    return repo
+    return files
+
+
+def replaced(path: str, old: str, new: str) -> Edit:
+    """A text edit of one file, which must hold `old` exactly once."""
+
+    def edit(files: dict[str, str]) -> None:
+        assert files[path].count(old) == 1, f"{path} no longer holds {old!r} once"
+        files[path] = files[path].replace(old, new)
+
+    return edit
 
 
 def on(path: str, kind: str, name: str, change: Callable[[Block], None]) -> Edit:
@@ -86,18 +130,11 @@ def metric(name: str, change: Callable[[Block], None], path: str = CONTRACTS) ->
     return on(path, "metrics", name, change)
 
 
-def meta(**values: object) -> Callable[[Block], None]:
-    def change(block: Block) -> None:
-        for key, value in values.items():
-            if value is None:
-                block["config"]["meta"].pop(key)
-            else:
-                block["config"]["meta"][key] = value
-
-    return change
+def setting(key: str, value: object) -> Callable[[Block], None]:
+    return lambda block: block.update({key: value})
 
 
-def measure(model: str, name: str, key: str, value: str, path: str = CONTRACTS) -> Edit:
+def measure(model: str, name: str, key: str, value: object, path: str = CONTRACTS) -> Edit:
     def change(block: Block) -> None:
         (found,) = [m for m in block["measures"] if m["name"] == name]
         found[key] = value
@@ -105,50 +142,22 @@ def measure(model: str, name: str, key: str, value: str, path: str = CONTRACTS) 
     return on(path, "semantic_models", model, change)
 
 
-def both(*edits: Edit) -> Edit:
+def bump(name: str, path: str = CONTRACTS, to: int = 2, was: int = 1) -> Edit:
+    """The metric's version raised in its own line of text, so two such edits merge cleanly."""
+
     def edit(files: dict[str, str]) -> None:
-        for each in edits:
-            each(files)
+        text = files[path]
+        start = text.index(f"\n  - name: {name}\n")
+        at = text.index(f"version: {was}}}", start)
+        files[path] = text[:at] + f"version: {to}}}" + text[at + len(f"version: {was}}}") :]
 
     return edit
 
 
-def setting(key: str, value: object) -> Callable[[Block], None]:
-    return lambda block: block.update({key: value})
-
-
-def bump(name: str, path: str = CONTRACTS, to: int = 2) -> Edit:
-    return metric(name, meta(version=to), path)
-
-
-A_FILTER = "{{ Dimension('contract__is_break') }} = false"
-NEW_EXPR = "case when award_held_to > 1 then award_held_to end"
-NEW_DESCRIPTION = "The share of fixed awards paid, said otherwise."
-REPEATS = "{{ Dimension('payment__entity_id') }} = 'uk-transport'"
-
-
-def new_metric(files: dict[str, str]) -> None:
-    content = yaml.safe_load(files[CONTRACTS])
-    content["metrics"].append(
-        {
-            "name": "unpaid_award_total",
-            "label": "Unpaid award",
-            "description": "Not for direct use: invented for a test.",
-            "type": "simple",
-            "type_params": {"measure": "unpaid_award"},
-            "config": {
-                "meta": {"owner": "payables-clerk", "term": "award", "role": "input", "version": 1}
-            },
-        }
-    )
-    files[CONTRACTS] = yaml.safe_dump(content)
-
-
-def removed(name: str) -> Edit:
+def both(*edits: Edit) -> Edit:
     def edit(files: dict[str, str]) -> None:
-        content = yaml.safe_load(files[CONTRACTS])
-        content["metrics"] = [m for m in content["metrics"] if m["name"] != name]
-        files[CONTRACTS] = yaml.safe_dump(content)
+        for each in edits:
+            each(files)
 
     return edit
 
@@ -160,59 +169,117 @@ def moved(old: str, new: str) -> Edit:
     return edit
 
 
-def project_moved(files: dict[str, str]) -> None:
-    """The whole dbt project and the metric files moved, with `model-paths` following them."""
-    project = files.pop(PROJECT_FILE).replace('"../semantics/metricflow"', '"../metrics"')
-    files["dbt/dbt_project.yml"] = project
-    for path in [p for p in files if p.startswith(FOLDER)]:
-        files[path.replace(FOLDER, "metrics")] = files.pop(path)
+def lines(report: str) -> list[str]:
+    return [line for line in report.splitlines() if line.startswith("- ")]
 
 
-def model_paths_cut(files: dict[str, str]) -> None:
-    """The metric folder taken out of the project's `model-paths`, as if dbt no longer read it."""
-    files[PROJECT_FILE] = files[PROJECT_FILE].replace(', "../semantics/metricflow"', "")
+def still(*names: str, at: int = 1) -> list[str]:
+    return [f"- metric {m}'s definition changed and its version is still {at}" for m in names]
 
 
-def commented(files: dict[str, str]) -> None:
-    files[CONTRACTS] = "# A comment.\n" + files[CONTRACTS].replace(
-        "\nmetrics:", "\n# Another.\nmetrics:"
+FIXED_AWARD_EXPR = "expr: case when award_held_to > 0 then award_held_to end"
+NEW_EXPR = "expr: case when award_held_to > 1 then award_held_to end"
+PAID_AGAINST_EXPR = "expr: case when award_held_to > 0 then paid end"
+REPEATS = "{{ Dimension('payment__entity_id') }} = 'uk-transport'"
+PAYMENT_METRICS = [
+    "chicago_payment_amount",
+    "chicago_payment_rows",
+    "chicago_repeat_amount",
+    "chicago_repeat_rows",
+    "duplicate_payment_amount_rate",
+    "duplicate_payment_rate",
+]
+ALL_METRICS = sorted(
+    [
+        "constant_currency_spend",
+        "fixed_award",
+        "paid_against_fixed_award",
+        "paid_over_award",
+        "remaining_commitment",
+        "spend_against_award",
+        "spend_bases_in_periods",
+        "spend_bases_in_years",
+        "spend_in_periods",
+        "spend_in_years",
+        *PAYMENT_METRICS,
+    ]
+)
+
+# A metric that reads another in its filter: remaining commitment over contracts paid nothing
+# over their award, invented for the test.
+UNPAID = "      measure: unpaid_award\n    config:\n"
+READS_A_METRIC = replaced(
+    CONTRACTS,
+    UNPAID,
+    "      measure: unpaid_award\n"
+    "    filter: \"{{ Metric('paid_over_award', group_by=['contract']) }} = 0\"\n"
+    "    config:\n",
+)
+OVER_AWARD_EXPR = (
+    "        expr: >\n"
+    "          case when award_held_to > 0 then\n"
+    "            case when difference > 0 then difference else 0 end\n"
+    "          end\n"
+)
+
+
+def split_by_dbtignore(files: dict[str, str]) -> None:
+    """The old block of a metric left in a file `.dbtignore` hides from dbt, and a changed copy put
+    in the macros folder, which dbt reads YAML from too."""
+    text = files[PAYMENTS]
+    start = text.index("  - name: chicago_payment_amount\n")
+    end = text.index("  - name: chicago_repeat_amount\n")
+    block = text[start:end]
+    files[PAYMENTS] = text[:start] + text[end:]
+    files[f"{FOLDER}/payments_metrics.yml"] = "metrics:\n" + block
+    files["models/.dbtignore"] = "payments_metrics.yml\n"
+    changed = block.replace(
+        "      measure: payment_amount\n",
+        "      measure: {name: payment_amount, join_to_timespine: true, fill_nulls_with: 0}\n",
+    )
+    assert changed != block
+    files["models/macros/payment_inputs.yml"] = "metrics:\n" + changed
+
+
+def whole_file_dbtignored(files: dict[str, str]) -> None:
+    """The metric file hidden from dbt by `.dbtignore`, and a changed copy in the macros folder."""
+    files["models/.dbtignore"] = "contracts.yml\n"
+    files["models/macros/awards.yml"] = files[CONTRACTS].replace(FIXED_AWARD_EXPR, NEW_EXPR)
+
+
+def spine_moved(files: dict[str, str]) -> None:
+    """MetricFlow's time spine moved from the day spine to the fiscal calendar's days."""
+    text = files[CALENDARS].replace(
+        "    time_spine:\n      standard_granularity_column: date_day\n", ""
+    )
+    columns = (
+        "    columns:\n      - name: entity_id\n        data_tests:\n          - not_null\n"
+        "      - name: calendar_date\n"
+    )
+    assert text.count(columns) == 1, "the fiscal calendar's columns moved: update the test"
+    files[CALENDARS] = text.replace(
+        columns,
+        "    time_spine:\n      standard_granularity_column: calendar_date\n"
+        + columns
+        + "        granularity: day\n",
     )
 
 
 FAILS: dict[str, tuple[Edit, list[str]]] = {
     "a measure's expression changed, no version": (
-        measure("chicago_contracts", "fixed_award", "expr", NEW_EXPR),
-        ["fixed_award", "spend_against_award"],
+        replaced(CONTRACTS, FIXED_AWARD_EXPR, NEW_EXPR),
+        still("fixed_award", "spend_against_award"),
     ),
     "a measure changed, only the metric over it bumped": (
-        both(
-            measure("chicago_contracts", "fixed_award", "expr", NEW_EXPR),
-            bump("fixed_award"),
-        ),
-        ["spend_against_award"],
+        both(replaced(CONTRACTS, FIXED_AWARD_EXPR, NEW_EXPR), bump("fixed_award")),
+        still("spend_against_award"),
     ),
     "an input's filter changed, only the input bumped": (
         both(
             metric("chicago_repeat_rows", setting("filter", REPEATS), PAYMENTS),
             bump("chicago_repeat_rows", PAYMENTS),
         ),
-        ["duplicate_payment_rate"],
-    ),
-    "a metric's own filter added, no version": (
-        metric("paid_over_award", setting("filter", A_FILTER)),
-        ["paid_over_award"],
-    ),
-    "a metric's description changed, no version": (
-        metric("spend_against_award", setting("description", NEW_DESCRIPTION)),
-        ["spend_against_award"],
-    ),
-    "a metric's label changed, no version": (
-        metric("spend_against_award", setting("label", "Award spent")),
-        ["spend_against_award"],
-    ),
-    "a metric's role changed, no version": (
-        metric("fixed_award", meta(role="headline")),
-        ["fixed_award"],
+        still("duplicate_payment_rate"),
     ),
     "a dimension's expression changed, no version": (
         on(
@@ -221,26 +288,17 @@ FAILS: dict[str, tuple[Edit, list[str]]] = {
             "payments",
             lambda b: b["dimensions"][1].update(expr="lower(entity_id)"),
         ),
-        [
-            "chicago_payment_amount",
-            "chicago_payment_rows",
-            "chicago_repeat_amount",
-            "chicago_repeat_rows",
-            "duplicate_payment_amount_rate",
-            "duplicate_payment_rate",
-        ],
+        still(*PAYMENT_METRICS),
     ),
-    "a semantic model's dbt model changed, no version": (
-        on(PAYMENTS, "semantic_models", "payments", setting("model", "ref('payments_v2')")),
-        [
-            "chicago_payment_amount",
-            "chicago_payment_rows",
-            "chicago_repeat_amount",
-            "chicago_repeat_rows",
-            "duplicate_payment_amount_rate",
-            "duplicate_payment_rate",
-        ],
+    "a metric split between a file dbt ignores and the macros folder, changed": (
+        split_by_dbtignore,
+        still("chicago_payment_amount", "duplicate_payment_amount_rate"),
     ),
+    "a metric file ignored by dbt and a changed copy in the macros folder": (
+        whole_file_dbtignored,
+        still("fixed_award", "spend_against_award"),
+    ),
+    "the time spine moved": (spine_moved, still(*ALL_METRICS)),
 }
 
 
@@ -248,141 +306,322 @@ FAILS: dict[str, tuple[Edit, list[str]]] = {
 def test_a_changed_definition_under_the_same_version_fails_the_gate(
     tmp_path: Path, name: str
 ) -> None:
-    edit, named = FAILS[name]
+    edit, expected = FAILS[name]
     ok, report = versions.check(working(tmp_path, edit))
     assert not ok, report
-    lines = [line for line in report.splitlines() if line.startswith("- ")]
-    assert lines == [
-        f"- metric {m}'s definition changed and its version is still 1" for m in named
-    ], report
+    assert lines(report) == expected, report
 
 
-REFUSED: dict[str, tuple[Edit, str]] = {
-    "a version gone": (
-        metric("remaining_commitment", meta(version=None)),
-        "metric remaining_commitment has no version that is an integer of at least 1",
+def test_a_metric_read_in_a_filter_is_part_of_the_definition(tmp_path: Path) -> None:
+    """A metric whose filter reads another metric changes when that metric does."""
+    main = changed_from(REAL, READS_A_METRIC)
+    edit = both(
+        replaced(CONTRACTS, OVER_AWARD_EXPR, "        expr: award_held_to\n"),
+        bump("paid_over_award"),
+    )
+    ok, report = versions.check(working(tmp_path, edit, main))
+    assert not ok, report
+    assert lines(report) == still("remaining_commitment"), report
+
+
+REFUSED: dict[str, tuple[Edit, list[str]]] = {
+    "dbt Jinja in a definition": (
+        both(
+            replaced(
+                CONTRACTS,
+                FIXED_AWARD_EXPR,
+                "expr: \"case when award_held_to > {{ var('award_floor', 0) }} then"
+                ' award_held_to end"',
+            ),
+            metric(
+                "remaining_commitment",
+                setting("label", "Remaining commitment {{ env_var('ANY', '') }}"),
+            ),
+            metric(
+                "chicago_payment_rows",
+                setting("description", "Paid by {{ run_started_at.year }}."),
+                PAYMENTS,
+            ),
+        ),
+        [
+            "semantics/metricflow/contracts.yml: semantic_models chicago_contracts holds dbt Jinja"
+            " at measures.0.expr",
+            "semantics/metricflow/contracts.yml: metrics remaining_commitment holds dbt Jinja at"
+            " label",
+            "semantics/metricflow/payments.yml: metrics chicago_payment_rows holds dbt Jinja at"
+            " description",
+        ],
     ),
-    "a version of 0": (
-        metric("remaining_commitment", meta(version=0)),
-        "metric remaining_commitment has no version that is an integer of at least 1",
+    "Jinja in the project file": (
+        replaced(PROJECT_FILE, "  source_rows: landed\n", "  source_rows: \"{{ 'landed' }}\"\n"),
+        [f"{PROJECT_FILE} holds Jinja, which dbt renders from outside the tree"],
     ),
-    "a semantic version": (
-        metric("remaining_commitment", meta(version="1.1.0")),
-        "metric remaining_commitment has no version that is an integer of at least 1",
+    "metrics turned off by the project's configuration": (
+        lambda files: files.update(
+            {PROJECT_FILE: files[PROJECT_FILE] + "\nmetrics:\n  ledger_lab:\n    +enabled: false\n"}
+        ),
+        [f"metric {m} (origin/main defines it) is gone or renamed" for m in ALL_METRICS],
     ),
-    "a version that is true": (
-        metric("remaining_commitment", meta(version=True)),
-        "metric remaining_commitment has no version that is an integer of at least 1",
+    "a metric file moved out of what dbt reads": (
+        moved(CONTRACTS, "semantics/contracts.yml"),
+        ["metric spend_against_award (origin/main defines it) is gone or renamed"],
     ),
+    "the project moved": (
+        lambda files: files.update({"dbt/dbt_project.yml": files.pop(PROJECT_FILE)}),
+        [f"there is no dbt project at {PROJECT_FILE}"],
+    ),
+    "a file dbt cannot read": (
+        lambda files: files.update({CONTRACTS: "metrics: [\n"}),
+        ["dbt parse failed"],
+    ),
+    "a metric defined twice": (
+        lambda files: files.update({f"{FOLDER}/again.yml": files[CONTRACTS]}),
+        ["dbt parse failed"],
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(REFUSED))
+def test_a_definition_dbt_reads_otherwise_or_cannot_read_fails_the_gate(
+    tmp_path: Path, name: str
+) -> None:
+    edit, expected = REFUSED[name]
+    ok, report = versions.check(working(tmp_path, edit))
+    assert not ok, report
+    for each in expected:
+        assert each in report, report
+
+
+def test_a_file_reached_by_a_link_or_outside_the_tree_fails_the_gate(tmp_path: Path) -> None:
+    linked = working(tmp_path / "link", lambda files: None)
+    outside = tmp_path / "outside.yml"
+    outside.write_text("metrics: []\n")
+    (linked / FOLDER / "linked.yml").symlink_to(outside)
+    ok, report = versions.check(linked)
+    assert not ok, report
+    assert f"{FOLDER}/linked.yml is a link, which the gate does not follow" in report
+    assert "metrics: []" not in report
+
+    folder = tmp_path / "elsewhere"
+    folder.mkdir()
+    (folder / "more.yml").write_text("version: 2\n")
+    path = replaced(
+        PROJECT_FILE, '"../semantics/metricflow"]', f'"../semantics/metricflow", "{folder}"]'
+    )
+    ok, report = versions.check(working(tmp_path / "path", path))
+    assert not ok, report
+    assert "which is outside the tree" in report
+
+
+def meta_of(manifest_metrics: list[Block], name: str) -> Block:
+    (found,) = [m for m in manifest_metrics if m["name"] == name]
+    return found["config"]["meta"]
+
+
+@pytest.fixture(scope="module")
+def committed(tmp_path_factory: pytest.TempPathFactory) -> Block:
+    """The semantic manifest dbt writes for the committed tree, parsed by the gate."""
+    work = tmp_path_factory.mktemp("committed")
+    repo = git_repo(work, REAL)
+    tree = work / "tree"
+    tree.mkdir()
+    versions.export_working(repo, tree)
+    return versions.parse(tree, work)
+
+
+Change = Callable[[Block], None]
+
+
+def on_meta(name: str, **values: object) -> Change:
+    def change(parsed: Block) -> None:
+        meta = meta_of(parsed["metrics"], name)
+        for key, value in values.items():
+            if value is None:
+                meta.pop(key)
+            else:
+                meta[key] = value
+
+    return change
+
+
+def on_metric(name: str, key: str, value: object) -> Change:
+    def change(parsed: Block) -> None:
+        (found,) = [m for m in parsed["metrics"] if m["name"] == name]
+        found[key] = value
+
+    return change
+
+
+def on_measure(name: str, key: str, value: object) -> Change:
+    def change(parsed: Block) -> None:
+        (found,) = [
+            x for s in parsed["semantic_models"] for x in s["measures"] if x["name"] == name
+        ]
+        found[key] = value
+
+    return change
+
+
+def changes(*each: Change) -> Change:
+    def change(parsed: Block) -> None:
+        for one in each:
+            one(parsed)
+
+    return change
+
+
+def renamed(name: str, to: str) -> Change:
+    return on_metric(name, "name", to)
+
+
+def removed(name: str) -> Change:
+    def change(parsed: Block) -> None:
+        parsed["metrics"] = [m for m in parsed["metrics"] if m["name"] != name]
+
+    return change
+
+
+def added(parsed: Block) -> None:
+    (source,) = [m for m in parsed["metrics"] if m["name"] == "remaining_commitment"]
+    new = copy.deepcopy(source)
+    new["name"] = "remaining_commitment_again"
+    parsed["metrics"].append(new)
+
+
+def compared(committed: Block, change: Change, before: Change | None = None) -> tuple[bool, str]:
+    """The comparison of the committed manifest (changed by `before`) with a copy changed by
+    `change`, both read as the gate reads a manifest dbt wrote."""
+    base, after = copy.deepcopy(committed), copy.deepcopy(committed)
+    if before is not None:
+        before(base)
+        before(after)
+    change(after)
+    return versions.compare(versions.definitions(base), versions.definitions(after))
+
+
+def relation_moved(parsed: Block) -> None:
+    (found,) = [s for s in parsed["semantic_models"] if s["name"] == "chicago_contracts"]
+    found["node_relation"]["alias"] = "another_model"
+
+
+NO_VERSION = "metric remaining_commitment has no version that is an integer from 1 to 2^53 - 1"
+RULE_FAILS: dict[str, tuple[Change, str]] = {
+    "a version gone": (on_meta("remaining_commitment", version=None), NO_VERSION),
+    "a version of 0": (on_meta("remaining_commitment", version=0), NO_VERSION),
+    "a semantic version": (on_meta("remaining_commitment", version="1.1.0"), NO_VERSION),
+    "a version that is true": (on_meta("remaining_commitment", version=True), NO_VERSION),
+    "a version past 2^53 - 1": (on_meta("remaining_commitment", version=2**53), NO_VERSION),
     "an owner gone": (
-        metric("remaining_commitment", meta(owner=None)),
+        on_meta("remaining_commitment", owner=None),
         "metric remaining_commitment has no owner",
     ),
     "an owner gone with a change and a new version": (
-        metric("remaining_commitment", meta(owner=None, version=2, term="award")),
+        on_meta("remaining_commitment", owner=None, version=2, term="award"),
         "metric remaining_commitment has no owner",
-    ),
-    "a new metric with no owner": (
-        both(new_metric, on(CONTRACTS, "metrics", "unpaid_award_total", meta(owner=None))),
-        "metric unpaid_award_total has no owner",
     ),
     "a metric removed": (
         removed("paid_over_award"),
         "metric paid_over_award (origin/main defines it) is gone or renamed",
     ),
     "a metric renamed": (
-        metric("paid_over_award", setting("name", "overpaid")),
+        renamed("paid_over_award", "overpaid"),
         "metric paid_over_award (origin/main defines it) is gone or renamed",
     ),
-    "a metric file moved out of the model paths": (
-        moved(CONTRACTS, "semantics/contracts.yml"),
-        "metric spend_against_award (origin/main defines it) is gone or renamed",
+    "a metric's description changed, no version": (
+        on_metric("spend_against_award", "description", "Said otherwise."),
+        "metric spend_against_award's definition changed and its version is still 1",
     ),
-    "the metric folder cut from the model paths": (
-        model_paths_cut,
-        "metric spend_against_award (origin/main defines it) is gone or renamed",
+    "a metric's label changed, no version": (
+        on_metric("spend_against_award", "label", "Award spent"),
+        "metric spend_against_award's definition changed and its version is still 1",
     ),
-    "an unreadable file": (
-        lambda files: files.update({CONTRACTS: "metrics: [\n"}),
-        f"{CONTRACTS} is unreadable",
+    "a metric's role changed, no version": (
+        on_meta("fixed_award", role="headline"),
+        "metric fixed_award's definition changed and its version is still 1",
     ),
-    "a measure that is not defined": (
-        metric("remaining_commitment", setting("type_params", {"measure": "nothing"})),
-        "metric remaining_commitment cannot be resolved: measure nothing is referenced and not"
-        " defined",
+    "a semantic model's relation changed, no version": (
+        relation_moved,
+        "metric remaining_commitment's definition changed and its version is still 1",
     ),
-    "an input that is not defined": (
-        metric(
-            "spend_against_award",
-            setting("type_params", {"numerator": "nothing", "denominator": "fixed_award"}),
-        ),
-        "metric spend_against_award cannot be resolved: metric nothing is referenced and not"
-        " defined",
-    ),
-    "a metric type the gate does not know": (
-        metric("remaining_commitment", setting("type", "invented")),
-        "metric remaining_commitment cannot be resolved: type 'invented' is not one the gate can"
-        " resolve",
-    ),
-    "a metric defined twice": (
-        lambda files: files.update({f"{FOLDER}/again.yml": files[CONTRACTS]}),
-        f"{CONTRACTS}: semantic_models chicago_contracts is defined twice",
+    "a measure's aggregation changed, no version": (
+        on_measure("unpaid_award", "agg", "max"),
+        "metric remaining_commitment's definition changed and its version is still 1",
     ),
 }
 
 
-@pytest.mark.parametrize("name", list(REFUSED))
-def test_a_metric_without_a_version_an_owner_or_its_definition_fails_the_gate(
-    tmp_path: Path, name: str
+@pytest.mark.parametrize("name", list(RULE_FAILS))
+def test_a_metric_without_a_version_an_owner_or_its_promise_fails_the_comparison(
+    committed: Block, name: str
 ) -> None:
-    edit, expected = REFUSED[name]
-    ok, report = versions.check(working(tmp_path, edit))
+    change, expected = RULE_FAILS[name]
+    ok, report = compared(committed, change)
     assert not ok, report
-    assert expected in report
+    assert f"- {expected}" in report.splitlines(), report
 
 
-def test_a_version_that_goes_down_fails_the_gate(tmp_path: Path) -> None:
-    main = dict(REAL)
-    bump("paid_over_award", to=3)(main)
-    ok, report = versions.check(working(tmp_path, bump("paid_over_award", to=2), main))
+def test_a_version_that_goes_down_fails_the_comparison(committed: Block) -> None:
+    ok, report = compared(
+        committed, on_meta("paid_over_award", version=2), on_meta("paid_over_award", version=3)
+    )
     assert not ok, report
-    assert "metric paid_over_award's version went down from 3 to 2" in report
+    assert lines(report) == ["- metric paid_over_award's version went down from 3 to 2"], report
+
+
+RULE_PASSES: dict[str, Change] = {
+    "a version raised with no change": on_meta("paid_over_award", version=2),
+    "a version raised by more than one with a change": changes(
+        on_metric("paid_over_award", "label", "Overpaid"), on_meta("paid_over_award", version=5)
+    ),
+    "a description changed with a new version": changes(
+        on_metric("spend_against_award", "description", "Said otherwise."),
+        on_meta("spend_against_award", version=2),
+    ),
+    "an owner changed alone": on_meta("paid_over_award", owner="group-controller"),
+    "a measure's description changed": on_measure("fixed_award", "description", "Said otherwise."),
+    "an input's description changed, only the input bumped": changes(
+        on_metric("fixed_award", "description", "Not for direct use: said otherwise."),
+        on_meta("fixed_award", version=2),
+    ),
+    "a new metric": added,
+}
+
+
+@pytest.mark.parametrize("name", list(RULE_PASSES))
+def test_a_change_that_keeps_every_version_passes_the_comparison(
+    committed: Block, name: str
+) -> None:
+    ok, report = compared(committed, RULE_PASSES[name])
+    assert ok, report
+
+
+def unversioned(parsed: Block) -> None:
+    for each in parsed["metrics"]:
+        each["config"]["meta"].pop("version")
+
+
+def test_the_first_versions_pass_against_a_main_without_versions(committed: Block) -> None:
+    before = copy.deepcopy(committed)
+    unversioned(before)
+    ok, report = versions.compare(versions.definitions(before), versions.definitions(committed))
+    assert ok, report
+
+
+def test_no_version_fails_against_a_main_without_versions(committed: Block) -> None:
+    ok, report = compared(committed, lambda parsed: None, unversioned)
+    assert not ok, report
+    assert NO_VERSION in report
 
 
 PASSES: dict[str, Edit] = {
     "no change": lambda files: None,
     "comments, another key order and folding": both(
-        commented, metric("remaining_commitment", lambda b: None)
+        replaced(CONTRACTS, "\nmetrics:", "\n# A comment.\nmetrics:"),
+        metric("remaining_commitment", lambda b: None),
     ),
-    "a measure changed, every metric over it bumped": both(
-        measure("chicago_contracts", "fixed_award", "expr", NEW_EXPR),
-        bump("fixed_award"),
-        bump("spend_against_award"),
+    "a metric file moved to another folder dbt reads": moved(
+        CONTRACTS, "models/macros/contracts.yml"
     ),
-    "an input's filter changed, the input and its headline bumped": both(
-        metric("chicago_repeat_rows", setting("filter", REPEATS), PAYMENTS),
-        bump("chicago_repeat_rows", PAYMENTS),
-        bump("duplicate_payment_rate", PAYMENTS),
-    ),
-    "a description changed with a new version": both(
-        metric("spend_against_award", setting("description", NEW_DESCRIPTION)),
-        bump("spend_against_award"),
-    ),
-    "a version raised by more than one": both(
-        metric("paid_over_award", setting("filter", A_FILTER)), bump("paid_over_award", to=5)
-    ),
-    "a version raised with no change": bump("paid_over_award"),
-    "an owner changed alone": metric("paid_over_award", meta(owner="group-controller")),
-    "a measure's description changed": measure(
-        "chicago_contracts", "fixed_award", "description", NEW_DESCRIPTION
-    ),
-    "an input's description changed, only the input bumped": both(
-        metric("fixed_award", setting("description", "Not for direct use: said otherwise.")),
-        bump("fixed_award"),
-    ),
-    "a new metric": new_metric,
-    "a metric file moved inside the model paths": moved(CONTRACTS, f"{FOLDER}/awards/awards.yml"),
-    "the project and the metric files moved together": project_moved,
 }
 
 
@@ -393,7 +632,11 @@ def test_a_change_that_keeps_every_version_passes_the_gate(tmp_path: Path, name:
 
 
 def test_the_gate_names_the_versions_that_went_up(tmp_path: Path) -> None:
-    edit = PASSES["a measure changed, every metric over it bumped"]
+    edit = both(
+        replaced(CONTRACTS, FIXED_AWARD_EXPR, NEW_EXPR),
+        bump("fixed_award"),
+        bump("spend_against_award"),
+    )
     ok, report = versions.check(working(tmp_path, edit))
     assert ok, report
     assert report.endswith(
@@ -401,29 +644,8 @@ def test_the_gate_names_the_versions_that_went_up(tmp_path: Path) -> None:
     )
 
 
-def unversioned(files: dict[str, str]) -> dict[str, str]:
-    return {p: t.replace(", version: 1}", "}") for p, t in files.items()}
-
-
-def test_the_first_versions_pass_against_a_main_without_versions(tmp_path: Path) -> None:
-    main = unversioned(REAL)
-    assert main != REAL
-    repo = working(tmp_path, lambda files: files.update(REAL), main)
-    ok, report = versions.check(repo)
-    assert ok, report
-
-
-def test_a_change_without_a_version_fails_against_a_main_without_versions(tmp_path: Path) -> None:
-    main = unversioned(REAL)
-    edit = metric("paid_over_award", setting("filter", A_FILTER))
-    ok, report = versions.check(working(tmp_path, edit, main))
-    assert not ok, report
-    assert "metric spend_against_award has no version" in report
-    assert "metric paid_over_award has no version" in report
-
-
-def test_the_first_metrics_pass_while_main_defines_none(tmp_path: Path) -> None:
-    repo = working(tmp_path, lambda files: files.update(REAL), {PROJECT_FILE: REAL[PROJECT_FILE]})
+def test_the_first_metrics_pass_while_main_has_no_dbt_project(tmp_path: Path) -> None:
+    repo = working(tmp_path, lambda files: files.update(REAL), {"other.txt": "no project\n"})
     ok, report = versions.check(repo)
     assert ok, report
     assert "defines no metric" in report
@@ -436,43 +658,105 @@ def test_a_clone_without_main_fails_and_says_how_to_fetch_it(tmp_path: Path) -> 
         versions.check(repo)
 
 
-def test_a_metric_can_join_another_semantic_model_through_an_entity() -> None:
-    """A dimension of a semantic model reached through a shared entity is part of the definition,
-    since a filter or group-by can read it; one with no shared entity is not."""
-    models = {
-        "spend": {
-            "name": "spend",
-            "entities": [{"name": "payment", "type": "primary"}],
-            "measures": [{"name": "amount", "agg": "sum"}],
-        },
-        "vendors": {
-            "name": "vendors",
-            "entities": [{"name": "payment", "type": "foreign"}],
-            "dimensions": [{"name": "region", "type": "categorical"}],
-        },
-        "elsewhere": {"name": "elsewhere", "entities": [{"name": "budget", "type": "primary"}]},
-    }
-    metrics = {"spent": {"name": "spent", "type": "simple", "type_params": {"measure": "amount"}}}
-    resolved = versions.definition("spent", models, metrics)
-    assert set(resolved["semantic_models"]) == {"spend", "vendors"}
+def test_a_main_whose_project_cannot_be_parsed_fails_the_gate(tmp_path: Path) -> None:
+    main = changed_from(REAL, lambda files: files.update({CONTRACTS: "metrics: [\n"}))
+    with pytest.raises(versions.GateError, match="origin/main's metrics cannot be read"):
+        versions.check(working(tmp_path, lambda files: None, main))
+
+
+def test_a_main_whose_project_moved_fails_the_gate(tmp_path: Path) -> None:
+    main = changed_from(REAL, moved(PROJECT_FILE, "dbt/dbt_project.yml"))
+    with pytest.raises(versions.GateError, match="there is no dbt project at models/"):
+        versions.check(working(tmp_path, lambda files: None, main))
+
+
+def test_a_main_git_cannot_read_fails_the_gate(tmp_path: Path) -> None:
+    """A partial clone whose promisor is gone holds `origin/main`'s commits but not its files:
+    the gate fails instead of reading the missing files as empty."""
+    source = git_repo(tmp_path / "source", REAL)
+    run(source, "config", "uploadpack.allowFilter", "true")
+    apply(source, replaced(CONTRACTS, "\nmetrics:", "\n# A comment.\nmetrics:"), REAL)
+    commit(source, "main moves")
+    run(source, "branch", "-f", "published", "HEAD")
+    apply(source, replaced(CONTRACTS, FIXED_AWARD_EXPR, NEW_EXPR), dict(REAL))
+    commit(source, "a change")
+    run(source, "branch", "feature", "HEAD")
+    run(source, "checkout", "--quiet", "published")
+    run(source, "branch", "-f", "main", "published")
+    clone = tmp_path / "clone"
+    url = f"file://{source}"
+    run(tmp_path, "clone", "--quiet", "--filter=blob:none", "--no-checkout", url, str(clone))
+    run(clone, "checkout", "--quiet", "-b", "feature", "origin/feature")
+    run(clone, "remote", "set-url", "origin", f"file://{tmp_path / 'gone'}")
+    with pytest.raises(versions.GateError, match="origin/main's metrics cannot be read"):
+        versions.check(clone)
+    run(clone, "remote", "set-url", "origin", url)
+    ok, report = versions.check(clone)
+    assert lines(report) == still("fixed_award", "spend_against_award"), report
+
+
+def test_two_branches_publishing_one_version_cannot_both_pass(tmp_path: Path) -> None:
+    """Branch A and branch B, both cut from one `main`, each change a metric and bump the
+    headline over both to 2. Once A is merged, B is refused until it merges `main`, and then
+    shows the headline changed again under version 2."""
+    repo = git_repo(tmp_path, REAL)
+    start = run(repo, "rev-parse", "HEAD").strip()
+    run(repo, "checkout", "--quiet", "-b", "a")
+    edit_a = both(
+        replaced(CONTRACTS, FIXED_AWARD_EXPR, NEW_EXPR),
+        bump("fixed_award"),
+        bump("spend_against_award"),
+    )
+    apply(repo, edit_a, REAL)
+    commit(repo, "a")
+    ok, report = versions.check(repo)
+    assert ok, report
+    run(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    run(repo, "checkout", "--quiet", "-b", "b", start)
+    edit_b = both(
+        replaced(CONTRACTS, PAID_AGAINST_EXPR, "expr: case when award_held_to > 9 then paid end"),
+        bump("paid_against_fixed_award"),
+        bump("spend_against_award"),
+    )
+    apply(repo, edit_b, REAL)
+    commit(repo, "b")
+    with pytest.raises(versions.GateError, match="HEAD does not contain origin/main"):
+        versions.check(repo)
+    run(repo, "merge", "--quiet", "--no-edit", "origin/main")
+    ok, report = versions.check(repo)
+    assert not ok, report
+    assert lines(report) == still("spend_against_award", at=2), report
+
+
+def test_the_command_exits_non_zero_on_a_break_and_zero_without(tmp_path: Path) -> None:
+    """`python semantics/versions.py`, as `make metric-versions` runs it, in a clone of its own."""
+    env = {k: v for k, v in os.environ.items() if k != "LEDGER_LAB_GCP_PROJECT"}
+
+    def gate(repo: Path) -> subprocess.CompletedProcess[str]:
+        command = [sys.executable, "-I", str(repo / "semantics/versions.py")]
+        return subprocess.run(command, cwd=repo, capture_output=True, text=True, env=env)
+
+    same = gate(working(tmp_path / "same", lambda files: None))
+    assert same.returncode == 0, same.stderr
+    assert "16 metrics keep their versions against origin/main" in same.stdout
+    broken = gate(working(tmp_path / "broken", replaced(CONTRACTS, FIXED_AWARD_EXPR, NEW_EXPR)))
+    assert broken.returncode == 1, broken.stdout
+    assert still("fixed_award", "spend_against_award") == lines(broken.stderr)
 
 
 def test_every_metric_carries_a_version(build: Build) -> None:
     for each in manifest(build)["metrics"]:
-        assert each["config"]["meta"].get("version") == 1, each["name"]
+        assert versions.valid_version(each["config"]["meta"].get("version")), each["name"]
 
 
-def test_the_gate_reads_the_metrics_and_measures_dbt_reads(build: Build) -> None:
-    """The gate's reading of the committed tree names the metrics dbt's parse writes, each resolved
-    to the measures dbt resolves it to, so the gate is no second reading of the semantic layer."""
-    read, problems = versions.read(versions.working_tree(versions.REPO))
-    assert problems == []
-    parsed = {m["name"]: m for m in manifest(build)["metrics"]}
-    assert read.keys() == parsed.keys()
-    for name, each in read.items():
-        measures = {
-            m["name"]
-            for model in each.definition["semantic_models"].values()
-            for m in model["measures"]
-        }
-        assert measures == {m["name"] for m in parsed[name]["type_params"]["input_measures"]}, name
+def test_the_gate_reads_the_metrics_dbt_parses(build: Build) -> None:
+    """The gate's definitions name every metric dbt's own build parsed, each with its version."""
+    parsed = manifest(build)
+    read = versions.definitions(parsed)
+    assert sorted(read) == ALL_METRICS
+    for each in parsed["metrics"]:
+        assert read[each["name"]].version == each["config"]["meta"]["version"]
+    assert read["spend_against_award"].definition["inputs"].keys() == {
+        "fixed_award",
+        "paid_against_fixed_award",
+    }
