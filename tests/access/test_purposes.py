@@ -292,8 +292,26 @@ def landed_warehouse(tmp_path_factory: pytest.TempPathFactory) -> Path:
 # entity's; the Dutch government's payments have no rows.
 CHICAGO = {"chicago": 475609}
 UK = {"uk-transport": 31103}
-BOTH = {**CHICAGO, **UK}
-LANDED_READ: dict[str, dict[str, tuple[int, dict[str, int]]]] = {}
+SPANS = {"chicago": 93, "uk-transport": 12, "nl-government": 3}
+LEFT_OUT = {"chicago": 12, "nl-government": 1}
+LANDED_READ = {
+    "accountant-chicago": {"payment_review.payments": (17, CHICAGO)},
+    "accountant-uk-transport": {"payment_review.payments": (17, UK)},
+    "accountant-nl-government": {"payment_review.payments": (17, {})},
+    "group-controller": {
+        "group_close.payments": (10, {**CHICAGO, **UK}),
+        "group_close.group_totals": (15, SPANS),
+        "group_close.group_totals_left_out": (8, LEFT_OUT),
+    },
+    "payables-clerk": {"payment_review.payments": (17, CHICAGO)},
+    "approver": {"payment_review.payments": (17, CHICAGO)},
+    "auditor": {
+        "audit.payments": (17, {**CHICAGO, **UK}),
+        "audit.group_totals": (15, SPANS),
+        "audit.group_totals_left_out": (8, LEFT_OUT),
+    },
+    "metric-owner": {"metric_definition.group_totals": (9, SPANS)},
+}
 
 
 @pytest.mark.landed
@@ -329,3 +347,10 @@ def test_each_persona_reads_its_purposes_over_the_landed_build(
             print(f"  {persona} {table}: {n} columns, {rows}")
     assert found == []
     assert read == LANDED_READ
+    # The rows counted again in the source, read with full rights.
+    with duckdb.connect(str(landed_warehouse), read_only=True) as db:
+        for table, want in (("payments", {**CHICAGO, **UK}), ("group_totals", SPANS)):
+            got = db.execute(f"select entity_id, count(*) from {table} group by 1").fetchall()  # noqa: S608
+            assert dict(got) == want, table
+        got = db.execute("select entity_id, count(*) from group_totals_left_out group by 1")
+        assert dict(got.fetchall()) == LEFT_OUT
