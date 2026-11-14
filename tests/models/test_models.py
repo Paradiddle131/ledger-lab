@@ -8,7 +8,9 @@ these tests never reach BigQuery whatever the session's environment holds.
 
 import csv
 import json
+import os
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import jinja2
@@ -47,6 +49,28 @@ def test_the_bigquery_target_caps_every_job() -> None:
     outputs = yaml.safe_load((PROJECT / "profiles.yml").read_text())["ledger_lab"]["outputs"]
     assert "maximum_bytes_billed" in outputs["bigquery"]
     assert "LEDGER_LAB_GCP_PROJECT" in outputs["bigquery"]["project"]
+
+
+@pytest.mark.parametrize(
+    ("landing", "refused"), [("gs://the-lab-project-landing", True), ("landing", False)]
+)
+def test_the_models_refuse_to_read_a_bucket_landing(
+    tmp_path: Path, landing: str, refused: bool
+) -> None:
+    """A model over a landed file compiles against a local landing, and stops at compile time
+    when `LEDGER_LAB_LANDING` names the bucket, which the models never read."""
+    env = {k: v for k, v in os.environ.items() if k != "LEDGER_LAB_GCP_PROJECT"} | {
+        "LEDGER_LAB_LANDING": landing,
+        "LEDGER_LAB_DUCKDB_PATH": str(tmp_path / "ledger_lab.duckdb"),
+        "DBT_TARGET_PATH": str(tmp_path / "target"),
+        "DBT_LOG_PATH": str(tmp_path / "logs"),
+        "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
+    }
+    vars_ = json.dumps({"source_rows": "landed"})
+    result = dbt(env, tmp_path, "compile", "--select", "fx_published_rates", "--vars", vars_)
+    out = result.stdout + result.stderr
+    assert (result.returncode != 0) == refused, out
+    assert ("LEDGER_LAB_LANDING names the landing bucket" in out) == refused, out
 
 
 def test_every_model_seed_and_data_test_passes_on_the_local_engine(build: Build) -> None:

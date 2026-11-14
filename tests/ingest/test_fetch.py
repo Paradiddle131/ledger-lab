@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -16,9 +17,12 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 import yaml
 from conftest import REPO, load_checked
+from fsspec.implementations.memory import MemoryFileSystem
 from jsonschema import Draft202012Validator
 
 from ingest import StepError, fetch
+from ingest import bucket as bucket_module
+from ingest.bucket import Bucket
 
 FILE = b"id,amount\n1,10.00\n2,-3.50\n"
 GZIPPED = gzip.compress(FILE, mtime=0)
@@ -640,6 +644,28 @@ def test_files_that_fail_to_land_together_leave_the_old_ones_as_they_were(
     assert everything_under(tmp_path) == [first, second]
 
 
+def test_ctrl_c_while_placing_files_puts_the_old_ones_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Interrupted after both old files are moved aside, as the first new one is placed: the old
+    files go back, never deleted while they are the only copy."""
+    first, second = tmp_path / "set-1", tmp_path / "set-2"
+    first.write_bytes(b"old one")
+    second.write_bytes(b"old two")
+    rename = Path.replace
+
+    def replace(self: Path, to: Path) -> Path:
+        if Path(to) == first and self.name.startswith(".set-1.new."):
+            raise KeyboardInterrupt
+        return rename(self, to)
+
+    monkeypatch.setattr(Path, "replace", replace)
+    with pytest.raises(KeyboardInterrupt):
+        fetch.land_all("set", {first: b"new one", second: b"new two"})
+    assert (first.read_bytes(), second.read_bytes()) == (b"old one", b"old two")
+    assert everything_under(tmp_path) == [first, second]
+
+
 def test_files_whose_rollback_fails_too_keep_the_old_ones_aside(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -809,3 +835,137 @@ def test_every_set_step_names_recorded_members_and_no_source() -> None:
     for name in fetch.SET_STEPS:
         assert name not in recorded
         assert any(source.startswith(f"{name}-") for source in recorded), name
+
+
+LAB_BUCKET = "gs://the-lab-project-landing"
+
+
+@pytest.fixture
+def bucket(monkeypatch: pytest.MonkeyPatch) -> Iterator[Bucket]:
+    """The lab's landing bucket as `LEDGER_LAB_LANDING` names it, held in memory in place of
+    Cloud Storage."""
+    fs = MemoryFileSystem(skip_instance_cache=True)
+    root = f"/bucket-{uuid.uuid4().hex}"
+    fs.mkdir(root)
+    monkeypatch.setenv("LEDGER_LAB_GCP_PROJECT", "the-lab-project")
+    monkeypatch.setenv("LEDGER_LAB_LANDING", LAB_BUCKET)
+    monkeypatch.setattr(bucket_module, "cloud_storage", lambda: fs)
+    monkeypatch.setattr(bucket_module, "bucket_name", lambda landing, env: root)
+    yield Bucket(fs, root)
+    fs.rm(root, recursive=True)
+
+
+def objects(bucket: Bucket) -> dict[str, bytes]:
+    return {name: bucket.read(name) for name in bucket.names()}
+
+
+def test_a_bucket_landing_names_the_lab_bucket_and_no_local_folder(bucket: Bucket) -> None:
+    landing = fetch.landing()
+    assert isinstance(landing, Bucket) and landing.root == bucket.root
+    assert fetch.work_folder() is None
+    with pytest.raises(fetch.FetchError, match="reads a local landing"):
+        fetch.landing_path()
+
+
+def test_a_bucket_landing_of_another_bucket_is_refused_before_any_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_call() -> None:
+        raise AssertionError("no client is made")
+
+    monkeypatch.setattr(bucket_module, "cloud_storage", no_call)
+    monkeypatch.setenv("LEDGER_LAB_GCP_PROJECT", "the-lab-project")
+    monkeypatch.setenv("LEDGER_LAB_LANDING", "gs://another-lab-landing")
+    with pytest.raises(fetch.FetchError, match="the lab's landing bucket"):
+        fetch.landing()
+
+
+def test_a_source_lands_in_the_bucket_byte_for_byte_and_nothing_else(
+    site: Site, bucket: Bucket, write_sources: Callable[..., Path]
+) -> None:
+    write_sources(payments=entry(f"{site.base}/file.csv", sha256(FILE)))
+    assert fetch.fetch("payments", bucket) == "payments"
+    assert objects(bucket) == {"payments": FILE}
+
+
+def test_a_mismatch_writes_nothing_to_the_bucket(
+    site: Site, bucket: Bucket, write_sources: Callable[..., Path]
+) -> None:
+    write_sources(payments=entry(f"{site.base}/file.csv", sha256(b"something else")))
+    with pytest.raises(fetch.ChecksumMismatchError):
+        fetch.fetch("payments", bucket)
+    assert objects(bucket) == {}
+
+
+def test_a_set_lands_in_the_bucket_through_its_step_only(
+    site: Site,
+    bucket: Bucket,
+    write_sources: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    site.files["/second.csv"] = FILE.upper()
+    monkeypatch.setitem(
+        fetch.SET_STEPS, "spend", lambda files: {"spend-1": b"one", "spend-2": b"two"}
+    )
+    write_sources(
+        **{
+            "spend-1": entry(f"{site.base}/file.csv", sha256(FILE), names_people=True),
+            "spend-2": entry(f"{site.base}/second.csv", sha256(FILE.upper()), names_people=True),
+        }
+    )
+    assert fetch.fetch_set("spend", bucket) == ["spend-1", "spend-2"]
+    assert objects(bucket) == {"spend-1": b"one", "spend-2": b"two"}
+
+
+@pytest.mark.parametrize("name", sorted(fetch.READS_THE_REGISTER))
+def test_a_set_that_reads_the_register_needs_it_in_the_bucket(
+    bucket: Bucket, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    def no_download(entry: dict) -> bytes:
+        raise AssertionError("nothing is downloaded")
+
+    monkeypatch.setattr(fetch, "download", no_download)
+    with pytest.raises(fetch.SourcesError, match="land it first"):
+        fetch.fetch_set(name, bucket)
+    bucket.fs.pipe_file(f"{bucket.root}/gleif-legal-entities", b"landed")
+    with pytest.raises(AssertionError, match="nothing is downloaded"):
+        fetch.fetch_set(name, bucket)
+
+
+def test_the_command_lands_in_the_bucket_and_never_prints_its_name(
+    site: Site,
+    bucket: Bucket,
+    write_sources: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    write_sources(payments=entry(f"{site.base}/file.csv", sha256(FILE)))
+    assert fetch.main(["payments"]) == 0
+    assert objects(bucket) == {"payments": FILE}
+    out = capsys.readouterr().out
+    assert out == "payments in the landing bucket\n"
+    assert "the-lab-project" not in out and bucket.root not in out
+
+
+def test_the_command_reports_the_old_copies_an_interrupted_landing_left(
+    site: Site,
+    bucket: Bucket,
+    write_sources: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bucket.fs.pipe_file(f"{bucket.root}/.payments.old.0", b"an earlier file")
+    bucket.fs.pipe_file(f"{bucket.root}/.payments.new.0", b"an unplaced upload")
+    write_sources(payments=entry(f"{site.base}/file.csv", sha256(FILE)))
+    assert fetch.main(["payments"]) == 0
+    assert objects(bucket) == {"payments": FILE, ".payments.old.0": b"an earlier file"}
+    err = capsys.readouterr().err
+    assert "kept .payments.old.0" in err and "delete it by hand" in err
+    assert "the-lab-project" not in err and bucket.root not in err
+
+
+@pytest.mark.parametrize("value", ["GS://another-bucket", "gcs://another-bucket", "s3://x"])
+def test_a_landing_of_another_scheme_is_refused_not_taken_for_a_folder(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("LEDGER_LAB_LANDING", value)
+    with pytest.raises(fetch.FetchError, match="a local folder or gs://"):
+        fetch.landing()

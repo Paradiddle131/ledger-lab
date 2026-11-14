@@ -18,6 +18,7 @@ dev = [
   "detect-secrets==1.5.0",
   "duckdb==2.0.0",
   "fsspec==2026.9.0",
+  "gcsfs==2026.10.1",
   "httpx==0.28.1",
   "jsonschema==4.26.0",
   "pyright==1.1.414",
@@ -51,18 +52,20 @@ venv = ".venv"
 
 [tool.pytest.ini_options]
 # The live stack test needs `make stack-test` to have started this checkout's stack, a landed
-# test needs its source landed, a pages test reads publishers' pages over the network, and a tofu
-# test needs the pinned OpenTofu initialised (`make fences-validate` runs them), so a plain run
-# (and `make check`) leaves all four out; `-m <marker>` on the command line selects them.
+# test needs its source landed, a pages test reads publishers' pages over the network, a tofu
+# test needs the pinned OpenTofu initialised (`make fences-validate` runs them), and the bucket
+# test reads the lab's landing bucket, so a plain run (and `make check`) leaves all five out;
+# `-m <marker>` on the command line selects them.
 addopts = [
   "-q", "--strict-markers", "--strict-config", "-ra", "-m",
-  "not stack and not landed and not pages and not tofu",
+  "not stack and not landed and not pages and not tofu and not bucket",
 ]
 markers = [
   "stack: needs this checkout's running container stack (`make stack-test`)",
   "landed: needs its source landed under the landing path (`python -m ingest.fetch <source>`)",
   "pages: reads the publishers' pages for the pinned files over the network",
   "tofu: has the pinned OpenTofu evaluate platform/gcp after `tofu init` (`make fences-validate`)",
+  "bucket: lists the lab's landing bucket and compares it with the local landing, reading only",
 ]
 testpaths = ["tests"]
 # platform/ holds scripts run by path; tests import them as top-level modules.

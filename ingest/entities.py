@@ -32,12 +32,14 @@ hashes payees refuses to run until it is landed.
 
 import re
 import unicodedata
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 
 import duckdb
 
 from ingest import StepError
+from ingest.bucket import Bucket, BucketError
 from ingest.gleif.legal_entities import (
     CATEGORIES,
     CATEGORY,
@@ -45,6 +47,7 @@ from ingest.gleif.legal_entities import (
     LEGAL_NAME,
 )
 from ingest.individuals import DOUBT_WORDS, marks_a_person, normalise
+from ingest.scrub import MEMORY, in_memory
 
 REGISTER = "gleif-legal-entities"
 TOKEN = re.compile(r"[^\W_]+|&")
@@ -286,21 +289,27 @@ class Register:
 
     @classmethod
     def landed(cls) -> "Register":
-        """The register landed under the landing path."""
-        from ingest.fetch import landing_path  # the kit imports the steps that call this
+        """The register landed under the landing path, or in the landing bucket."""
+        from ingest.fetch import landing  # the kit imports the steps that call this
 
-        path = landing_path() / REGISTER
-        if not path.is_file():
-            raise RegisterError(f"{REGISTER} is not landed: land it before a step that hashes")
-        rows = (
-            duckdb.connect()
-            .execute(
-                f'SELECT "{LEGAL_NAME}", "{CATEGORY}", "{LEGAL_FORM}"'  # noqa: S608
-                " FROM read_parquet(?)",
-                [str(path)],
-            )
-            .fetchall()
-        )
+        place = landing()
+        select = f'SELECT "{LEGAL_NAME}", "{CATEGORY}", "{LEGAL_FORM}" FROM read_parquet(?)'  # noqa: S608
+        if isinstance(place, Bucket):
+            try:
+                served = place.read(REGISTER)
+            except BucketError as error:
+                raise RegisterError(f"{error}: land it before a step that hashes") from None
+            work = f"/{uuid.uuid4().hex}/{REGISTER}"
+            try:
+                MEMORY.pipe(work, served)
+                rows = in_memory().execute(select, [f"memory://{work}"]).fetchall()
+            finally:
+                MEMORY.rm(work.rsplit("/", 1)[0], recursive=True)
+        else:
+            path = place / REGISTER
+            if not path.is_file():
+                raise RegisterError(f"{REGISTER} is not landed: land it before a step that hashes")
+            rows = duckdb.connect().execute(select, [str(path)]).fetchall()
         return cls(Record(*(str(cell or "") for cell in row)) for row in rows)
 
     def vouches(self, name: str) -> bool:

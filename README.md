@@ -86,6 +86,16 @@ Each source is fetched by name from [`ingest/sources.yaml`](ingest/sources.yaml)
 uv run python -m ingest.fetch <source>
 ```
 
+With the lab's project set, `LEDGER_LAB_LANDING=gs://<lab project>-landing` lands the same files as objects in the landing bucket, named as they are locally, the legal-entity register first as above; the kit refuses any other bucket or a folder inside it.
+It sends no credential of its own, so it works only where the session's network proxy adds one to requests to Cloud Storage, as on the lab's cloud sessions.
+One landing runs at a time under the lock object `.landing.lock`; a landing that was killed leaves it, and the next one refuses until it is deleted by hand once the landed files are checked.
+The models and the landed tests read a local landing and stop on a bucket one; `pytest -m bucket` compares the bucket with one by listing it, reading no object:
+
+```bash
+LEDGER_LAB_LANDING=gs://<lab project>-landing uv run python -m ingest.fetch <source>
+LEDGER_LAB_LANDING=<local landing> uv run pytest -m bucket  # same names, sizes, MD5 and CRC32C, nothing else in the bucket
+```
+
 The container stack needs Docker with Compose; the shared database always starts, every other service only under its profile:
 
 ```bash

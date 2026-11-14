@@ -18,6 +18,10 @@ files by member name, each landed as that member (`chicago` lands `chicago-contr
 failure the landing keeps every file it held before, never a new file beside an old one. Members
 may not share a URL. Nothing runs or lands until every member has verified.
 
+The landing is a local folder, or the lab's Cloud Storage bucket when `LEDGER_LAB_LANDING` is
+`gs://<lab project>-landing` (`bucket.py`): the same bytes land there as objects under the same
+names, all or none in the same way, and a step that reads the landing reads it there too.
+
 Holding the response in memory bounds a source: one over `MAX_BYTES` fails, as does one still
 arriving at `DEADLINE`. A download whose connection drops (cut short, closed, timed out) starts
 again from the first byte, up to `ATTEMPTS` in all, within the same deadline; an error status, a
@@ -33,13 +37,14 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, overload
 
 import httpx
 import yaml
 from jsonschema import Draft202012Validator
 
 from ingest import StepError
+from ingest.bucket import Bucket, BucketError, is_bucket
 from ingest.chicago import together
 from ingest.ecb import rates
 from ingest.entities import REGISTER
@@ -112,8 +117,44 @@ def load_sources(path: Path) -> dict[str, dict[str, Any]]:
     return doc["sources"]
 
 
+def landing() -> Path | Bucket:
+    """Where files land: `LEDGER_LAB_LANDING`, a local folder (default `landing`) or the lab's
+    landing bucket."""
+    value = os.environ.get("LEDGER_LAB_LANDING") or "landing"
+    try:
+        if not is_bucket(value):
+            return Path(value)
+        return Bucket.of_landing(value, os.environ)
+    except BucketError as error:
+        raise FetchError(f"LEDGER_LAB_LANDING: {error}") from None
+
+
 def landing_path() -> Path:
-    return Path(os.environ.get("LEDGER_LAB_LANDING") or "landing")
+    """The local landing, which the models and the landed tests read; a bucket landing is for the
+    kit to write and the warehouse to load, so it is refused here."""
+    place = landing()
+    if isinstance(place, Bucket):
+        raise FetchError("LEDGER_LAB_LANDING names the landing bucket; this reads a local landing")
+    return place
+
+
+def work_folder() -> Path | None:
+    """Where a step may keep its screened work files: under a local landing, or in the system's
+    temporary folder (None) when the landing is the bucket."""
+    place = landing()
+    if isinstance(place, Bucket):
+        return None
+    place.mkdir(parents=True, exist_ok=True)
+    return place
+
+
+def landed(place: Path | Bucket, name: str) -> bool:
+    if isinstance(place, Bucket):
+        try:
+            return place.exists(name)
+        except BucketError as error:
+            raise FetchError(str(error)) from None
+    return (place / name).is_file()
 
 
 def request_url(entry: dict[str, Any]) -> httpx.URL:
@@ -184,11 +225,6 @@ def run_step[Raw, Out](name: str, step: Callable[[Raw], Out], raw: Raw) -> Out:
         raise FetchError(f"{name}: its step failed ({type(error).__name__})") from None
 
 
-def land(name: str, path: Path, data: bytes) -> Path:
-    """Write the file whole or not at all (`land_all` of one file)."""
-    return land_all(name, {path: data})[0]
-
-
 def land_all(name: str, files: dict[Path, bytes]) -> list[Path]:
     """Land every file or none, leaving what was landed before as it was.
 
@@ -201,38 +237,47 @@ def land_all(name: str, files: dict[Path, bytes]) -> list[Path]:
     an old file beside a new one; landing again replaces them all."""
     partials: dict[Path, Path] = {}
     aside: dict[Path, Path] = {}
-    placed: list[Path] = []
+    existed: set[Path] = set()  # the places that held a file
+    touched = False  # whether any place may have changed
+    done = False  # every new file placed, or every old one put back
     path = next(iter(files))
     try:
         for path, data in files.items():
             path.parent.mkdir(parents=True, exist_ok=True)
             partials[path] = _hidden(path)
             partials[path].write_bytes(data)
+        existed = {path for path in files if path.is_file()}
+        touched = True
         for path in files:
-            if path.is_file():
+            if path in existed:
                 old = path.with_name(f".{path.name}.old.{uuid.uuid4().hex}")
                 path.replace(old)
                 aside[path] = old
         for path, partial in partials.items():
             partial.replace(path)
-            placed.append(path)
-    except OSError as error:
+        done = True
+    except BaseException as error:
         try:
-            for landed in placed:
-                landed.unlink(missing_ok=True)
+            for landed in files if touched else ():
+                if landed not in existed or landed in aside:  # what is there now is new
+                    landed.unlink(missing_ok=True)
             for landed, old in list(aside.items()):
                 old.replace(landed)
                 del aside[landed]
+            done = True
         except OSError:
             kept = ", ".join(old.name for old in aside.values())
-            aside.clear()  # the old files stay where they were moved aside
+            why = error.strerror if isinstance(error, OSError) else type(error).__name__
             raise FetchError(
-                f"{name}: cannot write {path}: {error.strerror}, nor move back what it replaced,"
+                f"{name}: cannot write {path}: {why}, nor move back what it replaced,"
                 f" which is kept as {kept}"
             ) from None
-        raise FetchError(f"{name}: cannot write {path}: {error.strerror}") from None
+        if isinstance(error, OSError):
+            raise FetchError(f"{name}: cannot write {path}: {error.strerror}") from None
+        raise
     finally:
-        for leftover in [*partials.values(), *aside.values()]:
+        # A moved-aside old file is deleted only once nothing needs it: it may be the only copy.
+        for leftover in [*partials.values(), *(aside.values() if done else ())]:
             leftover.unlink(missing_ok=True)
     return list(files)
 
@@ -245,8 +290,22 @@ def _hidden(path: Path) -> Path:
         return Path(f.name)
 
 
-def fetch(name: str, landing: Path) -> Path:
-    """Download, verify and land one source; the landed file is `<landing>/<name>`."""
+def land_files(name: str, place: Path | Bucket, files: dict[str, bytes]) -> list[Path] | list[str]:
+    """Land files by name, all or none: under a local folder (`land_all`) or in the bucket."""
+    if isinstance(place, Bucket):
+        try:
+            return place.land_all(files)
+        except BucketError as error:
+            raise FetchError(f"{name}: {error}") from None
+    return land_all(name, {place / file: data for file, data in files.items()})
+
+
+@overload
+def fetch(name: str, landing: Path) -> Path: ...
+@overload
+def fetch(name: str, landing: Bucket) -> str: ...
+def fetch(name: str, landing: Path | Bucket) -> Path | str:
+    """Download, verify and land one source; it lands as `<name>`."""
     sources = load_sources(SOURCES)
     if name not in sources:
         raise SourcesError(f"no source named {name!r} in {SOURCES}")
@@ -256,10 +315,14 @@ def fetch(name: str, landing: Path) -> Path:
         raise SourcesError(f"{name} names people but has no step to hash them before landing")
     raw = download(entry)
     verify(name, entry, raw)
-    return land(name, landing / name, run_step(name, step, raw) if step else raw)
+    return land_files(name, landing, {name: run_step(name, step, raw) if step else raw})[0]
 
 
-def fetch_set(name: str, landing: Path) -> list[Path]:
+@overload
+def fetch_set(name: str, landing: Path) -> list[Path]: ...
+@overload
+def fetch_set(name: str, landing: Bucket) -> list[str]: ...
+def fetch_set(name: str, landing: Path | Bucket) -> list[Path] | list[str]:
     """Download and verify every member of a set, then land its step's output: one file as
     `<name>`, or files by member name."""
     sources = load_sources(SOURCES)
@@ -272,19 +335,19 @@ def fetch_set(name: str, landing: Path) -> list[Path]:
         if url in urls:
             raise SourcesError(f"{urls[url]} and {member} share one URL in the set {name!r}")
         urls[url] = member
-    if name in READS_THE_REGISTER and not (landing / REGISTER).is_file():
+    if name in READS_THE_REGISTER and not landed(landing, REGISTER):
         raise SourcesError(f"{name} keeps in clear what {REGISTER} vouches for: land it first")
     files = {}
     for member in members:
         raw = download(sources[member])
         verify(member, sources[member], raw)
         files[str(request_url(sources[member]))] = raw
-    landed = run_step(name, SET_STEPS[name], files)
-    if isinstance(landed, bytes):
-        return land_all(name, {landing / name: landed})
-    if not set(landed) <= set(members):
+    out = run_step(name, SET_STEPS[name], files)
+    if isinstance(out, bytes):
+        return land_files(name, landing, {name: out})
+    if not set(out) <= set(members):
         raise FetchError(f"{name}: its step names a file that is no member of the set")
-    return land_all(name, {landing / member: data for member, data in landed.items()})
+    return land_files(name, landing, out)
 
 
 def main(argv: list[str]) -> int:
@@ -292,15 +355,19 @@ def main(argv: list[str]) -> int:
         print("usage: python -m ingest.fetch <source or set>", file=sys.stderr)
         return 2
     try:
-        if argv[0] in SET_STEPS:
-            landed = fetch_set(argv[0], landing_path())
-        else:
-            landed = [fetch(argv[0], landing_path())]
+        place = landing()
+        files = fetch_set(argv[0], place) if argv[0] in SET_STEPS else [fetch(argv[0], place)]
     except FetchError as error:
         print(f"fetch: {error}", file=sys.stderr)
         return 1
-    for path in landed:
-        print(path)
+    for file in files:
+        print(file if isinstance(place, Path) else f"{file} in {place}")
+    if isinstance(place, Bucket) and place.left_behind:
+        print(
+            f"fetch: kept {', '.join(place.left_behind)}, left by an interrupted landing; each may"
+            " be the only copy of an earlier file: delete it by hand once it is not needed",
+            file=sys.stderr,
+        )
     return 0
 
 
