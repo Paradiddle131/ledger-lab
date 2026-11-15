@@ -429,7 +429,7 @@ def statements(plan: Plan) -> list[str]:
             source = f"{SOURCE}.main.{quote(table.table)}"
             sql.append(
                 f"create table {quote(table.purpose)}.{quote(table.table)}"  # noqa: S608
-                f" as select {listed} from {source}{_where(table.entities)}"
+                f" as select {listed} from {source}"
             )
         else:
             of = quote(table.units_of)
@@ -439,7 +439,7 @@ def statements(plan: Plan) -> list[str]:
             source = f"{SOURCE}.main.{quote(table.source)}"
             sql.append(
                 f"create table {quote(table.name)} as select {keys}{sums},"  # noqa: S608
-                f" {units} as {quote(table.units)} from {source}{_where(table.entities)}"
+                f" {units} as {quote(table.units)} from {source}"
                 f" group by {keys} having {_kept(table)}"
             )
     return sql
