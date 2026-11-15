@@ -13,8 +13,8 @@ qualified name. The check flags:
 - a stored macro, a type the database created, a sequence, a comment on a table, view or column,
   and a column default.
 The same check is run on databases a broken compiler would build, at least one for each item
-above, and goes red on each. The absent columns are worked out here from the source's columns, and the metric
-definition's columns from the metrics' semantic model, apart from the catalogue.
+above, and goes red on each. The absent columns are worked out here from the source's columns,
+and the metric definition's columns from the metrics' semantic model, apart from the catalogue.
 """
 
 import copy
@@ -127,7 +127,7 @@ def held(db: duckdb.DuckDBPyConnection) -> dict[tuple[str, str], set[str]]:
     """Every table and view of the persona's own catalog, as (schema, name) lowercased as DuckDB
     compares names, with its columns."""
     rows = db.execute(
-        "select lower(t.schema_name), lower(t.table_name), lower(c.column_name)"
+        "select lower(t.schema_name), lower(t.table_name), lower(c.column_name)"  # noqa: S608
         " from (select schema_name, table_name from system.main.duckdb_tables()"
         f"  where database_name = {CATALOG}"
         "  union all select schema_name, view_name from system.main.duckdb_views()"
@@ -152,25 +152,25 @@ def stored(db: duckdb.DuckDBPyConnection, persona: str) -> list[str]:
     found: list[str] = []
     for macro in names(
         db,
-        "select schema_name || '.' || function_name from system.main.duckdb_functions()"
+        "select schema_name || '.' || function_name from system.main.duckdb_functions()"  # noqa: S608
         f" where database_name = {CATALOG}",
     ):
         found.append(f"{persona} holds the macro {macro}")
     for kind in names(
         db,
-        "select schema_name || '.' || type_name from system.main.duckdb_types()"
+        "select schema_name || '.' || type_name from system.main.duckdb_types()"  # noqa: S608
         f" where database_name = {CATALOG} and not internal",
     ):
         found.append(f"{persona} holds the type {kind}")
     for sequence in names(
         db,
-        "select schema_name || '.' || sequence_name from system.main.duckdb_sequences()"
+        "select schema_name || '.' || sequence_name from system.main.duckdb_sequences()"  # noqa: S608
         f" where database_name = {CATALOG}",
     ):
         found.append(f"{persona} holds the sequence {sequence}")
     for commented in names(
         db,
-        "select schema_name || '.' || table_name from system.main.duckdb_tables()"
+        "select schema_name || '.' || table_name from system.main.duckdb_tables()"  # noqa: S608
         f" where database_name = {CATALOG} and comment is not null"
         " union all select schema_name || '.' || view_name from system.main.duckdb_views()"
         f" where database_name = {CATALOG} and not internal and comment is not null"
@@ -181,7 +181,7 @@ def stored(db: duckdb.DuckDBPyConnection, persona: str) -> list[str]:
         found.append(f"{persona} holds a comment on {commented}")
     for defaulted in names(
         db,
-        "select schema_name || '.' || table_name || '.' || column_name"
+        "select schema_name || '.' || table_name || '.' || column_name"  # noqa: S608
         f" from system.main.duckdb_columns() where database_name = {CATALOG}"
         " and column_default is not null",
     ):
@@ -341,15 +341,14 @@ ALTERED: dict[str, tuple[str, list[str], tuple[str, ...]]] = {
     "store-a-macro": (
         "group-controller",
         [
-            "create macro main.leak() as table"
-            f" select document_number from {SOURCE}.main.payments"  # noqa: S608
+            f"create macro main.leak() as table select document_number from {SOURCE}.main.payments"  # noqa: S608
         ],
         ("holds the macro main.leak",),
     ),
     "store-a-type": (
         "group-controller",
         [
-            "create type main.leak as enum (select distinct document_number"
+            "create type main.leak as enum (select distinct document_number"  # noqa: S608
             f" from {SOURCE}.main.payments where document_number is not null)"  # noqa: S608
         ],
         ("holds the type main.leak",),
