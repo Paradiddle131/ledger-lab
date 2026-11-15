@@ -1,15 +1,30 @@
-"""The lab's project comes only from its own variable, never from the session's foreign one."""
+"""The lab's project comes only from its own variable, never from the session's foreign one, and
+not at all while the session carries the foreign one."""
 
 import pytest
-from gcp_project import NoLabProjectError, lab_project, lab_project_or_none
+from gcp_project import NoLabProjectError, foreign_session, lab_project, lab_project_or_none
 
 
 def test_the_project_comes_from_the_lab_variable() -> None:
     assert lab_project({"LEDGER_LAB_GCP_PROJECT": "the-lab"}) == "the-lab"
 
 
-def test_the_lab_variable_wins_over_the_foreign_one() -> None:
-    env = {"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": "another-lab"}
+@pytest.mark.parametrize("foreign", ["another-lab", " another-lab "])
+def test_a_foreign_project_beside_the_lab_one_leaves_no_lab_project(foreign: str) -> None:
+    """The session's credential is the foreign lab's, so the lab variable is not used either."""
+    env = {"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": foreign}
+    assert foreign_session(env)
+    assert lab_project_or_none(env) is None
+    with pytest.raises(NoLabProjectError, match="belongs to another lab") as refused:
+        lab_project(env)
+    assert "the-lab" not in str(refused.value)
+    assert "another-lab" not in str(refused.value)
+
+
+@pytest.mark.parametrize("blank", ["", " "])
+def test_a_blank_foreign_variable_is_no_foreign_session(blank: str) -> None:
+    env = {"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": blank}
+    assert not foreign_session(env)
     assert lab_project(env) == "the-lab"
 
 
