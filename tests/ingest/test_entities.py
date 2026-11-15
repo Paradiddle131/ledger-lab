@@ -245,7 +245,7 @@ def test_nothing_else_is_vouched_for(register: Register, name: str, why: str) ->
 
 def one_hospital_register() -> bytes:
     """A landed register vouching for the hospital, through the register's own step."""
-    columns = [*legal_entities.COLUMNS]
+    columns = [*legal_entities.SERVED_COLUMNS]
     text = io.StringIO()
     writer = csv.DictWriter(text, columns)
     writer.writeheader()

@@ -23,8 +23,11 @@ from ingest.gleif.legal_entities import (
     COLUMNS,
     COUNTRIES,
     PARTNERSHIPS,
+    SERVED_COLUMNS,
     SOLE_PROPRIETORSHIPS,
     LegalEntitiesError,
+    landed_columns,
+    landed_name,
     profile,
     step,
 )
@@ -33,7 +36,7 @@ OTHER_NAME = "Entity.OtherEntityNames.OtherEntityName.1"
 TRANSLITERATED = "Entity.TransliteratedOtherEntityNames.TransliteratedOtherEntityName.1"
 # A column the register serves that the matching does not need, so it never lands.
 CITY = "Entity.LegalAddress.City"
-SERVED = (*COLUMNS[:3], CITY, *COLUMNS[3:])
+SERVED = (*SERVED_COLUMNS[:3], CITY, *SERVED_COLUMNS[3:])
 
 
 def record(fields: dict[str, str]) -> dict[str, str]:
@@ -158,7 +161,7 @@ def rows(path: Path) -> list[dict[str, object]]:
 def test_only_the_vendors_countries_land(tmp_path: Path) -> None:
     landed_rows = rows(landed(tmp_path, APPLE, SIEMENS, BARCLAYS, ING))
     assert [r["LEI"] for r in landed_rows] == [APPLE["LEI"], BARCLAYS["LEI"], ING["LEI"]]
-    assert {r["Entity.LegalAddress.Country"] for r in landed_rows} == set(COUNTRIES)
+    assert {r["Entity_LegalAddress_Country"] for r in landed_rows} == set(COUNTRIES)
 
 
 def test_a_record_lands_as_served_in_the_needed_columns_with_blanks_as_nulls(
@@ -167,11 +170,11 @@ def test_a_record_lands_as_served_in_the_needed_columns_with_blanks_as_nulls(
     path = landed(tmp_path, BARCLAYS)
     assert tuple(duckdb.read_parquet(str(path)).columns) == COLUMNS
     (row,) = rows(path)
-    assert row["Entity.LegalName"] == "BARCLAYS PLC"
-    assert row[OTHER_NAME] == "BARCLAYS BANK PLC"
-    assert row["Entity.LegalForm.EntityLegalFormCode"] == "B6ES"
-    assert row["Registration.LastUpdateDate"] == "2026-10-26T17:28:30.693Z"
-    assert row["Entity.LegalForm.OtherLegalForm"] is None, "a blank lands as null"
+    assert row["Entity_LegalName"] == "BARCLAYS PLC"
+    assert row[landed_name(OTHER_NAME)] == "BARCLAYS BANK PLC"
+    assert row["Entity_LegalForm_EntityLegalFormCode"] == "B6ES"
+    assert row["Registration_LastUpdateDate"] == "2026-10-26T17:28:30.693Z"
+    assert row["Entity_LegalForm_OtherLegalForm"] is None, "a blank lands as null"
 
 
 def test_a_sole_proprietor_never_lands(tmp_path: Path) -> None:
@@ -185,6 +188,25 @@ def test_a_sole_proprietor_never_lands(tmp_path: Path) -> None:
 def test_the_profile_counts_the_records_of_each_country(tmp_path: Path) -> None:
     counts = profile(landed(tmp_path, APPLE, BARCLAYS, ING))
     assert counts["rows_by_country"] == {"GB": 1, "NL": 1, "US": 1}
+
+
+def test_every_column_lands_under_its_served_name_with_underscores_for_dots() -> None:
+    assert tuple(c.replace(".", "_") for c in SERVED_COLUMNS) == COLUMNS
+    assert not any("." in c for c in COLUMNS), "BigQuery loads no Parquet column with a dot"
+    assert landed_name("Entity.LegalName.xmllang") == "Entity_LegalName_xmllang"
+
+
+@pytest.mark.parametrize(
+    "served",
+    [("LEI", "Entity.LegalName", "Entity_LegalName"), ("a.b_c", "a_b.c")],
+)
+def test_two_columns_that_would_land_under_one_name_are_refused(served: tuple[str, ...]) -> None:
+    """Refused by the rename itself and by the step's screening before it writes a row."""
+    screen = legal_entities._screen  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(LegalEntitiesError, match="under one name"):
+        landed_columns(served)
+    with pytest.raises(LegalEntitiesError, match="under one name"):
+        screen(iter([]), [*SERVED_COLUMNS, *served], io.StringIO(), served)
 
 
 def test_the_step_refuses_a_file_without_a_needed_column() -> None:
@@ -281,10 +303,14 @@ def test_an_other_name_that_may_be_a_persons_is_blanked_with_its_language_and_ty
     }
     path = landed(tmp_path, trading, APPLE)
     ing, apple = rows(path)
-    assert [ing[OTHER_NAME], ing[f"{OTHER_NAME}.xmllang"], ing[f"{OTHER_NAME}.type"]] == [None] * 3
-    assert ing[TRANSLITERATED] is None
-    assert ing["Entity.LegalName"] == "ING GROEP N.V."
-    assert apple[OTHER_NAME] == "Apple Computer, Inc."
+    assert [
+        ing[landed_name(OTHER_NAME)],
+        ing[landed_name(f"{OTHER_NAME}.xmllang")],
+        ing[landed_name(f"{OTHER_NAME}.type")],
+    ] == [None] * 3
+    assert ing[landed_name(TRANSLITERATED)] is None
+    assert ing["Entity_LegalName"] == "ING GROEP N.V."
+    assert apple[landed_name(OTHER_NAME)] == "Apple Computer, Inc."
     assert b"Voorbeeld" not in path.read_bytes()
     assert profile(path)["other_names_blanked"] == 2
 
