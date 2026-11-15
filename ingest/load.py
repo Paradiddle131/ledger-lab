@@ -1,22 +1,25 @@
 """`uv run python -m ingest.load <landed file>...`: load landed files from the landing bucket into
 the warehouse's `landed` dataset, one BigQuery load job per file.
 
-Each name is a file the fetch kit lands (a source or set recorded in `sources.yaml`) and an object
-at the root of the lab's landing bucket (`bucket.py`), so a load reads only what a landing step
-produced, hashed names included, never a publisher's file. Every landed file is Parquet its step
-wrote: text columns as the publishers' text, typed columns only where the step typed them; the load
-keeps the file's own schema, so no delimiter, quoting, header or encoding rule can split a row
+Each name must be one a landing step writes a file under (`landed_names`: a source's own step in
+`fetch.STEPS`, a set whose step returns one file, or a member of a set whose step returns files by
+member name) and an object at the root of the lab's landing bucket (`bucket.py`). A member of a set
+whose step returns one file (a quarter of the securities filings, a month of the transport spend) is
+refused, since the fetch kit lands such a member alone as the publisher's file. What is checked is
+the name; the object's bytes are whatever the bucket holds under it. Each landed file is Parquet its
+step wrote: text columns as the publishers' text, typed columns only where the step typed them; the
+load keeps the file's own schema, so no delimiter, quoting, header or encoding rule can split a row
 differently from the landing. Column names are kept as they are; BigQuery refuses a Parquet column
-whose name holds a dot, so the steps land none (the legal-entity register's `Entity.LegalName`
-lands as `Entity_LegalName`). A file lands as the table named after it with underscores for its
-hyphens (`chicago-contracts` as `landed.chicago_contracts`), replaced whole (WRITE_TRUNCATE) so a
-re-run is idempotent, and a job that meets a single bad record fails and leaves the table as it
-was. Each file's table is loaded in turn; a failure stops before the next.
+whose name holds a dot, so the steps land none (the legal-entity register's `Entity.LegalName` lands
+as `Entity_LegalName`). A file lands as the table named after it with underscores for its hyphens
+(`chicago-contracts` as `landed.chicago_contracts`), replaced whole (WRITE_TRUNCATE) so a re-run is
+idempotent, and a job that meets a single bad record fails and leaves the table as it was. Each
+file's table is loaded in turn; a failure stops before the next.
 
 Refused before any call: a project other than the one `LEDGER_LAB_GCP_PROJECT` names (read through
 `platform/gcp_project.py`, never the session's `GCP_PROJECT`), a location in
 `LEDGER_LAB_BQ_LOCATION` outside the free-tier regions `platform/gcp/variables.tf` allows, and a
-name that is no recorded landed file's (hidden objects and the lock among them). Refused before any
+name that is not in `landed_names` (hidden objects and the lock among them). Refused before any
 load: a landing bucket whose lock another landing or load holds, and a name the bucket does not
 hold. The load holds the landing's own lock (`Bucket.lock`) for its whole run, so no landing
 replaces an object while the set loads and no load starts during a landing; it releases the lock
@@ -24,25 +27,33 @@ when it ends, on a failure too, and a killed load leaves it behind, as a killed 
 operator to delete by hand once nothing runs.
 
 Load jobs from Cloud Storage bill nothing, and the loader runs no streaming insert. After each load
-it reads the metadata of every table in `landed` (`bq ls` and `bq show`, which bill nothing) and
-refuses to go on once the dataset holds more than `STORAGE_CAP` bytes, far inside BigQuery's free
-10 GiB. The live comparisons ask BigQuery three things of one landed table, each built here from
-the file's name and, for a column, its name as the table's own schema gives it, so a caller names
-no project, dataset or table: the row and non-null counts (`counts`), one column's distinct values
+it lists `landed` (`bq ls`) and describes each listed table (`bq show`), which bill nothing, and
+refuses to go on when the listing leaves out a table this run has loaded (an empty listing
+included), or when the stored total is above `STORAGE_CAP` bytes, far inside BigQuery's free 10 GiB.
+A table this run loaded counts at the larger of the bytes its `bq show` gave right after its load
+and the bytes the later `bq show` gives. A table this run did not load counts only as the listing
+and its `bq show` report it: the cap trusts `bq ls` for those.
+
+The live comparisons ask BigQuery three things of one landed table, each built here from the file's
+name and, for a column, its name as the table's own schema gives it, so a caller names no project,
+dataset or table: the row and non-null counts (`counts`), one column's distinct values
 (`distinct_values`) and a content digest (`digest`). Each query is dry-run first and refused above
 `MAX_BYTES_BILLED`, which also caps the job.
 
-The digest is the same on the BigQuery table and on the local file (`local_digest`) exactly when
-they hold the same rows, in any order. Each cell becomes text by one rule (a null is `N`; any
-other value is `V`, its UTF-8 length in bytes, `:` and its text, where an integer is its decimal
-digits and a boolean `true` or `false`), a row is the SHA-256 of its cells' texts in column order,
-and the digest is the row count with the sum of each of the eight 32-bit slices of every row's
-hash, so a changed cell, two cells swapped between rows, or a row dropped and another doubled
-changes it. Only the types the landing writes have a rule (text, integers, booleans); any other
-column is refused.
+The digest (`digest` on the BigQuery table, `local_digest` on the local file) covers the cells'
+values in column order and the row count, and not the order of the rows, the column names or the
+column types: an INTEGER 10 and a STRING '10' give one text. The live `warehouse` test
+(`check_table` in its tests) compares the column names and types from the table's schema separately.
+Each cell becomes text by one rule (a null is `N`; any other value is `V`, its UTF-8 length in
+bytes, `:` and its text, where an integer is its decimal digits and a boolean `true` or `false`), a
+row is the SHA-256 of its cells' texts in column order, and the digest is the row count with the sum
+of each of the eight 32-bit slices of every row's hash, so a changed cell, two cells swapped between
+rows, or a row dropped and another doubled changes it, the cases the tests run. It is a hash: equal
+digests are strong evidence of the same rows, not proof. Only the types the landing writes have a
+rule (text, integers, booleans); a column of another type is refused.
 
-The calls go through `bq`, whose credential the session's network proxy adds; a failure is
-reported by the file and `bq`'s exit status only, since its messages name the project.
+The calls go through `bq`, whose credential the session's network proxy adds; a failure is reported
+by the file and `bq`'s exit status only, since its messages name the project.
 """
 
 import json
@@ -52,7 +63,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, get_origin, get_type_hints
 
 from fsspec import AbstractFileSystem
 
@@ -102,17 +113,27 @@ def location(env: Mapping[str, str]) -> str:
     return where
 
 
-def recorded_names() -> frozenset[str]:
-    """Every name the fetch kit can land a file under: each recorded source, and each set's name
-    (a set lands one file under its name, or files under its members')."""
-    from ingest.fetch import SET_STEPS, SOURCES, load_sources
+def landed_names() -> frozenset[str]:
+    """The names a landing step writes a file under: each source with its own step (`STEPS`), each
+    set whose step is declared to return one file (`bytes`), and the recorded members of each set
+    whose step is declared to return files by member name (a `dict`). A set whose step declares
+    anything else adds no name."""
+    from ingest.fetch import SET_STEPS, SOURCES, STEPS, load_sources
 
-    return frozenset(load_sources(SOURCES)) | frozenset(SET_STEPS)
+    sources = load_sources(SOURCES)
+    names = set(STEPS)
+    for name, step in SET_STEPS.items():
+        returns = get_type_hints(step).get("return")
+        if returns is bytes:
+            names.add(name)
+        elif get_origin(returns) is dict:
+            names |= {member for member in sources if member.startswith(f"{name}-")}
+    return frozenset(names)
 
 
-def table_name(name: str, recorded: frozenset[str] | None = None) -> str:
+def table_name(name: str, landed: frozenset[str] | None = None) -> str:
     """The `landed` table a landed file loads into."""
-    if not LANDED_NAME.match(name) or name not in (recorded or recorded_names()):
+    if not LANDED_NAME.match(name) or name not in (landed or landed_names()):
         raise LoadError(f"{name!r} is not a landed file's name")
     return name.replace("-", "_")
 
@@ -209,20 +230,28 @@ def lab(env: Mapping[str, str]) -> tuple[str, str]:
     return project, location(env)
 
 
-def stored(project: str, where: str, run: Runner) -> int:
-    """The bytes every table in `landed` holds, from free metadata."""
+def stored(project: str, where: str, run: Runner, loaded: Mapping[str, int]) -> int:
+    """The bytes the tables `bq ls` lists in `landed` hold, from free metadata, each table listed
+    once counted once. `loaded` is the bytes each table this run loaded held right after its load,
+    by table: a listing that leaves one of them out is refused, and each counts at the larger of
+    that and its bytes now."""
     answer = call(run, "list the landed tables", list_command(project, where))
     try:
         listed: Any = json.loads(answer) if answer.strip() else []
-        tables = [str(t["tableReference"]["tableId"]) for t in listed]
+        tables = {str(t["tableReference"]["tableId"]) for t in listed}
     except (json.JSONDecodeError, KeyError, TypeError) as error:
         raise LoadError(
             f"the landed tables' list has an unexpected shape ({type(error).__name__})"
         ) from None
+    left_out = sorted(set(loaded) - tables)
+    if left_out:
+        raise LoadError(
+            f"the list of {DATASET} leaves out {', '.join(left_out)}, loaded in this run: stop"
+        )
     total = 0
-    for table in tables:
+    for table in sorted(tables):
         shown = call(run, f"describe {DATASET}.{table}", show_command(project, where, table))
-        total += described(project, table, shown)[1]
+        total += max(described(project, table, shown)[1], loaded.get(table, 0))
     return total
 
 
@@ -238,9 +267,9 @@ def load(
         raise LoadError("name at least one landed file")
     if len(set(names)) != len(names):
         raise LoadError("a landed file is named twice")
-    recorded = recorded_names()
+    landed = landed_names()
     for name in names:
-        table_name(name, recorded)
+        table_name(name, landed)
     project, where = lab(env)
     try:
         root = bucket_name(f"{SCHEME}{project}-landing", env)
@@ -254,13 +283,15 @@ def load(
         if missing:
             raise LoadError(f"the landing bucket holds no {', '.join(missing)}: land it first")
         tables: list[Table] = []
+        sizes: dict[str, int] = {}
         for name in names:
             call(run, f"load {name}", load_command(project, where, root, name))
             shown = call(
                 run, f"describe {name}'s table", show_command(project, where, table_name(name))
             )
             tables.append(table_of(name, shown, project))
-            total = stored(project, where, run)
+            sizes[table_name(name)] = tables[-1].bytes
+            total = stored(project, where, run, sizes)
             if total > STORAGE_CAP:
                 raise LoadError(
                     f"{DATASET} holds {total} bytes, above the {STORAGE_CAP}-byte cap: stop"

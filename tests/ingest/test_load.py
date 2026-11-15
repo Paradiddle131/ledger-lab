@@ -1,7 +1,7 @@
 """The load step runs one Parquet load job per landed file into the `landed` dataset of the lab's
 own project while it holds the landing's lock, against a stand-in for `bq` and an in-memory bucket;
-it refuses another project, a location outside the free regions and a name that is no recorded
-landed file before any call, and a held lock or a missing object before any load. Its queries name
+it refuses another project, a location outside the free regions and a name no landing step writes
+before any call, and a held lock or a missing object before any load. Its queries name
 only `<lab project>.landed.<table>`, built from a landed file's name and the table's own columns.
 The `warehouse` tests read the loaded tables live and hold them to the local landing: the same
 rows, columns and content digest, and no name the landing hashes in clear."""
@@ -36,11 +36,11 @@ from ingest.load import (
     digest,
     distinct_values,
     free_regions,
+    landed_names,
     load,
     load_command,
     local_digest,
     main,
-    recorded_names,
     run_tool,
     show_command,
     table_name,
@@ -50,6 +50,7 @@ from ingest.load import (
 PROJECT = "the-lab-project"
 BUCKET = f"{PROJECT}-landing"
 ENV = {"LEDGER_LAB_GCP_PROJECT": PROJECT, "LEDGER_LAB_BQ_LOCATION": "us-central1"}
+ENV_KEYED = {**ENV, "LEDGER_LAB_HASH_KEY": "invented-key-0000000000000000000000000000"}
 LANDED = ("chicago-contracts", "ecb-rates")
 # DuckDB's reading of a Parquet type, and the type a BigQuery load job gives that column.
 BIGQUERY_TYPE = {"VARCHAR": "STRING", "BIGINT": "INTEGER", "BOOLEAN": "BOOLEAN"}
@@ -249,9 +250,14 @@ def test_another_project_or_a_location_outside_the_free_regions_is_refused_befor
         "x-",
         "not-a-source",
         "chicago-contracts-copy",
+        "chicago",
+        "sec-annual-filings-2024q1",
+        "uk-transport-spend-2025-apr",
     ],
 )
-def test_a_name_that_is_no_recorded_landed_file_is_refused_before_any_call(name: str) -> None:
+def test_a_name_no_landing_step_writes_is_refused_before_any_call(name: str) -> None:
+    """Among them a set's name whose step lands its members, and a member of a set whose step
+    lands one file, which the fetch kit lands alone as the publisher's file."""
     bq, fs = Bq(), bucket_holding(*LANDED)
     if name and "/" not in name:
         fs.pipe_file(f"{BUCKET}/{name}", b"PAR1")
@@ -261,9 +267,8 @@ def test_a_name_that_is_no_recorded_landed_file_is_refused_before_any_call(name:
     assert not locked(fs) or name == LOCK
 
 
-def test_the_recorded_names_are_the_fetch_kits_sources_and_sets() -> None:
-    names = recorded_names()
-    landed = {
+def test_the_landed_names_are_the_seven_files_the_landing_steps_write() -> None:
+    assert landed_names() == {
         "chicago-contracts",
         "chicago-payments",
         "ecb-rates",
@@ -272,8 +277,6 @@ def test_the_recorded_names_are_the_fetch_kits_sources_and_sets() -> None:
         "sec-annual-filings",
         "uk-transport-spend-2025",
     }
-    assert landed <= names
-    assert "chicago" in names and "not-a-source" not in names
 
 
 def test_a_file_the_bucket_does_not_hold_is_refused_before_any_load() -> None:
@@ -368,6 +371,71 @@ def test_what_landed_already_holds_counts_against_the_storage_cap() -> None:
     bq.listed = {"from_an_earlier_run"}
     with pytest.raises(LoadError, match="cap: stop"):
         load(["chicago-contracts"], ENV, bq, bucket_holding(*LANDED))
+
+
+@pytest.mark.parametrize(
+    "listing",
+    [
+        "",
+        "[]",
+        json.dumps([{"tableReference": {"datasetId": DATASET, "tableId": "chicago_payments"}}]),
+    ],
+    ids=["an empty answer", "an empty list", "a list without the loaded table"],
+)
+def test_a_listing_that_leaves_out_a_table_this_run_loaded_is_refused(listing: str) -> None:
+    """The reviewer's case: the load's own `bq show` reports three times the cap, and a listing
+    without its table would count none of it."""
+    bq, fs = Bq(size=STORAGE_CAP * 3), bucket_holding("chicago-contracts")
+
+    def run(command: Sequence[str]) -> str:
+        return listing if verb_of(command) == "ls" else bq(command)
+
+    with pytest.raises(LoadError, match="leaves out chicago_contracts, loaded in this run: stop"):
+        load(["chicago-contracts"], ENV, run, fs)
+    assert not locked(fs)
+
+
+def test_a_listing_that_leaves_out_an_earlier_table_of_the_run_is_refused() -> None:
+    bq, fs = Bq(), bucket_holding("chicago-contracts", "ecb-rates")
+
+    def run(command: Sequence[str]) -> str:
+        if verb_of(command) == "ls" and "ecb_rates" in bq.listed:
+            return json.dumps([{"tableReference": {"datasetId": DATASET, "tableId": "ecb_rates"}}])
+        return bq(command)
+
+    with pytest.raises(LoadError, match="leaves out chicago_contracts, loaded in this run"):
+        load(["chicago-contracts", "ecb-rates"], ENV, run, fs)
+    assert bq.verbs().count("load") == 2
+
+
+def test_a_loaded_table_counts_at_its_bytes_after_its_load_when_a_later_show_reports_fewer() -> (
+    None
+):
+    bq, shows = Bq(size=STORAGE_CAP + 1), 0
+
+    def run(command: Sequence[str]) -> str:
+        nonlocal shows
+        if verb_of(command) == "show":
+            shows += 1
+            bq.size = STORAGE_CAP + 1 if shows == 1 else 0
+        return bq(command)
+
+    with pytest.raises(LoadError, match="cap: stop"):
+        load(["chicago-contracts"], ENV, run, bucket_holding("chicago-contracts"))
+    assert shows == 2
+
+
+def test_a_table_listed_twice_counts_once() -> None:
+    bq = Bq(size=STORAGE_CAP // 2 + 1)
+
+    def run(command: Sequence[str]) -> str:
+        if verb_of(command) == "ls":
+            listed = json.loads(bq(command))
+            return json.dumps(listed * 2)
+        return bq(command)
+
+    tables = load(["chicago-contracts"], ENV, run, bucket_holding("chicago-contracts"))
+    assert [t.table for t in tables] == ["landed.chicago_contracts"]
 
 
 def test_the_load_that_tips_the_storage_cap_is_the_last() -> None:
@@ -479,6 +547,18 @@ def test_a_query_outside_the_lab_project_is_refused_before_any_call() -> None:
     env = {"GCP_PROJECT": "another-lab", "LEDGER_LAB_BQ_LOCATION": "us-central1"}
     for ask in (counts, digest, lambda n, e, r: distinct_values(n, "vendor_name", e, r)):
         with pytest.raises(LoadError, match="belongs to another lab"):
+            ask("chicago-contracts", env, bq)
+    assert bq.calls == []
+
+
+@pytest.mark.parametrize("where", ["", "US", "europe-west2", "us-east4"])
+def test_a_query_in_a_location_outside_the_free_regions_is_refused_before_any_call(
+    where: str,
+) -> None:
+    bq = Bq()
+    env = {**ENV, "LEDGER_LAB_BQ_LOCATION": where}
+    for ask in (counts, digest, lambda n, e, r: distinct_values(n, "vendor_name", e, r)):
+        with pytest.raises(LoadError, match="LEDGER_LAB_BQ_LOCATION must be"):
             ask("chicago-contracts", env, bq)
     assert bq.calls == []
 
@@ -653,6 +733,20 @@ def test_a_digest_tells_a_cell_from_its_neighbour_and_a_null_from_text(tmp_path:
     assert all(isinstance(d, Digest) and d.rows == 1 for d in digests)
 
 
+def test_a_digest_leaves_out_the_column_names_and_types(tmp_path: Path) -> None:
+    """The stated limit: an integer 10 and the text `10`, under another column name, give one
+    digest, so the live check compares the schema's names and types beside it."""
+    paths = []
+    for i, (kind, value) in enumerate([("BIGINT", 10), ("VARCHAR", "10")]):
+        path = tmp_path / f"t{i}"
+        con = duckdb.connect()
+        con.execute(f"CREATE TABLE t (c{i} {kind})")
+        con.execute("INSERT INTO t VALUES (?)", [value])
+        con.execute(f"COPY t TO '{path}' (FORMAT parquet)")
+        paths.append(path)
+    assert local_digest(paths[0]) == local_digest(paths[1])
+
+
 # The live comparisons: the loaded tables against the local landing.
 
 # The landed tables' columns that hold a payee's or supplier's name, hashed as a person's where
@@ -693,30 +787,90 @@ def test_each_landed_table_holds_the_same_rows_as_its_local_file() -> None:
     assert [name for name, why in found.items() if why] == []
 
 
+def hashed_name_counts(
+    name: str, column: str, path: Path, env: dict[str, str], run: Any
+) -> dict[str, int] | str:
+    """How the loaded column of names compares with the local file's: values missing and extra,
+    hashes and clear values, malformed hashes, and clear values whose keyed hash as a person is one
+    of the column's hashes. Only counts come back, so the caller's frame holds no value; an error
+    comes back as its type, with a `LoadError`'s own message, which names no value."""
+    try:
+        local = {
+            None if v is None else str(v)
+            for (v,) in duckdb.connect()
+            .execute(f'SELECT DISTINCT "{column}" FROM read_parquet(?)', [str(path)])  # noqa: S608
+            .fetchall()
+        }
+        loaded = distinct_values(name, column, env, run)
+        hashed = {v for v in loaded if v is not None and v.startswith("person:")}
+        clear = {v for v in loaded if v is not None and not v.startswith("person:")}
+        as_person = person_hasher(env)
+        return {
+            "missing": len(local - loaded),
+            "extra": len(loaded - local),
+            "hashed": len(hashed),
+            "clear": len(clear),
+            "malformed": sum(1 for v in hashed if not HASH.match(v)),
+            "in_clear": len({as_person(v) for v in clear} & hashed),
+        }
+    except LoadError as error:
+        return f"LoadError: {error}"
+    except Exception as error:  # noqa: BLE001
+        return type(error).__name__
+
+
+def test_the_hashed_name_counts_are_counts_and_an_error_is_its_type(tmp_path: Path) -> None:
+    path = landed_table(tmp_path, ROWS)
+    bq = Bq()
+    bq.tables["chicago_contracts"] = path
+    found = hashed_name_counts("chicago-contracts", "vendor_name", path, ENV_KEYED, bq)
+    assert found == {
+        "missing": 0,
+        "extra": 0,
+        "hashed": 1,
+        "clear": 3,
+        "malformed": 0,
+        "in_clear": 0,
+    }
+    as_person = person_hasher(ENV_KEYED)
+    leaked = landed_table(tmp_path, [*ROWS, (as_person("ACME LLC"), 1, True, None)], "leaked")
+    bq.tables["chicago_contracts"] = leaked
+    found = hashed_name_counts("chicago-contracts", "vendor_name", path, ENV_KEYED, bq)
+    assert found == {
+        "missing": 0,
+        "extra": 1,
+        "hashed": 2,
+        "clear": 3,
+        "malformed": 0,
+        "in_clear": 1,
+    }
+    bq.fail_on = "query"
+    assert hashed_name_counts("chicago-contracts", "vendor_name", path, ENV_KEYED, bq) == (
+        "LoadError: cannot dry-run the query (bq exit 2)"
+    )
+    assert hashed_name_counts("chicago-contracts", "vendor_name", tmp_path / "absent", ENV, bq) == (
+        "IOException"
+    )
+
+
 @pytest.mark.warehouse
 @pytest.mark.parametrize("name", sorted(HASHED_NAMES))
 def test_no_name_the_landing_hashes_is_in_clear_in_the_warehouse(name: str) -> None:
-    """The loaded column of names holds exactly the local landing's values, every hash well
-    formed, and no clear value whose keyed hash as a person is one of the column's hashes: the
-    landing's leak hunts (`pytest -m landed`) hold for the table. Values stay in memory: a
-    failure says how many, never which."""
-    column, env = HASHED_NAMES[name], lab_env()
-    path = str(landed_file(name))
-    local = {
-        None if v is None else str(v)
-        for (v,) in duckdb.connect()
-        .execute(f'SELECT DISTINCT "{column}" FROM read_parquet(?)', [path])  # noqa: S608
-        .fetchall()
-    }
-    loaded = distinct_values(name, column, env)
-    missing, extra = len(local - loaded), len(loaded - local)
-    assert (missing, extra) == (0, 0), f"{missing} values missing, {extra} extra"
-    hashed = {v for v in loaded if v is not None and v.startswith("person:")}
-    clear = {v for v in loaded if v is not None and not v.startswith("person:")}
-    assert hashed and clear
-    malformed = sum(1 for v in hashed if not HASH.match(v))
-    assert malformed == 0, f"{malformed} malformed hashes"
-    as_person = person_hasher()
-    in_clear = len({as_person(v) for v in clear} & hashed)
-    assert in_clear == 0, f"{in_clear} hashed names also in clear"
-    print(f"{table_name(name)}.{column}: {len(hashed)} hashed, {len(clear)} clear, none a hash")
+    """The loaded column of names holds the local landing's distinct values, none missing and none
+    extra, holds hashes and clear values, every hash well formed, and no clear value whose keyed
+    hash as a person is one of the column's hashes: the landing's leak hunts (`pytest -m landed`)
+    hold for the table. The comparison runs in `hashed_name_counts`, so this test's frame and its
+    failure messages hold counts only."""
+    column = HASHED_NAMES[name]
+    found = hashed_name_counts(name, column, landed_file(name), lab_env(), run_tool)
+    assert isinstance(found, dict), found
+    assert (found["missing"], found["extra"]) == (0, 0), (
+        f"{found['missing']} values missing, {found['extra']} extra"
+    )
+    assert found["hashed"] > 0 and found["clear"] > 0, (
+        f"{found['hashed']} hashed, {found['clear']} clear"
+    )
+    assert found["malformed"] == 0, f"{found['malformed']} malformed hashes"
+    assert found["in_clear"] == 0, f"{found['in_clear']} hashed names also in clear"
+    hashed, clear = found["hashed"], found["clear"]
+    print(f"{table_name(name)}.{column}: {hashed} hashed, {clear} clear, none a hash")
