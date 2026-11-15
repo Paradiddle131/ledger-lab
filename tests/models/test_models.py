@@ -36,10 +36,13 @@ def target_for(env: dict[str, str]) -> str:
         ({}, "local"),
         ({"GCP_PROJECT": "another-lab"}, "local"),
         ({"LEDGER_LAB_GCP_PROJECT": ""}, "local"),
+        ({"LEDGER_LAB_GCP_PROJECT": " "}, "local"),
         ({"LEDGER_LAB_GCP_PROJECT": "the-lab"}, "bigquery"),
+        ({"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": "another-lab"}, "local"),
+        ({"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": " "}, "bigquery"),
     ],
 )
-def test_the_profile_picks_the_engine_from_the_lab_project_variable(
+def test_the_profile_picks_bigquery_only_in_the_labs_own_environment(
     env: dict[str, str], expected: str
 ) -> None:
     assert target_for(env) == expected

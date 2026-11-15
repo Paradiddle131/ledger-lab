@@ -1,7 +1,9 @@
 """`make cost-check`: the lab's month-to-date GCP cost, which must be $0.00, and its spend fences.
 
 With no lab project the lab spends nothing by construction: the check says so and calls no GCP
-tool. With `LEDGER_LAB_GCP_PROJECT` set it
+tool. In a session that carries another lab's `GCP_PROJECT` it calls no GCP tool either, since the
+credential is that lab's, and fails, since it has read nothing that shows the lab's cost is $0.00.
+With `LEDGER_LAB_GCP_PROJECT` set and no `GCP_PROJECT` it
 - reads this month's cost, credits included, and the newest export time from the Cloud Billing
   export named by `LEDGER_LAB_BILLING_EXPORT` (`dataset.table` in the lab project) through `bq`:
   a dry run first, then the query under a fixed byte cap; a cost above zero fails, and so does an
@@ -28,7 +30,7 @@ from typing import Any
 from urllib.parse import quote
 
 from fences import Declared, declared
-from gcp_project import lab_project_or_none
+from gcp_project import FOREIGN, foreign_session, lab_project_or_none
 
 EXPORT_VARIABLE = "LEDGER_LAB_BILLING_EXPORT"
 # The cost query scans well under a megabyte; a fixed cap far above that and far inside the free
@@ -589,6 +591,12 @@ def month_to_date(project: str, export: str, run: Runner) -> tuple[bool, str]:
 
 def check(env: Mapping[str, str], run: Runner = run_tool) -> tuple[int, str]:
     """The exit code and the lines to print."""
+    if foreign_session(env):
+        return 1, (
+            f"cost-check: NOT CHECKED {FOREIGN} is set, so this session's GCP credential is "
+            "another lab's: no GCP call is made and the lab's cost is unread; run it in the lab's "
+            "own environment"
+        )
     project = lab_project_or_none(env)
     if project is None:
         return 0, (

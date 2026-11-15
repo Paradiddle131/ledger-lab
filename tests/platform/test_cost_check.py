@@ -1,4 +1,5 @@
-"""`make cost-check` calls no GCP tool without a lab project; with one it reads the month's cost
+"""`make cost-check` calls no GCP tool without a lab project or in another lab's session; with a lab
+project in its own environment it reads the month's cost
 and every applied fence, and fails on a cost above zero, a loose fence or a permission too many.
 
 No real GCP tool runs here. Through `make`, stub `gcloud`, `bq`, `gsutil` and `curl` go first on
@@ -219,7 +220,11 @@ def stubs(directory: Path) -> Path:
 
 def cost_check(tmp_path: Path, **env: str) -> tuple[int, str, str]:
     log = stubs(tmp_path)
-    base = {k: v for k, v in os.environ.items() if not k.startswith("LEDGER_LAB_")}
+    base = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith("LEDGER_LAB_") and k != "GCP_PROJECT"
+    }
     base["PATH"] = f"{tmp_path}{os.pathsep}{base['PATH']}"
     make = shutil.which("make")
     assert make is not None
@@ -236,10 +241,26 @@ def cost_check(tmp_path: Path, **env: str) -> tuple[int, str, str]:
 
 
 def test_without_a_lab_project_it_reports_zero_and_calls_no_gcp_tool(tmp_path: Path) -> None:
-    code, out, calls = cost_check(tmp_path, GCP_PROJECT="another-lab")
+    code, out, calls = cost_check(tmp_path)
     assert code == 0, out
     assert "no GCP project" in out
     assert "$0.00" in out
+    assert calls == ""
+
+
+@pytest.mark.parametrize(
+    "lab", [{}, {"LEDGER_LAB_GCP_PROJECT": PROJECT}, ENV], ids=["no-lab", "lab", "lab-and-export"]
+)
+def test_in_another_labs_session_it_fails_unchecked_and_calls_no_gcp_tool(
+    tmp_path: Path, lab: dict[str, str]
+) -> None:
+    """The session's credential is the other lab's, so nothing is read, and nothing read shows the
+    lab's cost is $0.00."""
+    code, out, calls = cost_check(tmp_path, GCP_PROJECT="another-lab", **lab)
+    assert code != 0, out
+    assert out.startswith("cost-check: NOT CHECKED GCP_PROJECT is set"), out
+    assert "$0.00" not in out
+    assert "another-lab" not in out and PROJECT not in out
     assert calls == ""
 
 
@@ -274,10 +295,19 @@ def test_the_applied_fences_match_their_definitions() -> None:
     assert all(c[0] in ("bq", "curl") for c in gcp.calls)
 
 
+def test_another_labs_session_makes_no_call_even_with_the_lab_set() -> None:
+    gcp = FakeGCP()
+    code, out = check(ENV | {"GCP_PROJECT": "another-lab"}, gcp)
+    assert code == 1, out
+    assert gcp.calls == []
+
+
 def test_every_call_is_a_read_on_the_lab_project_only() -> None:
     gcp = FakeGCP()
-    check(ENV | {"GCP_PROJECT": "another-lab"}, gcp)
-    assert not any("another-lab" in " ".join(c) for c in gcp.calls)
+    code, out = check(ENV, gcp)
+    assert code == 0, out
+    assert gcp.calls, "the check made no call to judge"
+    assert all(f"--project_id={PROJECT}" in c for c in gcp.calls if c[0] == "bq"), gcp.calls
     for command in gcp.calls:
         if command[0] == "curl":
             method = command[command.index("-X") + 1] if "-X" in command else "GET"
