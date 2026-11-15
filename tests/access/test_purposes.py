@@ -381,6 +381,15 @@ ALTERED: dict[str, tuple[str, list[str], tuple[str, ...]]] = {
         ["alter table group_close.payments alter column amount set default 4242"],
         ("holds a default on group_close.payments.amount",),
     ),
+    "hide-a-macro-behind-a-macro-named-like-the-catalogue": (
+        "group-controller",
+        [
+            f"create macro main.leak() as table select document_number from {SOURCE}.main.payments",
+            "create macro main.duckdb_functions() as table select * from"
+            " system.main.duckdb_functions() where function_name not in ('leak', 'duckdb_functions')",
+        ],
+        ("holds the macro main.duckdb_functions", "holds the macro main.leak"),
+    ),
     "hide-a-table-behind-a-macro-named-like-the-catalogue": (
         # A full copy of the payments, and a stored macro that would leave it out of an unqualified
         # read of the catalogue.
