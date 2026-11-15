@@ -11,7 +11,7 @@ DuckDB lets any connection create temporary objects, and an unqualified name res
 temporary one first, so a connection can shadow a product or `current_database()` within itself.
 A shadow holds only what that connection could already read or write as literals; the persona's
 reach is read through qualified names, `system.main.current_database()` and
-`"<persona>".main."<table>"`, which no temporary object can shadow.
+`"<persona>"."<schema>"."<table>"`, which no temporary object can shadow.
 
 On BigQuery a test will impersonate the persona's service account,
 `<persona>@<project>.iam.gserviceaccount.com`, and the warehouse's own rules decide what it sees;

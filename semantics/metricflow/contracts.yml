@@ -87,7 +87,7 @@ metrics:
       numerator: paid_against_fixed_award
       denominator: fixed_award
     config:
-      meta: {owner: payables-clerk, term: spend-against-award, role: headline}
+      meta: {owner: payables-clerk, term: spend-against-award, role: headline, version: 1}
 
   - name: remaining_commitment
     label: Remaining commitment
@@ -106,7 +106,7 @@ metrics:
     type_params:
       measure: unpaid_award
     config:
-      meta: {owner: payables-clerk, term: remaining-commitment, role: headline}
+      meta: {owner: payables-clerk, term: remaining-commitment, role: headline, version: 1}
 
   - name: paid_over_award
     label: Paid over award
@@ -121,7 +121,7 @@ metrics:
     type_params:
       measure: paid_over_award
     config:
-      meta: {owner: payables-clerk, term: paid-over-award, role: headline}
+      meta: {owner: payables-clerk, term: paid-over-award, role: headline, version: 1}
 
   - name: fixed_award
     label: Fixed award
@@ -132,7 +132,7 @@ metrics:
     type_params:
       measure: fixed_award
     config:
-      meta: {owner: payables-clerk, term: award, role: input}
+      meta: {owner: payables-clerk, term: award, role: input, version: 1}
 
   - name: paid_against_fixed_award
     label: Paid against fixed award
@@ -144,4 +144,4 @@ metrics:
     type_params:
       measure: paid_against_fixed_award
     config:
-      meta: {owner: payables-clerk, term: spend-against-award, role: input}
+      meta: {owner: payables-clerk, term: spend-against-award, role: input, version: 1}

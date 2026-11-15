@@ -2,10 +2,11 @@
 # masked reader sees, and which personas read its columns in clear or masked. `platform/gcp`
 # declares one policy tag, one masking rule and these readers' grants per tag from this file.
 # Every persona that reads the warehouse (a `read` or `edit` grant in personas.yaml) is a clear or
-# a masked reader of every tag, so no query a persona may run fails on a tagged column; a persona
-# that reads nothing in the warehouse is neither. The account that builds the models reads every
-# tag in clear, since a model copying a masked value would store the mask. Shape:
-# access/columns.schema.json.
+# a masked reader of every tag, so a tagged column one of its purposes (access/purposes.yaml)
+# lists is read clear or masked, never refused, and a column none of its purposes lists is absent
+# from its database; a persona that reads nothing in the warehouse is neither. The account that
+# builds the models reads every tag in clear, since a model copying a masked value would store the
+# mask. Shape: access/columns.schema.json.
 #
 # Masking rules: nullify (the cell reads as null), hash (SHA-256 of the value, so equal values
 # still join and count), last-four (only the last four characters).

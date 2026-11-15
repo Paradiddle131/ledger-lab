@@ -1,0 +1,164 @@
+# What each persona reads a data product's rows for: one purpose per kind of work, the columns of
+# each product table that work needs, and the personas that do it. Shape:
+# access/purposes.schema.json.
+#
+# A persona with a `read` or `edit` grant (access/personas.yaml) on a product the models build
+# tables of reads its rows only through its purposes: the local engine stores each purpose's
+# columns of a table as `<purpose>.<table>` in the persona's database (the purpose's id with `_`
+# for `-`), and the table itself is not there (access/compile.py).
+# A purpose narrows columns on top of the grants and the policy tags, and replaces neither: its
+# rows are still only the entities the persona's grants name, and a tagged column it lists is
+# still clear or masked as access/columns.yaml says for the persona.
+# The compiler refuses a purpose for a persona with no row grant on the product (an aggregate
+# grant is none), a column or table the product lacks, a tagged column the persona reads neither
+# way, an entity-scoped table without `entity_id`, an id that is no slug, an id whose schema the
+# engine keeps or that is the persona's own catalog name (compared without case, as DuckDB does),
+# and a row grant on a product with tables but no purpose of it. A product with no tables yet
+# needs no purpose until the models build one.
+#
+# A purpose lists its columns by name, so a column the models add later is in no purpose's table
+# until a purpose lists it. Each purpose's comment says which columns its tables hold.
+#
+# A purpose limits which columns a persona's database holds; it makes no claim about what can be
+# worked out from the columns it holds, and the tracker holds what review has found.
+purposes:
+  # Booking and reconciling one entity's payments, paying them, and judging the entries drafted
+  # from them. Its payments table holds every column of the product's payments table, the tagged
+  # ones clear or masked as access/columns.yaml says for the persona.
+  - id: payment-review
+    for: Booking, reconciling, paying and approving payments one by one.
+    personas:
+      - accountant-chicago
+      - accountant-uk-transport
+      - accountant-nl-government
+      - payables-clerk
+      - approver
+    tables:
+      payments:
+        - payment_key
+        - entity_id
+        - currency
+        - payment_date
+        - fiscal_year
+        - fiscal_period
+        - amount
+        - vendor_name
+        - vendor_is_hashed
+        - document_number
+        - contract_number
+        - award_after_revisions
+        - source_table
+        - is_repeat
+        - vendor_organisation_name
+        - vendor_person_key
+        - document_reference
+  # Closing the group's periods. Its payments table holds the nine columns listed below; its
+  # group totals and left-out figures tables hold every column of theirs.
+  - id: group-close
+    for: >-
+      Summing and translating every entity's payments into the group's figures by period, and
+      finding by the organisation paid the payments between the group's entities (intercompany).
+    personas: [group-controller]
+    tables:
+      payments:
+        - entity_id
+        - currency
+        - payment_date
+        - fiscal_year
+        - fiscal_period
+        - amount
+        - source_table
+        - is_repeat
+        - vendor_organisation_name
+      group_totals:
+        - group_total_key
+        - entity_id
+        - fiscal_year
+        - fiscal_period
+        - period_start
+        - period_end
+        - basis
+        - figures
+        - payees
+        - currency
+        - amount
+        - reporting_currency
+        - amount_at_actual_rates
+        - amount_at_constant_rates
+        - constant_rates_on
+      group_totals_left_out:
+        - entity_id
+        - fiscal_year
+        - basis
+        - left_out_by
+        - figures
+        - payees
+        - currency
+        - amount
+  # Defining and versioning the governed metrics over the group totals. Its group totals table
+  # holds the nine columns the metrics' semantic model reads (semantics/metricflow/group_totals.yml,
+  # held equal by a test); it has no table of the left-out figures.
+  - id: metric-definition
+    for: Defining and versioning the governed metrics on the group totals.
+    personas: [metric-owner]
+    tables:
+      group_totals:
+        - group_total_key
+        - entity_id
+        - fiscal_year
+        - fiscal_period
+        - period_start
+        - basis
+        - reporting_currency
+        - amount_at_constant_rates
+        - constant_rates_on
+  # Reading every record and changing nothing. Its payments, group totals and left-out figures
+  # tables hold every column of theirs, the tagged ones clear or masked as access/columns.yaml says
+  # for the auditor, which is open with the owner there.
+  - id: audit
+    for: Reading every record as it is, changing nothing.
+    personas: [auditor]
+    tables:
+      payments:
+        - payment_key
+        - entity_id
+        - currency
+        - payment_date
+        - fiscal_year
+        - fiscal_period
+        - amount
+        - vendor_name
+        - vendor_is_hashed
+        - document_number
+        - contract_number
+        - award_after_revisions
+        - source_table
+        - is_repeat
+        - vendor_organisation_name
+        - vendor_person_key
+        - document_reference
+      group_totals:
+        - group_total_key
+        - entity_id
+        - fiscal_year
+        - fiscal_period
+        - period_start
+        - period_end
+        - basis
+        - figures
+        - payees
+        - currency
+        - amount
+        - reporting_currency
+        - amount_at_actual_rates
+        - amount_at_constant_rates
+        - constant_rates_on
+      group_totals_left_out:
+        - entity_id
+        - fiscal_year
+        - basis
+        - left_out_by
+        - figures
+        - payees
+        - currency
+        - amount

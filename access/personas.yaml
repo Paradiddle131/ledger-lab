@@ -18,7 +18,8 @@ entities:
     brings: Budget and outturn, with several budget moments in one year.
 
 # A product's `tables` are the warehouse tables the models build for it, which the local engine
-# copies to its readers (access/compile.py); a product the models do not build yet lists none.
+# copies to its readers, narrowed to the columns of each of their purposes in access/purposes.yaml
+# (access/compile.py); a product the models do not build yet lists none.
 data_products:
   - id: payments
     scope: entity
