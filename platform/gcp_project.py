@@ -18,7 +18,10 @@ class NoLabProjectError(RuntimeError):
 
 def lab_project_or_none(env: Mapping[str, str] | None = None) -> str | None:
     """The lab's project id, or None while the owner has not set one."""
-    value = (os.environ if env is None else env).get(VARIABLE, "").strip()
+    env = os.environ if env is None else env
+    if env.get(FOREIGN, "").strip():
+        return None
+    value = env.get(VARIABLE, "").strip()
     return value or None
 
 
