@@ -8,19 +8,24 @@ its purposes and aggregate grants, reading `duckdb_tables()`, `duckdb_views()`,
 `duckdb_constraints()`, `duckdb_indexes()` and `duckdb_schemas()` by qualified name. The check
 flags:
 - a purpose table missing, not answering a query of the purpose's columns, holding a column the
-  purpose does not list, stored as a view, or holding a column in another type than the source's
-  (a string where a masking rule gives one);
+  purpose does not list, stored as a view, or holding a column in another type than the source's;
 - an aggregate table missing, stored as a view, holding other columns, a column in another type
   than the aggregate's, a group twice, or a group whose payees are null or under the minimum;
 - a table or view of the persona's catalog, in any schema, that no purpose or aggregate gives it;
 - a macro, a type that is not internal, a sequence, a constraint, an index, a schema other than
   `main` and the persona's purpose schemas, a comment on a table, view or column, and a column
-  default.
+  default, a generated column among them (DuckDB reports its expression as the column's default).
 Its limits:
-- it compares names, counts and types, not values, apart from an aggregate's group counts and
-  payees;
-- it reads only the catalogue functions above, so a value DuckDB keeps elsewhere in the file (a
-  generated column's expression, for one) is not looked at.
+- it compares names and types; in an aggregate table it also counts the rows and the distinct
+  groups, and compares each group's payees with the minimum;
+- it does not look at which rows a purpose table holds or how many: one holding another entity's
+  rows, or each row twice, passes it; the entity filter is checked elsewhere:
+  `tests/access/test_compile.py`, `tests/access/test_visibility.py` and
+  `tests/access/test_identities.py` go red when the compiler's entity filter is dropped from its
+  purpose and aggregate tables;
+- it does not look at the values a purpose table's listed column holds: a listed column
+  overwritten with another listed column's values passes it;
+- of the catalogue it reads only the functions above and `current_database()`.
 The same check is run on databases a broken compiler would build, at least one for each item
 flagged above and one for each catalogue function above, and `current_database()`, shadowed by
 a stored macro of its name, and goes red on each. The absent columns are worked out here from
@@ -145,22 +150,6 @@ def aggregate_columns(
     return shown
 
 
-def read_type(columns: Doc, persona: str, table: str, column: str, kind: str) -> str:
-    """The type a purpose table holds a column in for the persona: the source's type, or a string
-    where `access/columns.yaml` tags the column with a rule that gives a string (hash, last four)
-    and the persona is a masked reader of the tag."""
-    tagged = {
-        key: tag
-        for product in columns["products"].values()
-        for key, tag in product.get("columns", {}).items()
-    }
-    rules = {t["id"]: t for t in columns["tags"]}
-    tag = tagged.get(f"{table}.{column}")
-    if tag and persona in rules[tag]["masked"] and rules[tag]["masking"] in ("hash", "last-four"):
-        return "VARCHAR"
-    return kind
-
-
 @dataclass(frozen=True)
 class Expected:
     """What the persona's purposes and aggregate grants give it: each purpose table, by (schema,
@@ -172,14 +161,14 @@ class Expected:
 
 
 def expected(
-    access: Doc, columns: Doc, aggregates: Doc, purposes: Doc, persona: str, warehouse: Path
+    access: Doc, aggregates: Doc, purposes: Doc, persona: str, warehouse: Path
 ) -> Expected:
     kinds = product_types(access, warehouse)
     mine = [p for p in purposes["purposes"] if persona in p["personas"]]
     tables = {
         (schema_of(p["id"]).lower(), table): (
             p["id"],
-            {c: read_type(columns, persona, table, c, kinds[table][c]) for c in listed},
+            {c: kinds[table][c] for c in listed},
         )
         for p in mine
         for table, listed in p["tables"].items()
@@ -252,7 +241,7 @@ def stored(
     that is not internal (`duckdb_types()`), a sequence (`duckdb_sequences()`), a constraint
     (`duckdb_constraints()`), an index (`duckdb_indexes()`), a schema other than `main` and the
     persona's purpose schemas (`duckdb_schemas()`), and a comment on a table, view or column or a
-    column default (from `held`)."""
+    column default, a generated column's expression among them (from `held`)."""
     found: list[str] = []
     for macro in names(
         db,
@@ -335,17 +324,17 @@ def aggregate_faults(db: duckdb.DuckDBPyConnection, where: str, shape: Shape) ->
 
 def breaches(db: duckdb.DuckDBPyConnection, persona: str, want: Expected) -> list[str]:
     """The departures of the persona's database from its purposes and aggregate grants that this
-    reads for, by names, counts and types:
+    reads for, by names and types, and in an aggregate table by its rows, groups and payees:
     - a purpose table missing, not answering a query of the purpose's columns, holding a column
       the purpose does not list, stored as a view, or holding a column in another type than the
-      source's (a string where a masking rule gives one);
+      source's;
     - an aggregate table missing, stored as a view, holding other columns, a column in another
       type than the aggregate's, a group twice, or a group whose payees are null or under the
       minimum group;
     - a table or view of its catalog, in any schema, that no purpose or aggregate gives it;
     - what `stored` lists.
-    It compares names, counts and types, not values, apart from an aggregate's group counts and
-    payees, and reads only the catalogue functions `held` and `stored` name."""
+    It does not look at a purpose table's rows or its listed columns' values, and of the catalogue
+    reads only the functions `held` and `stored` name and `current_database()`."""
     found: list[str] = []
     tables = held(db)
     for (schema, table), (purpose, kinds) in want.tables.items():
@@ -385,14 +374,13 @@ def breaches(db: duckdb.DuckDBPyConnection, persona: str, want: Expected) -> lis
 def test_each_persona_s_database_shows_none_of_the_breaches_checked(
     as_persona: AsPersona,
     access: Doc,
-    columns: Doc,
     aggregates: Doc,
     purposes: Doc,
     warehouse: Path,
     persona: str,
 ) -> None:
     assert product_types(access, warehouse), "the models build tables of some product"
-    want = expected(access, columns, aggregates, purposes, persona, warehouse)
+    want = expected(access, aggregates, purposes, persona, warehouse)
     assert breaches(as_persona(persona), persona, want) == []
 
 
@@ -444,6 +432,27 @@ def rebuilt_with(schema: str, table: str, extra: str) -> Callable[[Build], list[
             f"create table main.kept as select * from {where}",  # noqa: S608
             f"drop table {where}",
             f"create table {where} ({defs}, {extra})",
+            f"insert into {where} by name select * from main.kept",  # noqa: S608
+            "drop table main.kept",
+        ]
+
+    return statements
+
+
+def generated(schema: str, table: str, column: str, value: str) -> Callable[[Build], list[str]]:
+    """The table written again under its name with its columns, types and rows, the column stored
+    as a column generated always as the constant `value`."""
+
+    def statements(build: Build) -> list[str]:
+        where = f"{quote(schema)}.{quote(table)}"
+        defs = ", ".join(
+            f"{quote(c)} {k}" + (f" generated always as ({literal(value)})" if c == column else "")
+            for c, k in columns_of(build, schema, table)
+        )
+        return [
+            f"create table main.kept as select * exclude ({quote(column)}) from {where}",  # noqa: S608
+            f"drop table {where}",
+            f"create table {where} ({defs})",
             f"insert into {where} by name select * from main.kept",  # noqa: S608
             "drop table main.kept",
         ]
@@ -588,6 +597,12 @@ ALTERED: dict[str, tuple[str, Statements, tuple[str, ...]]] = {
         "group-controller",
         ["alter table group_close.payments alter column amount set default 4242"],
         ("holds a default on group_close.payments.amount",),
+    ),
+    "store-a-purpose-column-as-a-generated-column": (
+        # DuckDB reports a generated column's expression as the column's default.
+        "group-controller",
+        generated("group_close", "payments", "source_table", "invented"),
+        ("holds a default on group_close.payments.source_table",),
     ),
     "store-a-constraint": (
         "group-controller",
@@ -841,7 +856,7 @@ def test_the_check_goes_red_on_a_database_a_broken_compiler_builds(
             for statement in altered if isinstance(altered, list) else altered(build):
                 build.execute(statement)
             build.execute(f"detach {SOURCE}")
-    want = expected(access, columns, aggregates, purposes, persona, warehouse)
+    want = expected(access, aggregates, purposes, persona, warehouse)
     db = connect(path)
     try:
         found = breaches(db, persona, want)
@@ -1066,7 +1081,7 @@ def test_each_persona_reads_its_purposes_over_the_landed_build(
         plan = compile_persona(access, columns, aggregates, purposes, persona, schema)
         db = connect(materialise(plan, landed_warehouse, directory))
         try:
-            want = expected(access, columns, aggregates, purposes, persona, landed_warehouse)
+            want = expected(access, aggregates, purposes, persona, landed_warehouse)
             found += breaches(db, persona, want)
             for rows in (t for t in plan.tables if isinstance(t, Rows)):
                 where = name(rows.purpose, rows.table)
