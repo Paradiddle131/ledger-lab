@@ -595,7 +595,16 @@ def test_the_gate_names_what_breaks(published_repo: Path) -> None:
     assert not ok
     assert "payments: schema.payments.properties.amount" in report
     assert f"payments: quality rule payments/{HASHED} is changed beyond its wording" in report
-    assert "payments: payments.vendor_name is no longer classified personal" in report
+    assert (
+        "payments: payments's payments.vendor_name (payments.vendor_name) describes a column"
+        " origin/main classifies personal and is classified nothing" in report
+    )
+
+
+def another_contract(c: Contract) -> None:
+    """The contract as a new one, over a table of its own."""
+    c["id"] = "other"
+    c["schema"][0].update(name="other", physicalName="other")
 
 
 FILES = {
@@ -603,7 +612,7 @@ FILES = {
     "beside a new contract": (
         {
             str(gate.CONTRACT): CONTRACT.read_text(),
-            "models/contracts/other.odcs.yaml": changed(lambda c: c.update(id="other")),
+            "models/contracts/other.odcs.yaml": changed(another_contract),
         },
         True,
     ),
