@@ -55,7 +55,9 @@ purposes:
   # Closing the group's periods. Its payments table holds the nine columns listed below; its
   # group totals and left-out figures tables hold every column of theirs.
   - id: group-close
-    for: Summing and translating every entity's payments into the group's figures by period.
+    for: >-
+      Summing and translating every entity's payments into the group's figures by period, and
+      finding by the organisation paid the payments between the group's entities (intercompany).
     personas: [group-controller]
     tables:
       payments:

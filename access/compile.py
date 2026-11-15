@@ -7,8 +7,9 @@ it, and everything else is simply absent:
 
 - the purposes: a product's rows are read only through the persona's purposes in
   `access/purposes.yaml`, each a table `<purpose>.<table>` holding only the columns the purpose
-  lists, and the product's table itself is never written, so no query reaches a column no purpose
-  of the persona needs;
+  lists; the product's rows are not copied whole under the product table's name, so the tables of
+  rows a persona holds are its purposes' tables and hold no column its purposes leave out (an
+  aggregate grant's tables, in `main`, are the minimum group's below);
 - the row rule: of an entity-scoped product's tables, only the rows of the entities the persona's
   `read` or `edit` grants name (`access/personas.yaml`); of a group product, every row;
 - the column rules: a column tagged in `access/columns.yaml` holds the stored value for the tag's
