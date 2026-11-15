@@ -41,18 +41,32 @@ Outside the definition, so a change there is not seen by the gate:
   the local one: the gate compares the local target's parse;
 - dbt packages, which the gate refuses rather than reads.
 
+The ways a project's macros can decide relation names that the gate refuses:
+
+- a project macro named `generate_alias_name`, `generate_schema_name` or `generate_database_name`,
+  or one of those after a `<prefix>__`, such as `default__generate_alias_name` or
+  `duckdb__generate_schema_name`, which dbt's own versions of the three dispatch to;
+- a project file `dispatch` entry for the `dbt` macro namespace, which those three dispatch in, or
+  a `dispatch` setting the gate cannot read as entries for other namespaces.
+
+Stated limits of that refusal: it rests on dbt's default implementations of the three, in the dbt
+the lock pins, calling no other macro (the database one asks the adapter for a model's catalog
+integration, which the local DuckDB adapter offers none of); a macro dbt calls only when it runs models, not when it parses them, such as
+`generate_latest_version_pointer_alias` (the name of an extra view of a versioned model, not the
+relation a semantic model reads), is not refused.
+
 The gate fails when:
 
 - the clone holds no `origin/main`, or HEAD does not contain it (merge it first, so of two
   branches that bump one metric to the same version, the second is compared with the first);
-- git cannot read `origin/main`'s files (an object a partial clone cannot fetch, or any other
-  failed `ls-tree` or `cat-file`);
+- git cannot list `origin/main`'s tree or read its files (`ls-tree` or `cat-file` fails, as for
+  an object a partial clone cannot fetch);
 - either tree has its dbt project file somewhere other than `models/dbt_project.yml`;
 - either tree holds, in what dbt reads, a symbolic link or a submodule; declares dbt packages
   (`packages.yml`, `dependencies.yml`); has a project file holding Jinja, or a path setting that is
-  absolute or outside the tree; defines `generate_alias_name`, `generate_schema_name` or
-  `generate_database_name`; holds dbt Jinja where dbt renders it in a semantic model or metric
-  entry, or in the entry of a model, seed or snapshot a semantic model reads or a time spine is
+  absolute or outside the tree; defines a macro that decides relation names or sets a `dispatch`
+  entry for the `dbt` namespace (both above); holds dbt Jinja where dbt renders it in a semantic
+  model or metric entry, or in the entry of a model, seed or snapshot a semantic model reads or a time spine is
   (dbt renders that Jinja with the environment, command-line variables and the clock);
 - dbt cannot parse either tree: the message names the tree and dbt's error class, never dbt's own
   output;
@@ -94,8 +108,12 @@ PROJECT = "models"
 PROJECT_FILE = f"{PROJECT}/dbt_project.yml"
 # The files that declare dbt packages, which the gate does not read.
 PACKAGE_FILES = ("packages.yml", "dependencies.yml")
-# The project macros that decide a relation's name, which dbt can make read the environment.
+# The macros that decide a relation's name, which a project can make read the environment: a
+# project macro of one of these names, or of one of them after `<prefix>__` (the `default__` and
+# `<adapter>__` implementations dbt's own macros dispatch to), is refused.
 RELATION_MACROS = ("generate_alias_name", "generate_schema_name", "generate_database_name")
+# The macro namespace dbt's own macros, the three above among them, dispatch in.
+DBT_NAMESPACE = "dbt"
 # The largest integer the audit record (agent/audit.schema.json) carries exactly.
 MAX_VERSION = 2**53 - 1
 # What a component may change without changing the number of a metric built from it.
@@ -403,7 +421,8 @@ def parse_and_refuse(project: Path, report: Path) -> int:
     if not result.success or not isinstance(manifest, Manifest):
         report.write_text(json.dumps({"error": failure(result.exception, project, tree)}))
         return 0
-    project_vars = (load_yaml_text((project / "dbt_project.yml").read_text()) or {}).get("vars")
+    project_file = load_yaml_text((project / "dbt_project.yml").read_text()) or {}
+    project_vars = project_file.get("vars")
     # dbt's and its adapter's own macros, installed beside dbt.
     installed = Path(dbt.__file__).resolve().parents[1]
     root = manifest.metadata.project_name
@@ -417,8 +436,13 @@ def parse_and_refuse(project: Path, report: Path) -> int:
         f"{in_tree(project, macro.original_file_path, tree)}: macro {macro.name} decides relation"
         " names, which the gate does not compare"
         for macro in manifest.macros.values()
-        if macro.package_name == root and macro.name in RELATION_MACROS
+        if macro.package_name == root and names_relations(macro.name)
     ]
+    if routes_dbt_macros(project_file.get("dispatch")):
+        refused.append(
+            f"{PROJECT_FILE}'s dispatch sets where dbt's own macros are found, among them the"
+            " ones that decide relation names, which the gate does not compare"
+        )
     for file in manifest.files.values():
         if not isinstance(file.path, FilePath):
             continue
@@ -444,6 +468,25 @@ def parse_and_refuse(project: Path, report: Path) -> int:
                     refused.append(f"{path}: {key} {name} holds dbt Jinja at {place}")
     report.write_text(json.dumps({"refused": sorted(set(refused)), "vars": project_vars}))
     return 0
+
+
+def names_relations(macro: str) -> bool:
+    """Whether a project macro of this name decides relation names: one of `RELATION_MACROS`, or
+    one of them after a `<prefix>__`, which dbt's dispatch of them can reach."""
+    return any(macro == name or macro.endswith(f"__{name}") for name in RELATION_MACROS)
+
+
+def routes_dbt_macros(dispatch: object) -> bool:
+    """Whether the project file's `dispatch` setting holds an entry for dbt's own macro
+    namespace, or one the gate cannot read as an entry for another namespace."""
+    if dispatch is None:
+        return False
+    if not isinstance(dispatch, list):
+        return True
+    return any(
+        not isinstance(entry, dict) or entry.get("macro_namespace") in (DBT_NAMESPACE, None)
+        for entry in dispatch
+    )
 
 
 def in_tree(project: Path, original: str, tree: Path) -> str:

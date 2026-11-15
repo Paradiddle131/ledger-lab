@@ -445,6 +445,19 @@ ALIAS_MACRO = (
     "{% macro generate_alias_name(custom_alias_name=none, node=none) -%}\n"
     "{{ env_var('ANY', '') ~ (custom_alias_name or node.name) }}\n{%- endmacro %}\n"
 )
+
+
+def relation_macro(name: str, value: str) -> Edit:
+    """A project macro `name`, invented for the test, that returns dbt's own value for the name it
+    decides after a value read from the environment, which the gate's fixed environment leaves
+    empty."""
+    text = (
+        "{% macro " + name + "(custom_name=none, node=none) -%}\n"
+        "{{ env_var('ANY', '') ~ " + value + " }}\n{%- endmacro %}\n"
+    )
+    return lambda files: files.update({"models/macros/relation_probe.sql": text})
+
+
 SEED_READER = """
 semantic_models:
   - name: period_statuses
@@ -552,6 +565,42 @@ REFUSED: dict[str, tuple[Edit, list[str]]] = {
             " config.alias",
             "models/macros/generate_alias_name.sql: macro generate_alias_name decides relation"
             " names, which the gate does not compare",
+        ],
+    ),
+    "a project's default alias macro": (
+        relation_macro("default__generate_alias_name", "(custom_name or node.name)"),
+        [
+            "models/macros/relation_probe.sql: macro default__generate_alias_name decides relation"
+            " names, which the gate does not compare"
+        ],
+    ),
+    "a project's adapter schema macro": (
+        relation_macro(
+            "duckdb__generate_schema_name",
+            "(target.schema if custom_name is none else target.schema ~ '_' ~ custom_name)",
+        ),
+        [
+            "models/macros/relation_probe.sql: macro duckdb__generate_schema_name decides relation"
+            " names, which the gate does not compare"
+        ],
+    ),
+    "a project's default database macro": (
+        relation_macro("default__generate_database_name", "(custom_name or target.database)"),
+        [
+            "models/macros/relation_probe.sql: macro default__generate_database_name decides"
+            " relation names, which the gate does not compare"
+        ],
+    ),
+    "a dispatch entry for dbt's macros": (
+        lambda files: files.update(
+            {
+                PROJECT_FILE: files[PROJECT_FILE]
+                + "\ndispatch:\n  - macro_namespace: dbt\n    search_order: [ledger_lab, dbt]\n"
+            }
+        ),
+        [
+            f"{PROJECT_FILE}'s dispatch sets where dbt's own macros are found, among them the ones"
+            " that decide relation names, which the gate does not compare"
         ],
     ),
     "Jinja in the project file": (
@@ -701,6 +750,23 @@ def test_a_link_or_submodule_dbt_would_read_fails_on_either_tree(tmp_path: Path)
     into.mkdir()
     with pytest.raises(versions.Unreadable, match="models/vendored is a link or a submodule"):
         versions.export_working(staged, into)
+
+
+def test_the_macros_and_dispatch_entries_that_decide_relation_names_are_told_apart() -> None:
+    """The three relation macros and their `<prefix>__` implementations are refused, other macro
+    names are not; a `dispatch` entry for the `dbt` namespace, or one the gate cannot read, is
+    refused, one for another namespace is not."""
+    for name in ("generate_alias_name", "default__generate_alias_name"):
+        assert versions.names_relations(name)
+    for name in ("duckdb__generate_schema_name", "bigquery__generate_database_name"):
+        assert versions.names_relations(name)
+    for name in ("fiscal_spine", "generate_schema_name_for_env", "my_generate_alias_name"):
+        assert not versions.names_relations(name)
+    other = {"macro_namespace": "dbt_utils", "search_order": ["ledger_lab", "dbt_utils"]}
+    assert not versions.routes_dbt_macros(None)
+    assert not versions.routes_dbt_macros([other])
+    for dispatch in ([{"macro_namespace": "dbt", "search_order": ["dbt"]}], [other, "dbt"], {}):
+        assert versions.routes_dbt_macros(dispatch)
 
 
 def test_dbt_jinja_is_refused_where_dbt_renders_it() -> None:
@@ -1078,8 +1144,9 @@ def test_a_main_whose_project_moved_fails_the_gate(tmp_path: Path) -> None:
 
 
 def test_a_main_git_cannot_read_fails_the_gate(tmp_path: Path) -> None:
-    """A partial clone whose promisor is gone holds `origin/main`'s commits but not its files:
-    the gate fails instead of reading the missing files as empty."""
+    """A partial clone whose promisor is gone holds `origin/main`'s commits and trees but not its
+    files' objects, so `git cat-file` fails on them: the gate fails instead of reading the missing
+    files as empty."""
     source = git_repo(tmp_path / "source", REAL)
     run(source, "config", "uploadpack.allowFilter", "true")
     apply(source, replaced(CONTRACTS, "\nmetrics:", "\n# A comment.\nmetrics:"), REAL)
@@ -1100,6 +1167,36 @@ def test_a_main_git_cannot_read_fails_the_gate(tmp_path: Path) -> None:
     run(clone, "remote", "set-url", "origin", url)
     ok, report = versions.check(clone)
     assert lines(report) == still("fixed_award", "spend_against_award"), report
+
+
+def test_a_main_whose_tree_git_cannot_list_fails_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the object of `origin/main`'s `models` tree gone, `git ls-tree` of `origin/main`
+    fails: the gate fails instead of reading `origin/main` as holding no metric."""
+    monkeypatch.setattr(versions, "_PUBLISHED", {})
+    repo = working(tmp_path, replaced(CONTRACTS, FIXED_AWARD_EXPR, NEW_EXPR))
+    sha = run(repo, "rev-parse", "origin/main:models").strip()
+    (repo / ".git" / "objects" / sha[:2] / sha[2:]).unlink()
+    with pytest.raises(versions.GateError, match="nothing is compared: git ls-tree of "):
+        versions.check(repo)
+
+
+def test_a_main_declaring_packages_fails_the_gate(tmp_path: Path) -> None:
+    """Packages declared on `origin/main` are refused there too, though the working tree drops
+    them."""
+    main = changed_from(
+        REAL, lambda files: files.update({"models/packages.yml": "packages:\n  - local: ../pkg\n"})
+    )
+
+    def edit(files: dict[str, str]) -> None:
+        del files["models/packages.yml"]
+
+    with pytest.raises(
+        versions.GateError,
+        match="cannot be read, so nothing is compared: models/packages.yml declares dbt packages",
+    ):
+        versions.check(working(tmp_path, edit, main))
 
 
 def test_two_branches_publishing_one_version_cannot_both_pass(tmp_path: Path) -> None:
