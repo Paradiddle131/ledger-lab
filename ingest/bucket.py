@@ -4,7 +4,8 @@ The fetch kit writes there exactly the bytes it would write to a local landing, 
 verification and the same step in memory, as objects at the bucket's root named as the local files
 are (`chicago-contracts`), so no name holds a slash. The bucket must be the lab's own, named from
 `LEDGER_LAB_GCP_PROJECT` through `platform/gcp_project.py` as `platform/gcp/landing.tf` names it;
-any other bucket, a folder inside it, or another scheme is refused before any call.
+any other bucket, a folder inside it, another scheme, or any bucket at all in a session that carries
+another lab's `GCP_PROJECT` is refused before any call.
 
 One landing at a time, and no load from the bucket during one (`load.py` holds the same lock for
 its whole run): a landing first creates the lock object `.landing.lock` at the bucket's root, only

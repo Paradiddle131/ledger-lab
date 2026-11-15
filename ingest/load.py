@@ -18,7 +18,8 @@ idempotent, and a job that meets a single bad record fails and leaves the table 
 file's table is loaded in turn; a failure stops before the next.
 
 Refused before any call: a project other than the one `LEDGER_LAB_GCP_PROJECT` names (read through
-`platform/gcp_project.py`, never the session's `GCP_PROJECT`), a location in
+`platform/gcp_project.py`, never the session's `GCP_PROJECT`), every project in a session that
+carries a `GCP_PROJECT`, whose credential is another lab's, a location in
 `LEDGER_LAB_BQ_LOCATION` outside the free-tier regions `platform/gcp/variables.tf` allows, and a
 name that is not in `landed_names` (hidden objects and the lock among them). Refused before any
 load: a landing bucket whose lock another landing or load holds, and a name the bucket does not

@@ -848,6 +848,7 @@ def bucket(monkeypatch: pytest.MonkeyPatch) -> Iterator[Bucket]:
     root = f"/bucket-{uuid.uuid4().hex}"
     fs.mkdir(root)
     monkeypatch.setenv("LEDGER_LAB_GCP_PROJECT", "the-lab-project")
+    monkeypatch.delenv("GCP_PROJECT", raising=False)  # the bucket is in memory: no GCP call
     monkeypatch.setenv("LEDGER_LAB_LANDING", LAB_BUCKET)
     monkeypatch.setattr(bucket_module, "cloud_storage", lambda: fs)
     monkeypatch.setattr(bucket_module, "bucket_name", lambda landing, env: root)
@@ -875,6 +876,7 @@ def test_a_bucket_landing_of_another_bucket_is_refused_before_any_call(
 
     monkeypatch.setattr(bucket_module, "cloud_storage", no_call)
     monkeypatch.setenv("LEDGER_LAB_GCP_PROJECT", "the-lab-project")
+    monkeypatch.delenv("GCP_PROJECT", raising=False)
     monkeypatch.setenv("LEDGER_LAB_LANDING", "gs://another-lab-landing")
     with pytest.raises(fetch.FetchError, match="the lab's landing bucket"):
         fetch.landing()
