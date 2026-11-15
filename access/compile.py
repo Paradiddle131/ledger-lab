@@ -429,7 +429,7 @@ def statements(plan: Plan) -> list[str]:
             source = f"{SOURCE}.main.{quote(table.table)}"
             sql.append(
                 f"create table {quote(table.purpose)}.{quote(table.table)}"  # noqa: S608
-                f" as select {listed} from {source}{_where(table.entities)}"
+                f" as select {listed} from {source}"
             )
         else:
             of = quote(table.units_of)
