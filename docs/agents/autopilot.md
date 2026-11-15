@@ -50,4 +50,4 @@ No `local` gates: cloud is the only environment.
 
 ## Known conditions
 
-- A session outside this lab's own environment carries a GCP credential that is another lab's: `[ -n "${LEDGER_LAB_GCP_PROJECT:-}" ] && [ -z "${GCP_PROJECT:-}" ]` fails there (run it on the session as provisioned, printing no value, setting neither variable); make no GCP call and label the item `needs-gcp`; seen 2026-11-14.
+- A session outside this lab's own environment may carry a GCP credential that is another lab's: `[ -n "${LEDGER_LAB_GCP_PROJECT:-}" ] && [ -z "${GCP_PROJECT:-}" ]` fails there (run it on the session as provisioned, printing no value, setting neither variable); make no GCP call and label the item `needs-gcp`; seen 2026-11-14.
