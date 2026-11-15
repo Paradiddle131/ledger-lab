@@ -4,9 +4,10 @@ the warehouse's `landed` dataset, one BigQuery load job per file.
 Each name must be one a landing step writes a file under (`landed_names`: a source's own step in
 `fetch.STEPS`, a set whose step returns one file, or a member of a set whose step returns files by
 member name) and an object at the root of the lab's landing bucket (`bucket.py`). A member of a set
-whose step returns one file (a quarter of the securities filings, a month of the transport spend) is
-refused, since the fetch kit lands such a member alone as the publisher's file. What is checked is
-the name; the object's bytes are whatever the bucket holds under it. Each landed file is Parquet its
+whose step returns one file is refused: a quarter of the securities filings, which the fetch kit
+would land alone as the publisher's file, and a month of the transport spend, which the fetch kit
+refuses to land alone because it names people and has no step of its own. What is checked is the
+name; the object's bytes are whatever the bucket holds under it. Each landed file is Parquet its
 step wrote: text columns as the publishers' text, typed columns only where the step typed them; the
 load keeps the file's own schema, so no delimiter, quoting, header or encoding rule can split a row
 differently from the landing. Column names are kept as they are; BigQuery refuses a Parquet column
@@ -26,13 +27,14 @@ replaces an object while the set loads and no load starts during a landing; it r
 when it ends, on a failure too, and a killed load leaves it behind, as a killed landing does, for an
 operator to delete by hand once nothing runs.
 
-Load jobs from Cloud Storage bill nothing, and the loader runs no streaming insert. After each load
-it lists `landed` (`bq ls`) and describes each listed table (`bq show`), which bill nothing, and
-refuses to go on when the listing leaves out a table this run has loaded (an empty listing
-included), or when the stored total is above `STORAGE_CAP` bytes, far inside BigQuery's free 10 GiB.
-A table this run loaded counts at the larger of the bytes its `bq show` gave right after its load
-and the bytes the later `bq show` gives. A table this run did not load counts only as the listing
-and its `bq show` report it: the cap trusts `bq ls` for those.
+Load jobs from Cloud Storage bill nothing, and the loader runs no streaming insert. Before the first
+load and after each load it lists `landed` (`bq ls`) and describes each listed table (`bq show`),
+which bill nothing, and refuses to go on when the listing leaves out a table this run has loaded (an
+empty listing included), when a `bq show` answer gives a negative row or byte count, or when the
+stored total is above `STORAGE_CAP` bytes, far inside BigQuery's free 10 GiB; a run that starts
+above the cap loads nothing. A table this run loaded counts at the larger of the bytes its `bq show`
+gave right after its load and the bytes the later `bq show` gives. A table this run did not load
+counts only as the listing and its `bq show` report it: the cap trusts `bq ls` for those.
 
 The live comparisons ask BigQuery three things of one landed table, each built here from the file's
 name and, for a column, its name as the table's own schema gives it, so a caller names no project,
@@ -191,7 +193,10 @@ def described(
         ):
             raise LoadError(f"the table shown is not {DATASET}.{table}")
         columns = tuple((str(f["name"]), str(f["type"])) for f in shown["schema"]["fields"])
-        return int(shown["numRows"]), int(shown["numBytes"]), columns
+        rows, size = int(shown["numRows"]), int(shown["numBytes"])
+        if rows < 0 or size < 0:
+            raise ValueError("a negative count")
+        return rows, size, columns
     except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as error:
         if isinstance(error, LoadError):
             raise
@@ -284,6 +289,11 @@ def load(
             raise LoadError(f"the landing bucket holds no {', '.join(missing)}: land it first")
         tables: list[Table] = []
         sizes: dict[str, int] = {}
+        if (total := stored(project, where, run, sizes)) > STORAGE_CAP:
+            raise LoadError(
+                f"{DATASET} holds {total} bytes, above the {STORAGE_CAP}-byte cap"
+                " before any load: stop"
+            )
         for name in names:
             call(run, f"load {name}", load_command(project, where, root, name))
             shown = call(

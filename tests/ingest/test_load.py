@@ -7,10 +7,13 @@ The `warehouse` tests read the loaded tables live and hold them to the local lan
 rows, columns and content digest, and no name the landing hashes in clear."""
 
 import json
+import os
 import random
 import re
+import secrets
 import subprocess
-from collections.abc import Callable, Sequence
+import sys
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -24,9 +27,10 @@ from sqlglot import exp
 
 from ingest.bucket import LOCK, Bucket, BucketError
 from ingest.fetch import landing_path
-from ingest.individuals import person_hasher
+from ingest.individuals import KEY_VARIABLE, person_hasher
 from ingest.load import (
     DATASET,
+    LOCATION_VARIABLE,
     MAX_BYTES_BILLED,
     STORAGE_CAP,
     Digest,
@@ -195,8 +199,19 @@ def test_each_landed_file_is_one_parquet_load_job_replacing_its_landed_table() -
     tables = load(LANDED, ENV, bq, fs)
     assert [t.table for t in tables] == ["landed.chicago_contracts", "landed.ecb_rates"]
     assert [t.rows for t in tables] == [7, 7]
-    assert bq.verbs() == ["load", "show", "ls", "show", "load", "show", "ls", "show", "show"]
-    first = bq.calls[0]
+    assert bq.verbs() == [
+        "ls",
+        "load",
+        "show",
+        "ls",
+        "show",
+        "load",
+        "show",
+        "ls",
+        "show",
+        "show",
+    ]
+    first = bq.calls[1]
     assert first == load_command(PROJECT, "us-central1", BUCKET, "chicago-contracts")
     assert first[:4] == ["bq", f"--project_id={PROJECT}", "--location=us-central1", "--headless"]
     for flag in ("--source_format=PARQUET", "--replace", "--max_bad_records=0"):
@@ -256,8 +271,9 @@ def test_another_project_or_a_location_outside_the_free_regions_is_refused_befor
     ],
 )
 def test_a_name_no_landing_step_writes_is_refused_before_any_call(name: str) -> None:
-    """Among them a set's name whose step lands its members, and a member of a set whose step
-    lands one file, which the fetch kit lands alone as the publisher's file."""
+    """Among them a set's name whose step lands its members, a quarter of the securities filings
+    (the fetch kit would land it alone as the publisher's file) and a month of the transport spend
+    (the fetch kit refuses to land it alone: it names people and has no step of its own)."""
     bq, fs = Bq(), bucket_holding(*LANDED)
     if name and "/" not in name:
         fs.pipe_file(f"{BUCKET}/{name}", b"PAR1")
@@ -361,7 +377,7 @@ def test_a_failed_load_stops_before_the_next_releases_the_lock_and_names_no_proj
     bq.fail_on = "load"
     with pytest.raises(LoadError, match=r"cannot load chicago-contracts \(bq exit 2\)") as raised:
         load(LANDED, ENV, bq, fs)
-    assert len(bq.calls) == 1
+    assert bq.verbs() == ["ls", "load"]
     assert PROJECT not in str(raised.value)
     assert not locked(fs)
 
@@ -384,11 +400,11 @@ def test_what_landed_already_holds_counts_against_the_storage_cap() -> None:
 )
 def test_a_listing_that_leaves_out_a_table_this_run_loaded_is_refused(listing: str) -> None:
     """The reviewer's case: the load's own `bq show` reports three times the cap, and a listing
-    without its table would count none of it."""
+    without its table, given after the load, would count none of it."""
     bq, fs = Bq(size=STORAGE_CAP * 3), bucket_holding("chicago-contracts")
 
     def run(command: Sequence[str]) -> str:
-        return listing if verb_of(command) == "ls" else bq(command)
+        return listing if verb_of(command) == "ls" and bq.listed else bq(command)
 
     with pytest.raises(LoadError, match="leaves out chicago_contracts, loaded in this run: stop"):
         load(["chicago-contracts"], ENV, run, fs)
@@ -438,6 +454,47 @@ def test_a_table_listed_twice_counts_once() -> None:
     assert [t.table for t in tables] == ["landed.chicago_contracts"]
 
 
+def test_a_run_that_starts_above_the_storage_cap_loads_nothing() -> None:
+    bq, fs = Bq(size=STORAGE_CAP + 1), bucket_holding("chicago-contracts")
+    bq.listed = {"from_an_earlier_run"}
+    with pytest.raises(LoadError, match="cap before any load: stop"):
+        load(["chicago-contracts"], ENV, bq, fs)
+    assert "load" not in bq.verbs()
+    assert not locked(fs)
+
+
+def test_a_negative_byte_count_cancels_no_other_tables_bytes() -> None:
+    """An earlier table holds three quarters of the cap, and the table this run loads reports a
+    negative size at each `bq show`: the load is refused at the first such answer, before a
+    negative could offset the bytes of a table loaded after it. The reviewer's case, an earlier
+    table of one and a half caps, is refused before any load."""
+    bq = Bq(size=0)
+    bq.listed = {"from_an_earlier_run"}
+
+    def run(command: Sequence[str]) -> str:
+        out = bq(command)
+        if verb_of(command) == "show":
+            answer = json.loads(out)
+            earlier = answer["tableReference"]["tableId"] == "from_an_earlier_run"
+            answer["numBytes"] = str(STORAGE_CAP * share // 4) if earlier else "-2147483648"
+            return json.dumps(answer)
+        return out
+
+    share = 3
+    with pytest.raises(LoadError, match="unexpected shape"):
+        load(["chicago-contracts"], ENV, run, bucket_holding("chicago-contracts"))
+    assert bq.verbs().count("load") == 1
+    share, bq.calls, bq.listed = 6, [], {"from_an_earlier_run"}
+    with pytest.raises(LoadError, match="cap before any load"):
+        load(["chicago-contracts"], ENV, run, bucket_holding("chicago-contracts"))
+    assert "load" not in bq.verbs()
+
+
+def test_the_caps_are_the_figures_the_documents_state() -> None:
+    assert STORAGE_CAP == 2 * 1024**3
+    assert MAX_BYTES_BILLED == 1_000_000_000
+
+
 def test_the_load_that_tips_the_storage_cap_is_the_last() -> None:
     names = ["chicago-contracts", "chicago-payments", "ecb-rates"]
     bq, fs = Bq(size=STORAGE_CAP // 2 + 1), bucket_holding(*names)
@@ -466,6 +523,34 @@ def shown(**reference: str) -> str:
         shown(datasetId="payments", tableId="chicago_contracts"),
         shown(datasetId=DATASET, tableId="chicago_payments"),
         shown(projectId="another-lab", datasetId=DATASET, tableId="chicago_contracts"),
+        json.dumps(
+            {
+                "tableReference": {"datasetId": DATASET, "tableId": "chicago_contracts"},
+                "numRows": "1",
+                "schema": {"fields": []},
+            }
+        ),
+        *(
+            json.dumps(
+                {
+                    "tableReference": {"datasetId": DATASET, "tableId": "chicago_contracts"},
+                    "numRows": rows,
+                    "numBytes": size,
+                    "schema": {"fields": []},
+                }
+            )
+            for rows, size in (("-1", "1"), ("1", "-1"))
+        ),
+    ],
+    ids=[
+        "not json",
+        "no table reference",
+        "another dataset",
+        "another table",
+        "another project",
+        "no byte count",
+        "a negative row count",
+        "a negative byte count",
     ],
 )
 def test_a_table_answer_of_another_shape_project_dataset_or_table_is_refused(answer: str) -> None:
@@ -642,14 +727,51 @@ def test_the_digest_holds_no_column_type_without_a_rule() -> None:
         bigquery_digest_sql("`t`", [("`x`", "FLOAT")])
 
 
-def check_table(name: str, path: Path, env: dict[str, str], run: Any) -> str | None:
-    """Why the loaded table of a landed file differs from the local file, or None: its rows from
-    the table's metadata, its columns, each column's non-null cells, and its content digest."""
-    project, where = env["LEDGER_LAB_GCP_PROJECT"], env["LEDGER_LAB_BQ_LOCATION"]
+def guarded[T](what: str, env: Mapping[str, str], call: Callable[[], T]) -> T | str:
+    """`call()`'s answer, or on an `Exception` fixed text: `what`, the exception's type and, for a
+    `LoadError`, its message with each value of `env` but the location replaced by `<hidden>`. An
+    interrupt (a `BaseException` that is no `Exception`) is raised again as a new exception of its
+    type with no arguments, after the `except` block, so its traceback starts in this frame and
+    holds no frame of `call` and no exception context; this frame's locals are then `what`, `env`,
+    `call`, the type and the new exception."""
+    interrupted: type[BaseException] | None = None
     try:
-        loaded = table_of(name, run(show_command(project, where, table_name(name))), project)
-    except (subprocess.SubprocessError, LoadError):
-        return "not loaded"
+        return call()
+    except Exception as error:
+        message = str(error) if isinstance(error, LoadError) else ""
+        for key, value in env.items():
+            if value and key != LOCATION_VARIABLE:
+                message = message.replace(value, "<hidden>")
+        return f"{what}: {type(error).__name__}" + (f": {message}" if message else "")
+    except BaseException as error:
+        interrupted = type(error)
+    try:
+        again = interrupted()
+    except TypeError:
+        again = BaseException(interrupted.__name__)
+    raise again
+
+
+def check_table(name: str, path: Path, env: Mapping[str, str], run: Any) -> str | None:
+    """Why the loaded table of a landed file differs from the local file, or None: its rows from
+    the table's metadata, its columns, each column's non-null cells, and its content digest. The
+    three BigQuery calls run through `guarded`, so a failed one comes back as its fixed text, and
+    this frame holds no project of its own; `env` is the caller's (`lab_env` in the live test)."""
+    loaded = guarded(
+        "not loaded",
+        env,
+        lambda: table_of(
+            name,
+            run(
+                show_command(
+                    env["LEDGER_LAB_GCP_PROJECT"], env[LOCATION_VARIABLE], table_name(name)
+                )
+            ),
+            env["LEDGER_LAB_GCP_PROJECT"],
+        ),
+    )
+    if isinstance(loaded, str):
+        return loaded
     con = duckdb.connect()
     local_columns = [
         (str(c), BIGQUERY_TYPE[str(t)])
@@ -662,12 +784,18 @@ def check_table(name: str, path: Path, env: dict[str, str], run: Any) -> str | N
     cells = ", ".join(f'count("{c}")' for c, _ in local_columns)
     local = con.execute(f"SELECT count(*), {cells} FROM read_parquet(?)", [str(path)]).fetchone()  # noqa: S608
     assert local is not None
-    rows, cells_loaded = counts(name, env, run)
+    asked = guarded("its counts failed", env, lambda: counts(name, env, run))
+    if isinstance(asked, str):
+        return asked
+    rows, cells_loaded = asked
     if loaded.rows != local[0] or rows != local[0]:
         return "its row count differs"
     if cells_loaded != list(local[1:]):
         return "a column's non-null count differs"
-    if digest(name, env, run) != local_digest(path):
+    found = guarded("its digest failed", env, lambda: digest(name, env, run))
+    if isinstance(found, str):
+        return found
+    if found != local_digest(path):
         return "its content digest differs"
     return None
 
@@ -759,10 +887,39 @@ HASHED_NAMES = {
 HASH = re.compile(r"^person:[0-9a-f]{64}$")
 
 
-def lab_env() -> dict[str, str]:
-    import os
+class LabEnv(Mapping[str, str]):
+    """The variables the live comparisons read (the lab's project, the session's project, the
+    location and the hash key), copied from `source` and nothing else, with a `repr` that names
+    the variables present and shows no value."""
 
-    return dict(os.environ)
+    KEYS = ("LEDGER_LAB_GCP_PROJECT", "GCP_PROJECT", LOCATION_VARIABLE, KEY_VARIABLE)
+
+    def __init__(self, source: Mapping[str, str]) -> None:
+        self._values = {key: source[key] for key in self.KEYS if key in source}
+
+    def __getitem__(self, key: str) -> str:
+        return self._values[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __repr__(self) -> str:
+        return f"LabEnv({', '.join(self._values)}; values hidden)"
+
+
+def lab_env() -> LabEnv:
+    return LabEnv(os.environ)
+
+
+def test_the_lab_env_holds_only_the_variables_read_and_shows_no_value() -> None:
+    source = {**ENV_KEYED, "GCP_PROJECT": "another-lab", "SOME_TOKEN": "an-invented-token"}
+    env = LabEnv(source)
+    assert dict(env) == {k: v for k, v in source.items() if k != "SOME_TOKEN"}
+    shown = repr(env) + str(env)
+    assert all(value not in shown for value in source.values())
 
 
 def local_files() -> list[str]:
@@ -788,69 +945,181 @@ def test_each_landed_table_holds_the_same_rows_as_its_local_file() -> None:
 
 
 def hashed_name_counts(
-    name: str, column: str, path: Path, env: dict[str, str], run: Any
+    name: str, column: str, path: Path, env: Mapping[str, str], run: Any
 ) -> dict[str, int] | str:
     """How the loaded column of names compares with the local file's: values missing and extra,
     hashes and clear values, malformed hashes, and clear values whose keyed hash as a person is one
-    of the column's hashes. Only counts come back, so the caller's frame holds no value; an error
-    comes back as its type, with a `LoadError`'s own message, which names no value."""
-    try:
-        local = {
-            None if v is None else str(v)
-            for (v,) in duckdb.connect()
-            .execute(f'SELECT DISTINCT "{column}" FROM read_parquet(?)', [str(path)])  # noqa: S608
-            .fetchall()
-        }
-        loaded = distinct_values(name, column, env, run)
-        hashed = {v for v in loaded if v is not None and v.startswith("person:")}
-        clear = {v for v in loaded if v is not None and not v.startswith("person:")}
-        as_person = person_hasher(env)
-        return {
-            "missing": len(local - loaded),
-            "extra": len(loaded - local),
-            "hashed": len(hashed),
-            "clear": len(clear),
-            "malformed": sum(1 for v in hashed if not HASH.match(v)),
-            "in_clear": len({as_person(v) for v in clear} & hashed),
-        }
-    except LoadError as error:
-        return f"LoadError: {error}"
-    except Exception as error:  # noqa: BLE001
-        return type(error).__name__
+    of the column's hashes. Only counts come back, so the caller's frame holds no value; the work
+    runs through `guarded`, so a failure comes back as its fixed text and the traceback of an
+    interrupt holds no frame that holds the values."""
+    return guarded("hashed names", env, lambda: _hashed_name_counts(name, column, path, env, run))
+
+
+def _hashed_name_counts(
+    name: str, column: str, path: Path, env: Mapping[str, str], run: Any
+) -> dict[str, int]:
+    local = {
+        None if v is None else str(v)
+        for (v,) in duckdb.connect()
+        .execute(f'SELECT DISTINCT "{column}" FROM read_parquet(?)', [str(path)])  # noqa: S608
+        .fetchall()
+    }
+    loaded = distinct_values(name, column, env, run)
+    hashed = {v for v in loaded if v is not None and v.startswith("person:")}
+    clear = {v for v in loaded if v is not None and not v.startswith("person:")}
+    as_person = person_hasher(env)
+    return {
+        "missing": len(local - loaded),
+        "extra": len(loaded - local),
+        "hashed": len(hashed),
+        "clear": len(clear),
+        "malformed": sum(1 for v in hashed if not HASH.match(v)),
+        "in_clear": len({as_person(v) for v in clear} & hashed),
+    }
 
 
 def test_the_hashed_name_counts_are_counts_and_an_error_is_its_type(tmp_path: Path) -> None:
+    """Four tables against one local file: the same rows; one more row holding a hash of a clear
+    name; one row fewer and a malformed hash; and two failures, a refused query and a missing
+    file. Each answer is integers or the failure's fixed text."""
     path = landed_table(tmp_path, ROWS)
     bq = Bq()
-    bq.tables["chicago_contracts"] = path
-    found = hashed_name_counts("chicago-contracts", "vendor_name", path, ENV_KEYED, bq)
-    assert found == {
-        "missing": 0,
-        "extra": 0,
-        "hashed": 1,
-        "clear": 3,
-        "malformed": 0,
-        "in_clear": 0,
-    }
     as_person = person_hasher(ENV_KEYED)
-    leaked = landed_table(tmp_path, [*ROWS, (as_person("ACME LLC"), 1, True, None)], "leaked")
-    bq.tables["chicago_contracts"] = leaked
-    found = hashed_name_counts("chicago-contracts", "vendor_name", path, ENV_KEYED, bq)
-    assert found == {
-        "missing": 0,
-        "extra": 1,
-        "hashed": 2,
-        "clear": 3,
-        "malformed": 0,
-        "in_clear": 1,
-    }
+    expected = [
+        (ROWS, (0, 0, 1, 3, 0, 0)),
+        ([*ROWS, (as_person("ACME LLC"), 1, True, None)], (0, 1, 2, 3, 0, 1)),
+        ([*ROWS[:3], ("person:" + "z" * 64, 1, True, None)], (1, 1, 2, 2, 1, 0)),
+    ]
+    for i, (rows, (missing, extra, hashed, clear, malformed, in_clear)) in enumerate(expected):
+        bq.tables["chicago_contracts"] = landed_table(tmp_path, rows, f"loaded{i}")
+        found = hashed_name_counts("chicago-contracts", "vendor_name", path, ENV_KEYED, bq)
+        assert isinstance(found, dict)
+        assert all(type(n) is int for n in found.values())
+        assert found == {
+            "missing": missing,
+            "extra": extra,
+            "hashed": hashed,
+            "clear": clear,
+            "malformed": malformed,
+            "in_clear": in_clear,
+        }
     bq.fail_on = "query"
     assert hashed_name_counts("chicago-contracts", "vendor_name", path, ENV_KEYED, bq) == (
-        "LoadError: cannot dry-run the query (bq exit 2)"
+        "hashed names: LoadError: cannot dry-run the query (bq exit 2)"
     )
-    assert hashed_name_counts("chicago-contracts", "vendor_name", tmp_path / "absent", ENV, bq) == (
-        "IOException"
+    absent = tmp_path / "absent"
+    assert hashed_name_counts("chicago-contracts", "vendor_name", absent, ENV_KEYED, bq) == (
+        "hashed names: IOException"
     )
+
+
+def test_a_load_error_message_has_the_project_and_key_hidden() -> None:
+    def refuse() -> None:
+        raise LoadError(f"{PROJECT} {ENV_KEYED[KEY_VARIABLE]} us-central1")
+
+    assert guarded("it", ENV_KEYED, refuse) == "it: LoadError: <hidden> <hidden> us-central1"
+
+
+# A probe of the live tests' path, run by pytest in a subprocess: the bq stand-in describes one
+# table, then answers a query with text that is no JSON, or interrupts. The invented project and
+# key come from the subprocess's environment, so the probe's source holds neither.
+PROBE = """
+import json
+import sys
+
+sys.path[:0] = [{paths}]
+
+import duckdb
+import ingest.fetch
+import pytest
+import test_load as T
+
+INTERRUPT = {interrupt}
+
+
+def answer(command):
+    if T.verb_of(command) == "show":
+        reference = {{"datasetId": "landed", "tableId": T.target_of(command)}}
+        fields = [{{"name": "vendor_name", "type": "STRING"}}]
+        shown = {{"tableReference": reference, "numRows": "1", "numBytes": "1"}}
+        return json.dumps({{**shown, "schema": {{"fields": fields}}}})
+    if INTERRUPT:
+        raise KeyboardInterrupt
+    return "garbage"
+
+
+@pytest.fixture
+def landing(tmp_path, monkeypatch):
+    con = duckdb.connect()
+    con.execute("CREATE TABLE t AS SELECT 'ACME LLC' AS vendor_name")
+    con.execute(f"COPY t TO '{{tmp_path / 'chicago-contracts'}}' (FORMAT parquet)")
+    monkeypatch.setattr(T, "run_tool", answer)
+    monkeypatch.setattr(T, "landing_path", lambda: tmp_path)
+    monkeypatch.setattr(ingest.fetch, "landing_path", lambda: tmp_path)
+
+
+def test_rows(landing):
+    T.test_each_landed_table_holds_the_same_rows_as_its_local_file()
+
+
+def test_names(landing):
+    T.test_no_name_the_landing_hashes_is_in_clear_in_the_warehouse("chicago-contracts")
+"""
+
+
+@pytest.mark.parametrize("flags", [[], ["--tb=long", "-l", "--full-trace"]], ids=["default", "all"])
+@pytest.mark.parametrize(
+    ("interrupt", "test", "seen"),
+    [
+        (False, "test_rows", "its counts failed: LoadError: the dry run answered unexpectedly"),
+        (False, "test_names", "hashed names: LoadError: the dry run answered unexpectedly"),
+        (True, "test_rows", "KeyboardInterrupt"),
+        (True, "test_names", "KeyboardInterrupt"),
+    ],
+)
+def test_a_failing_live_test_prints_no_project_and_no_key(
+    tmp_path: Path, flags: list[str], interrupt: bool, test: str, seen: str
+) -> None:
+    """Each live test's path, made to fail by a `LoadError` and by an interrupt, under pytest's
+    default traceback and under `--tb=long -l --full-trace`: the output shows the failure and holds
+    neither the invented project nor the invented key."""
+    project = f"invented-{secrets.token_hex(6)}"
+    key = f"invented-key-{secrets.token_hex(16)}"
+    paths = ", ".join(repr(str(p)) for p in (REPO, REPO / "tests", REPO / "tests" / "ingest"))
+    probe = tmp_path / "probe_live.py"
+    probe.write_text(PROBE.format(paths=paths, interrupt=interrupt))
+    (tmp_path / "pytest.ini").write_text("[pytest]\n")
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+        "LEDGER_LAB_GCP_PROJECT": project,
+        LOCATION_VARIABLE: "us-central1",
+        KEY_VARIABLE: key,
+    }
+    ran = subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "-c",
+            str(tmp_path / "pytest.ini"),
+            "--rootdir",
+            str(tmp_path),
+            f"{probe}::{test}",
+            *flags,
+        ],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=120,
+        check=False,
+    )
+    out = ran.stdout + ran.stderr
+    assert ran.returncode != 0 and seen in out, out[-2000:]
+    assert (out.count(project), out.count(key)) == (0, 0)
 
 
 @pytest.mark.warehouse
