@@ -79,7 +79,7 @@ Outside what it compares: model SQL, command-line `--vars`, and relation names d
 It compares with the `origin/main` last fetched, which it cannot check offline: fetch and merge the default branch before taking a change's gates.
 `make sync` also puts the Data Contract CLI's DuckDB engine (the lock's `contract` group) in uv's cache; the contract tests and `make contract-test`, which runs `datacontract test` over a local dbt build, use it offline on DuckDB 1.5 over a copy of the build in that version's storage format, and the tests skip, saying so, when it is not cached.
 
-The dbt models build on DuckDB in the session by default, reading the landed files in place under `LEDGER_LAB_LANDING`; setting `LEDGER_LAB_GCP_PROJECT` (with `uv sync --group bigquery`) moves them to BigQuery:
+The dbt models build on DuckDB in the session by default, reading the landed files in place under `LEDGER_LAB_LANDING`; setting `LEDGER_LAB_GCP_PROJECT` (with `uv sync --group bigquery`) in a session that carries no `GCP_PROJECT` moves them to BigQuery:
 
 ```bash
 uv run dbt build --project-dir models --profiles-dir models

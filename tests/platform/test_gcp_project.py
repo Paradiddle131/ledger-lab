@@ -21,11 +21,17 @@ def test_a_foreign_project_beside_the_lab_one_leaves_no_lab_project(foreign: str
     assert "another-lab" not in str(refused.value)
 
 
-@pytest.mark.parametrize("blank", ["", " "])
-def test_a_blank_foreign_variable_is_no_foreign_session(blank: str) -> None:
-    env = {"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": blank}
+def test_an_empty_foreign_variable_is_no_foreign_session() -> None:
+    env = {"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": ""}
     assert not foreign_session(env)
     assert lab_project(env) == "the-lab"
+
+
+def test_a_foreign_variable_of_spaces_is_still_a_foreign_session() -> None:
+    """Fails closed, as the shell check `[ -z "${GCP_PROJECT:-}" ]` does."""
+    env = {"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": " "}
+    assert foreign_session(env)
+    assert lab_project_or_none(env) is None
 
 
 def test_only_the_foreign_project_set_raises_and_says_why() -> None:

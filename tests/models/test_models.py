@@ -39,13 +39,44 @@ def target_for(env: dict[str, str]) -> str:
         ({"LEDGER_LAB_GCP_PROJECT": " "}, "local"),
         ({"LEDGER_LAB_GCP_PROJECT": "the-lab"}, "bigquery"),
         ({"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": "another-lab"}, "local"),
-        ({"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": " "}, "bigquery"),
+        ({"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": ""}, "bigquery"),
+        ({"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": " "}, "local"),
     ],
 )
 def test_the_profile_picks_bigquery_only_in_the_labs_own_environment(
     env: dict[str, str], expected: str
 ) -> None:
     assert target_for(env) == expected
+
+
+# Not one of dbt-bigquery's methods (oauth, oauth-secrets, service-account, service-account-json,
+# external-oauth-wif): `dbt parse --target bigquery` in another lab's session ends with
+# "Credentials in profile ... invalid: 'refused-in-another-labs-session' is not one of [...]".
+REFUSED = "refused-in-another-labs-session"
+
+
+def render(field: str, env: dict[str, str]) -> str:
+    """Render one of the bigquery output's fields the way dbt does, against the given
+    environment."""
+    output = yaml.safe_load((PROJECT / "profiles.yml").read_text())["ledger_lab"]["outputs"]
+    template = jinja2.Environment(autoescape=False).from_string(output["bigquery"][field])  # noqa: S701
+    return template.render(env_var=lambda name, default="": env.get(name, default))
+
+
+@pytest.mark.parametrize(
+    ("env", "method"),
+    [
+        ({"LEDGER_LAB_GCP_PROJECT": "the-lab"}, "oauth"),
+        ({"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": "another-lab"}, REFUSED),
+        ({"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": " "}, REFUSED),
+    ],
+)
+def test_an_explicit_bigquery_target_is_refused_in_another_labs_session(
+    env: dict[str, str], method: str
+) -> None:
+    """dbt checks the method against its own list when it reads the profile, so a method outside
+    it stops `--target bigquery` before any connection."""
+    assert render("method", env) == method
 
 
 def test_the_bigquery_target_caps_every_job() -> None:

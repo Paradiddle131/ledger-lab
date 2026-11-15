@@ -4,8 +4,8 @@ The project comes only from `LEDGER_LAB_GCP_PROJECT`. A session may also carry `
 injected credential that belong to another lab. This module never uses that variable's value: it
 reads only whether it is set, and while it is set there is no lab project, whatever
 `LEDGER_LAB_GCP_PROJECT` says, since the credential the session's proxy injects is the other lab's.
-`lab_project_or_none` then answers None and `lab_project` refuses with the reason, so no caller
-makes a GCP call in such a session.
+`lab_project_or_none` then answers None and `lab_project` refuses with the reason, so no caller of
+this module makes a GCP call in such a session; the dbt profile applies the same rule on its own.
 """
 
 import os
@@ -20,8 +20,9 @@ class NoLabProjectError(RuntimeError):
 
 
 def foreign_session(env: Mapping[str, str] | None = None) -> bool:
-    """Whether the session carries another lab's `GCP_PROJECT`, and so its credential."""
-    return bool((os.environ if env is None else env).get(FOREIGN, "").strip())
+    """Whether the session carries another lab's `GCP_PROJECT`, and so its credential: any
+    non-empty value, spaces included, as the autopilot profile's shell check reads it."""
+    return bool((os.environ if env is None else env).get(FOREIGN, ""))
 
 
 def lab_project_or_none(env: Mapping[str, str] | None = None) -> str | None:

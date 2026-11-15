@@ -40,6 +40,7 @@ from ingest.load import (
     digest,
     distinct_values,
     free_regions,
+    lab,
     landed_names,
     load,
     load_command,
@@ -236,6 +237,7 @@ def test_no_command_streams_rows_or_reaches_another_dataset() -> None:
     [
         ({"LEDGER_LAB_BQ_LOCATION": "us-central1"}, "LEDGER_LAB_GCP_PROJECT is unset"),
         ({"GCP_PROJECT": "another-lab", "LEDGER_LAB_BQ_LOCATION": "us-central1"}, "another lab"),
+        ({**ENV, "GCP_PROJECT": "another-lab"}, "another lab"),
         ({"LEDGER_LAB_GCP_PROJECT": PROJECT}, "LEDGER_LAB_BQ_LOCATION must be"),
         ({**ENV, "LEDGER_LAB_BQ_LOCATION": "US"}, "LEDGER_LAB_BQ_LOCATION must be"),
         ({**ENV, "LEDGER_LAB_BQ_LOCATION": "europe-west2"}, "LEDGER_LAB_BQ_LOCATION must be"),
@@ -627,9 +629,16 @@ def test_a_query_answer_of_unexpected_shape_is_refused(answer: str) -> None:
         counts("chicago-contracts", ENV, bq)
 
 
-def test_a_query_outside_the_lab_project_is_refused_before_any_call() -> None:
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"GCP_PROJECT": "another-lab", "LEDGER_LAB_BQ_LOCATION": "us-central1"},
+        {**ENV, "GCP_PROJECT": "another-lab"},
+    ],
+    ids=["foreign-only", "foreign-and-lab"],
+)
+def test_a_query_outside_the_lab_project_is_refused_before_any_call(env: dict[str, str]) -> None:
     bq = Bq()
-    env = {"GCP_PROJECT": "another-lab", "LEDGER_LAB_BQ_LOCATION": "us-central1"}
     for ask in (counts, digest, lambda n, e, r: distinct_values(n, "vendor_name", e, r)):
         with pytest.raises(LoadError, match="belongs to another lab"):
             ask("chicago-contracts", env, bq)
@@ -752,24 +761,19 @@ def guarded[T](what: str, env: Mapping[str, str], call: Callable[[], T]) -> T | 
     raise again
 
 
+def shown_table(name: str, env: Mapping[str, str], run: Any) -> Any:
+    """The loaded table's metadata, in the project and location `lab` gives, so another lab's
+    session is refused before the call."""
+    project, where = lab(env)
+    return table_of(name, run(show_command(project, where, table_name(name))), project)
+
+
 def check_table(name: str, path: Path, env: Mapping[str, str], run: Any) -> str | None:
     """Why the loaded table of a landed file differs from the local file, or None: its rows from
     the table's metadata, its columns, each column's non-null cells, and its content digest. The
     three BigQuery calls run through `guarded`, so a failed one comes back as its fixed text, and
     this frame holds no project of its own; `env` is the caller's (`lab_env` in the live test)."""
-    loaded = guarded(
-        "not loaded",
-        env,
-        lambda: table_of(
-            name,
-            run(
-                show_command(
-                    env["LEDGER_LAB_GCP_PROJECT"], env[LOCATION_VARIABLE], table_name(name)
-                )
-            ),
-            env["LEDGER_LAB_GCP_PROJECT"],
-        ),
-    )
+    loaded = guarded("not loaded", env, lambda: shown_table(name, env, run))
     if isinstance(loaded, str):
         return loaded
     con = duckdb.connect()
