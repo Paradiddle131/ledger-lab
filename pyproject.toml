@@ -49,6 +49,8 @@ conflicts = [[{ group = "dev" }, { group = "contract" }]]
 [tool.ruff]
 line-length = 100
 target-version = "py313"
+# Folders beside the tree that git does not ignore: an agent's worktrees and settings.
+extend-exclude = [".claude"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "S"]
