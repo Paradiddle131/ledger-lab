@@ -415,13 +415,13 @@ PLANTS: list[tuple[str, str, list[str], str]] = [
     (
         "gleif-legal-entities",
         "out-of-range",
-        [on_first("\"Registration.LastUpdateDate\" = '2026-12-01T00:00:00Z'")],
+        [on_first("\"Registration_LastUpdateDate\" = '2026-12-01T00:00:00Z'")],
         "expect_column_values_to_be_between on updated_on",
     ),
     (
         "gleif-legal-entities",
         "mess",
-        [on_first("\"Entity.LegalForm.EntityLegalFormCode\" = '8888'")],
+        [on_first("\"Entity_LegalForm_EntityLegalFormCode\" = '8888'")],
         "expect_column_sum_to_be_between on is_without_real_legal_form",
     ),
     ("nl-government-budget", "schema", EXTRA_COLUMN, "expect_table_columns_to_match_ordered_list"),
@@ -536,7 +536,7 @@ IMPOSSIBLE_DAYS: list[tuple[str, str, str]] = [
     ("ecb-rates", "date = '2024-02-30'", "expect_column_values_to_not_be_null on day_number"),
     (
         "gleif-legal-entities",
-        "\"Registration.LastUpdateDate\" = '2026-02-30T00:00:00Z'",
+        "\"Registration_LastUpdateDate\" = '2026-02-30T00:00:00Z'",
         "expect_column_values_to_not_be_null on updated_on",
     ),
     (

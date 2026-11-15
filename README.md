@@ -123,6 +123,7 @@ The models and the landed tests read a local landing and stop on a bucket one; `
 
 ```bash
 LEDGER_LAB_LANDING=gs://<lab project>-landing uv run python -m ingest.fetch <source>
+LEDGER_LAB_BQ_LOCATION=<free-tier region> uv run python -m ingest.load <landed file>...    # loads landed files from the bucket into the warehouse's `landed` dataset, one load job each, holding the landing's lock
 LEDGER_LAB_LANDING=<local landing> uv run pytest -m bucket  # same names, sizes, MD5 and CRC32C, nothing else in the bucket
 ```
 
