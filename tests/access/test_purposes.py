@@ -2,15 +2,19 @@
 
 `access/purposes.yaml` names, per kind of work, the columns of each product table it needs and the
 personas that do it; the compiler stores each purpose's columns as `<purpose>.<table>` in the
-persona's database and never the table itself. Here every table and view of each persona's
-database is held against what its purposes and aggregate grants give it: each purpose table holds
-exactly the purpose's columns, each aggregate table exactly the aggregate's columns, one row per
-group and no group under the minimum, and nothing else is there. The same check is run on
-databases a broken compiler would build, and goes red. The absent columns are worked out here
-from the source's columns, and the metric definition's columns from the metrics' semantic model,
-apart from the catalogue. A column left out of a purpose can still be worked out from the columns
-it keeps; the derivations known are stated beside the purposes, and the one tested here is the
-group controller's reading of whether a payee is a person.
+persona's database, and not the table itself. Here each persona's database is checked against
+its purposes and aggregate grants, by name and count, not by value, reading the catalogue by
+qualified name. The check flags:
+- a purpose table missing, not answering a query of the purpose's columns, or holding a column
+  the purpose does not list;
+- an aggregate table missing, holding other columns than the aggregate's, holding a group twice,
+  or holding a group whose payees are null or under the minimum group;
+- a table or view of the persona's catalog, in any schema, that no purpose or aggregate gives it;
+- a stored macro, a type the database created, a sequence, a comment on a table, view or column,
+  and a column default.
+The same check is run on databases a broken compiler would build, at least one for each item
+above, and goes red on each. The absent columns are worked out here from the source's columns, and the metric
+definition's columns from the metrics' semantic model, apart from the catalogue.
 """
 
 import copy
@@ -77,7 +81,7 @@ def aggregate_columns(
     access: Doc, aggregates: Doc, persona: str, base: dict[str, list[str]]
 ) -> dict[str, Shape]:
     """The persona's aggregate tables, each as its aggregate grant shows it: the only tables of
-    `main` it holds, worked out from the aggregates catalogue apart from the compiler."""
+    `main` it may hold, worked out from the aggregates catalogue apart from the compiler."""
     granted = {
         g["product"]
         for g in access["grants"]
@@ -114,21 +118,74 @@ def answers(db: duckdb.DuckDBPyConnection, sql: str) -> bool:
     return True
 
 
+# The catalogue functions by qualified name, so a macro stored in the persona's database under the
+# same name cannot stand in for them.
+CATALOG = "system.main.current_database()"
+
+
 def held(db: duckdb.DuckDBPyConnection) -> dict[tuple[str, str], set[str]]:
     """Every table and view of the persona's own catalog, as (schema, name) lowercased as DuckDB
     compares names, with its columns."""
     rows = db.execute(
         "select lower(t.schema_name), lower(t.table_name), lower(c.column_name)"
-        " from (select schema_name, table_name from duckdb_tables()"
-        "  where database_name = current_database()"
-        "  union all select schema_name, view_name from duckdb_views()"
-        "  where database_name = current_database() and not internal) as t"
-        " left join duckdb_columns() as c on c.database_name = current_database()"
+        " from (select schema_name, table_name from system.main.duckdb_tables()"
+        f"  where database_name = {CATALOG}"
+        "  union all select schema_name, view_name from system.main.duckdb_views()"
+        f"  where database_name = {CATALOG} and not internal) as t"
+        f" left join system.main.duckdb_columns() as c on c.database_name = {CATALOG}"
         "  and c.schema_name = t.schema_name and c.table_name = t.table_name"
     ).fetchall()
     found: dict[tuple[str, str], set[str]] = {}
     for schema, table, column in rows:
         found.setdefault((schema, table), set()).update([column] if column else [])
+    return found
+
+
+def names(db: duckdb.DuckDBPyConnection, sql: str) -> list[str]:
+    return sorted(str(name) for (name,) in db.execute(sql).fetchall())
+
+
+def stored(db: duckdb.DuckDBPyConnection, persona: str) -> list[str]:
+    """The objects of the persona's own catalog other than tables and views that can hold a value:
+    a macro, a type it created, a sequence, a comment on a table, view or column, and a column
+    default."""
+    found: list[str] = []
+    for macro in names(
+        db,
+        "select schema_name || '.' || function_name from system.main.duckdb_functions()"
+        f" where database_name = {CATALOG}",
+    ):
+        found.append(f"{persona} holds the macro {macro}")
+    for kind in names(
+        db,
+        "select schema_name || '.' || type_name from system.main.duckdb_types()"
+        f" where database_name = {CATALOG} and not internal",
+    ):
+        found.append(f"{persona} holds the type {kind}")
+    for sequence in names(
+        db,
+        "select schema_name || '.' || sequence_name from system.main.duckdb_sequences()"
+        f" where database_name = {CATALOG}",
+    ):
+        found.append(f"{persona} holds the sequence {sequence}")
+    for commented in names(
+        db,
+        "select schema_name || '.' || table_name from system.main.duckdb_tables()"
+        f" where database_name = {CATALOG} and comment is not null"
+        " union all select schema_name || '.' || view_name from system.main.duckdb_views()"
+        f" where database_name = {CATALOG} and not internal and comment is not null"
+        " union all select schema_name || '.' || table_name || '.' || column_name"
+        f" from system.main.duckdb_columns() where database_name = {CATALOG}"
+        " and comment is not null",
+    ):
+        found.append(f"{persona} holds a comment on {commented}")
+    for defaulted in names(
+        db,
+        "select schema_name || '.' || table_name || '.' || column_name"
+        f" from system.main.duckdb_columns() where database_name = {CATALOG}"
+        " and column_default is not null",
+    ):
+        found.append(f"{persona} holds a default on {defaulted}")
     return found
 
 
@@ -157,10 +214,11 @@ def breaches(
     purposes: Doc,
     aggregated: dict[str, Shape],
 ) -> list[str]:
-    """Every way the persona's database departs from its purposes and aggregate grants, in names
-    only: a purpose table it lacks or cannot read, one holding a column the purpose does not list
-    or lacking one it lists, an aggregate table with other columns, a group twice or a group under
-    the minimum, and any table or view, in any schema, that is neither."""
+    """The ways the persona's database departs from its purposes and aggregate grants that this
+    checks, by name and count, not by value: a purpose table it lacks or cannot read, one holding a
+    column the purpose does not list or lacking one it lists, an aggregate table it lacks, one with
+    other columns, a group held twice, or a group whose payees are null or under the minimum, a
+    table or view of its catalog, in any schema, that is neither, and what `stored` lists."""
     found: list[str] = []
     tables = held(db)
     expected: dict[tuple[str, str], tuple[str, list[str]]] = {
@@ -189,10 +247,10 @@ def breaches(
             found.append(f"{persona} holds main.{table} as no aggregate: {', '.join(faults)}")
     for schema, table in sorted(set(tables) - set(expected) - {("main", t) for t in aggregated}):
         found.append(f"{persona} holds {schema}.{table}, which no purpose or aggregate gives it")
-    return found
+    return found + stored(db, persona)
 
 
-def test_each_persona_reads_its_purposes_and_nothing_else(
+def test_each_persona_s_database_shows_none_of_the_breaches_checked(
     as_persona: AsPersona,
     access: Doc,
     aggregates: Doc,
@@ -227,12 +285,13 @@ def swap_aggregate(plan: Plan, table: str, columns: tuple[Column, ...]) -> Plan:
     return Plan(plan.persona, tuple(raw if t is agg else t for t in plan.tables))
 
 
-# Changes made to the built database, with the source attached as the build attaches it.
-ALTERED = {
+# Changes made to the built database, with the source attached as the build attaches it: the
+# persona, the statements, and the breaches the check must show, in the order it shows them.
+ALTERED: dict[str, tuple[str, list[str], tuple[str, ...]]] = {
     "copy-a-product-table-under-another-name": (
         "group-controller",
         [f"create table main.ledger as select * from {SOURCE}.main.payments"],  # noqa: S608
-        "main.ledger, which no purpose",
+        ("main.ledger, which no purpose",),
     ),
     "copy-a-product-table-under-another-schema": (
         "group-controller",
@@ -240,18 +299,18 @@ ALTERED = {
             "create schema spare",
             f"create table spare.ledger as select * from {SOURCE}.main.payments",  # noqa: S608
         ],
-        "spare.ledger, which no purpose",
+        ("spare.ledger, which no purpose",),
     ),
     "add-a-view": (
         "group-controller",
         ["create view main.close as select * from group_close.payments"],
-        "main.close, which no purpose",
+        ("main.close, which no purpose",),
     ),
     "hold-an-aggregate-group-twice": (
         # Every group the metric owner's payments aggregate keeps, written a second time.
         "metric-owner",
         ["insert into main.payments_by_period select * from main.payments_by_period"],
-        "main.payments_by_period as no aggregate: a group held twice",
+        ("main.payments_by_period as no aggregate: a group held twice",),
     ),
     "add-a-column-under-a-new-name": (
         "group-controller",
@@ -259,18 +318,99 @@ ALTERED = {
             "alter table group_close.payments add column payee varchar",
             "update group_close.payments set payee = 'invented'",
         ],
-        "reads payee in",
+        ("reads payee in",),
+    ),
+    "drop-a-purpose-table": (
+        "group-controller",
+        ["drop table group_close.group_totals_left_out"],
+        ("cannot read group_close.group_totals_left_out, which group-close gives it",),
+    ),
+    "drop-an-aggregate-table": (
+        "metric-owner",
+        ["drop table main.payments_by_period"],
+        ("cannot read main.payments_by_period, which its aggregate grant",),
+    ),
+    "leave-an-aggregate-group-s-payees-null": (
+        "metric-owner",
+        [
+            "update main.payments_by_period set payees = null"
+            " where rowid = (select min(rowid) from main.payments_by_period)"
+        ],
+        ("main.payments_by_period as no aggregate: a group under the minimum",),
+    ),
+    "store-a-macro": (
+        "group-controller",
+        [
+            "create macro main.leak() as table"
+            f" select document_number from {SOURCE}.main.payments"  # noqa: S608
+        ],
+        ("holds the macro main.leak",),
+    ),
+    "store-a-type": (
+        "group-controller",
+        [
+            "create type main.leak as enum (select distinct document_number"
+            f" from {SOURCE}.main.payments where document_number is not null)"  # noqa: S608
+        ],
+        ("holds the type main.leak",),
+    ),
+    "store-a-sequence": (
+        "group-controller",
+        ["create sequence main.leak start 4242"],
+        ("holds the sequence main.leak",),
+    ),
+    "store-a-comment-on-a-column": (
+        "group-controller",
+        ["comment on column group_close.payments.amount is 'invented'"],
+        ("holds a comment on group_close.payments.amount",),
+    ),
+    "store-a-comment-on-a-table": (
+        "group-controller",
+        ["comment on table group_close.payments is 'invented'"],
+        ("holds a comment on group_close.payments",),
+    ),
+    "store-a-comment-on-a-view": (
+        "group-controller",
+        [
+            "create view main.close as select * from group_close.payments",
+            "comment on view main.close is 'invented'",
+        ],
+        ("main.close, which no purpose", "holds a comment on main.close"),
+    ),
+    "store-a-column-default": (
+        "group-controller",
+        ["alter table group_close.payments alter column amount set default 4242"],
+        ("holds a default on group_close.payments.amount",),
+    ),
+    "hide-a-table-behind-a-macro-named-like-the-catalogue": (
+        # A full copy of the payments, and a stored macro that would leave it out of an unqualified
+        # read of the catalogue.
+        "group-controller",
+        [
+            f"create table main.ledger as select * from {SOURCE}.main.payments",  # noqa: S608
+            "create macro main.duckdb_tables() as table select * from"
+            " system.main.duckdb_tables() where table_name <> 'ledger'",
+        ],
+        ("main.ledger, which no purpose", "holds the macro main.duckdb_tables"),
     ),
 }
 
 
 def broken(
     name: str, plans: Callable[[str], Plan], kinds: dict[str, dict[str, str]]
-) -> tuple[str, Plan, str]:
-    """The persona whose plan a change breaks, the broken plan, and the breach it must show."""
+) -> tuple[str, Plan, tuple[str, ...]]:
+    """The persona whose plan a change breaks, the broken plan, and the breaches it must show."""
     if name in ALTERED:
-        persona, _, breach = ALTERED[name]
-        return persona, plans(persona), breach
+        persona, _, shown = ALTERED[name]
+        return persona, plans(persona), shown
+    persona, plan, breach = broken_plan(name, plans, kinds)
+    return persona, plan, (breach,)
+
+
+def broken_plan(
+    name: str, plans: Callable[[str], Plan], kinds: dict[str, dict[str, str]]
+) -> tuple[str, Plan, str]:
+    """The persona whose plan a change to the plan breaks, the broken plan, and its breach."""
     if name == "leave-the-base-table-in":
         plan = plans("accountant-chicago")
         whole = dataclasses.replace(payments_of(plan), purpose="main")
@@ -380,7 +520,7 @@ def test_the_check_goes_red_on_a_database_a_broken_compiler_builds(
         return compile_persona(access, columns, aggregates, purposes, persona, schema)
 
     kinds = {table: dict(cols) for table, cols in schema.items()}
-    persona, plan, breach = broken(change, plans, kinds)
+    persona, plan, shown = broken(change, plans, kinds)
     path = materialise(plan, warehouse, tmp_path)
     if change in ALTERED:
         with duckdb.connect(str(path)) as build:
@@ -396,13 +536,13 @@ def test_the_check_goes_red_on_a_database_a_broken_compiler_builds(
         )
     finally:
         db.close()
-    assert len(found) == 1 and breach in found[0], found
+    assert len(found) == len(shown), found
+    assert all(want in got for want, got in zip(shown, found, strict=True)), found
 
 
 # The columns the purposes leave out of each persona's purpose tables, worked out from the source's
 # columns: before purposes, a persona with a row grant on a product read every column of every
-# table of it. A column absent can still be worked out from the columns kept: the one derivation
-# tested here follows.
+# table of it.
 ABSENT_COLUMNS = {
     "group-controller": {
         "payments": [
@@ -470,13 +610,12 @@ def test_the_columns_absent_from_each_persona_s_purpose_tables(
     assert found == ABSENT_COLUMNS
 
 
-def test_the_group_controller_reads_whether_a_payee_is_a_person_from_the_organisation_name(
+def test_the_group_controller_s_organisation_name_is_empty_exactly_on_payments_to_a_person(
     as_persona: AsPersona, warehouse: Path
 ) -> None:
-    """Group close leaves `vendor_is_hashed` out but keeps the organisation paid, which the models
-    leave empty exactly for a person: so whether each payment went to a person stays readable to
-    the group controller. With no row key kept, the payments are compared as a multiset of entity,
-    date, amount and that flag. A change that closes this must change this test."""
+    """Group close holds neither `vendor_is_hashed` nor the row key, and holds the organisation
+    paid: over the sample, the payments with no organisation name are exactly those to a person,
+    compared as a multiset of entity, date, amount and that flag."""
     controller = as_persona("group-controller")
     for absent in ("vendor_is_hashed", "payment_key"):
         with pytest.raises(duckdb.BinderException):
@@ -494,11 +633,9 @@ def test_the_group_controller_reads_whether_a_payee_is_a_person_from_the_organis
     assert kept == truth
 
 
-def test_a_purpose_that_lists_every_column_serves_a_duty_that_reads_every_column(
+def test_payment_review_and_audit_are_the_purposes_that_list_every_column_of_their_tables(
     access: Doc, purposes: Doc, warehouse: Path
 ) -> None:
-    """Two purposes give every column of their tables; the duties of their personas are the
-    ones that follow a payment or a figure to everything recorded about it, stated here."""
     base = product_columns(access, warehouse)
     whole = {
         p["id"]
