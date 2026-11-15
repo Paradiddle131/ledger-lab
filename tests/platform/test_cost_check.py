@@ -308,6 +308,7 @@ def test_every_call_is_a_read_on_the_lab_project_only() -> None:
     assert code == 0, out
     assert gcp.calls, "the check made no call to judge"
     assert all(f"--project_id={PROJECT}" in c for c in gcp.calls if c[0] == "bq"), gcp.calls
+    assert all(PROJECT in " ".join(c) for c in gcp.calls if c[0] == "curl"), gcp.calls
     for command in gcp.calls:
         if command[0] == "curl":
             method = command[command.index("-X") + 1] if "-X" in command else "GET"

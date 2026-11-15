@@ -20,8 +20,9 @@ class NoLabProjectError(RuntimeError):
 
 
 def foreign_session(env: Mapping[str, str] | None = None) -> bool:
-    """Whether the session carries another lab's `GCP_PROJECT`, and so its credential."""
-    return bool((os.environ if env is None else env).get(FOREIGN, "").strip())
+    """Whether the session carries another lab's `GCP_PROJECT`, and so its credential: any
+    non-empty value, spaces included, as the autopilot profile's shell check reads it."""
+    return bool((os.environ if env is None else env).get(FOREIGN, ""))
 
 
 def lab_project_or_none(env: Mapping[str, str] | None = None) -> str | None:

@@ -4,7 +4,7 @@
 # whose credential is another lab's (`platform/gcp_project.py`); needs `uv sync --group bigquery`;
 # every job is capped by maximum_bytes_billed.
 ledger_lab:
-  target: "{{ 'bigquery' if env_var('LEDGER_LAB_GCP_PROJECT', '') | trim and not env_var('GCP_PROJECT', '') | trim else 'local' }}"
+  target: "{{ 'bigquery' if env_var('LEDGER_LAB_GCP_PROJECT', '') | trim and not env_var('GCP_PROJECT', '') else 'local' }}"
   outputs:
     local:
       type: duckdb
