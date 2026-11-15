@@ -64,12 +64,12 @@ them does not excuse them:
 - a schema name a contract holds on `origin/main` missing from that contract in the working tree,
   since the CLI's one `Removed schema` line would excuse every break under it;
 - a contract of `origin/main` whose id no working-tree contract holds; a working-tree file YAML
-  cannot read or without an `id`; two working-tree files with one id; a matched contract the CLI
-  cannot read;
+  cannot read, without an `id` or whose `id` is not text; two working-tree files with one id; a
+  matched contract the CLI cannot read;
 - a clone without `origin/main`, or whose `origin/main` tree or contract files git cannot read (a
-  partial clone whose remote is gone), or whose `origin/main` contract YAML cannot read or has no
-  `id`: the gate cannot compare, says why (for a missing `origin/main`, how to fetch it) and exits
-  with failure.
+  partial clone whose remote is gone), or whose `origin/main` contract YAML cannot read, has no
+  `id` or has an `id` that is not text: the gate cannot compare, says why (for a missing
+  `origin/main`, how to fetch it) and exits with failure.
 
 Passing, as the tests show: an optional column added, a nullable column made required, an accepted
 value removed, a bound tightened, a description or a rule's wording changed, a new rule, a column
@@ -92,6 +92,10 @@ Limits, what the gate does not check:
 - a contract new to the working tree is not read by the CLI and has no version or list to check:
   only its YAML, its id, its shape and the rules above that look across contracts apply to it;
 - a nested property on `origin/main` is not read;
+- the rule on a table `origin/main` describes under another contract id or schema name reads
+  properties: a working-tree schema entry with no properties over such a table is not refused by
+  it (the rule on two schema entries over one table still refuses it while another schema entry
+  of the working tree describes that table);
 - the CLI decides which other changes it grades as errors; one it grades lower passes unless a rule
   above catches it;
 - the gate reads contracts, not data: a classification can be lost across two changes (an
@@ -179,6 +183,8 @@ def parsed(path: str, text: str) -> Contract | str:
         return f"{path} is unreadable: {str(e).splitlines()[0]}"
     if not isinstance(contract, dict) or not contract.get("id"):
         return f"{path} is unreadable: no contract id"
+    if not isinstance(contract["id"], str):
+        return f"{path} is unreadable: its contract id {contract['id']!r} is not text"
     return contract
 
 

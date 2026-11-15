@@ -7,6 +7,7 @@ Every contract here is the committed one changed inside the test, in a throwaway
 """
 
 import copy
+import re
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -199,6 +200,14 @@ FAILING: dict[str, tuple[Change, str]] = {
     "a break listed twice": (
         declaring("2.0.0", listed([*BREAKS, REMOVED_NAME])),
         f"lists a break twice: {REMOVED_NAME}",
+    ),
+    "an entry without a change": (
+        declaring("2.0.0", [*listed(BREAKS), {"reason": "r"}]),
+        f"{gate.DECLARED} entry 6 names no change",
+    ),
+    "an entry with a blank change": (
+        declaring("2.0.0", [*listed(BREAKS), {"change": " ", "reason": "r"}]),
+        f"{gate.DECLARED} entry 6 names no change",
     ),
     "a list that is not a list": (
         declaring("2.0.0", "everything the split needs"),
@@ -564,6 +573,16 @@ def schema(
     return {"name": name, "physicalName": table, "properties": props}
 
 
+def unnamed(entry: dict[str, Any]) -> dict[str, Any]:
+    """The schema entry or property without its name."""
+    return {k: v for k, v in entry.items() if k != "name"}
+
+
+def with_unnamed_property(entry: dict[str, Any]) -> dict[str, Any]:
+    entry["properties"].append(unnamed(entry["properties"][0]) | {"physicalName": "b"})
+    return entry
+
+
 NEW = "models/contracts/payees.odcs.yaml"
 WITHOUT_PAYEE = declared(drop("vendor_name"), "2.0.0")
 ACROSS: dict[str, tuple[dict[str, str], str]] = {
@@ -592,6 +611,20 @@ ACROSS: dict[str, tuple[dict[str, str], str]] = {
             ),
         },
         "table payees is described by both payees's schema payees and payees's schema view",
+    ),
+    "a new contract with a schema entry without a name": (
+        {
+            PATH: CONTRACT.read_text(),
+            NEW: contract("payees", [unnamed(schema("payees", "payees", "a"))]),
+        },
+        "payees: a schema entry has no name, which no version can declare",
+    ),
+    "a new contract with a property without a name": (
+        {
+            PATH: CONTRACT.read_text(),
+            NEW: contract("payees", [with_unnamed_property(schema("payees", "payees", "a"))]),
+        },
+        "payees: a property of schema payees has no name, which no version can declare",
     ),
     "a new contract with two schemas of one name": (
         {
@@ -639,6 +672,14 @@ def test_a_published_contract_of_two_schemas_over_one_table_fails_until_fixed(
         assert not ok
         assert "table payments is described by both payments's schema payments and" in report
         assert "now under" not in report and "describes table" not in report, report
+    before = yaml.safe_load(doubled)
+    fixed = yaml.safe_load(doubled)
+    fixed["schema"][1]["physicalName"] = "payments_view"
+    declare = gate.breaks(before, fixed)[0]
+    assert declare, "pointing the twin at a table of its own is a break the CLI reports"
+    declaring("2.0.0", listed(declare))(fixed)
+    ok, report = gate.check(with_files(repo, {PATH: yaml.safe_dump(fixed, sort_keys=False)}))
+    assert ok, report
 
 
 @pytest.mark.parametrize(
@@ -676,6 +717,45 @@ def test_no_version_declares_a_contract_gone_or_doubled(published_repo: Path, na
     ok, report = gate.check(with_files(published_repo, files))
     assert not ok, report
     assert says in report
+
+
+def with_id(text: str, cid: object) -> str:
+    """The contract `text` with its id set to `cid`, or without an id when `cid` is None."""
+    body = yaml.safe_load(text)
+    body.pop("id")
+    if cid is not None:
+        body["id"] = cid
+    return yaml.safe_dump(body, sort_keys=False)
+
+
+NO_TEXT_ID: dict[str, tuple[object, str]] = {
+    "no id": (None, "is unreadable: no contract id"),
+    "a number as id": (42, "is unreadable: its contract id 42 is not text"),
+    "a list as id": (["x"], "is unreadable: its contract id ['x'] is not text"),
+}
+
+
+@pytest.mark.parametrize("name", list(NO_TEXT_ID))
+def test_a_working_tree_contract_without_a_text_id_fails_the_gate(
+    published_repo: Path, name: str
+) -> None:
+    cid, says = NO_TEXT_ID[name]
+    new = contract("payees", [schema("x", "payments", "vendor_name")])
+    files = {PATH: CONTRACT.read_text(), NEW: with_id(new, cid)}
+    ok, report = gate.check(with_files(published_repo, files))
+    assert not ok, report
+    assert f"- {NEW} {says}" in report, report
+
+
+@pytest.mark.parametrize("name", list(NO_TEXT_ID))
+def test_an_origin_main_contract_without_a_text_id_stops_the_gate(
+    tmp_path: Path, name: str
+) -> None:
+    cid, says = NO_TEXT_ID[name]
+    repo = git_repo(tmp_path, {PATH: with_id(CONTRACT.read_text(), cid)})
+    with_files(repo, {PATH: CONTRACT.read_text()})
+    with pytest.raises(gate.GateError, match=re.escape(f"origin/main's {PATH} {says}")):
+        gate.check(repo)
 
 
 def test_no_version_declares_an_unreadable_contract(published_repo: Path) -> None:
