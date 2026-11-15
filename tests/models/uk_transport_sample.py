@@ -56,9 +56,9 @@ def landed() -> list[tuple[str | None, ...]]:
     with REGISTER.open() as f:
         register = Register(
             Record(
-                r["Entity.LegalName"],
-                r["Entity.EntityCategory"],
-                r["Entity.LegalForm.EntityLegalFormCode"],
+                r["Entity_LegalName"],
+                r["Entity_EntityCategory"],
+                r["Entity_LegalForm_EntityLegalFormCode"],
             )
             for r in csv.DictReader(f)
         )

@@ -193,7 +193,7 @@ def test_the_real_landing_matches_the_sample_and_every_vouched_name(tmp_path: Pa
         str(n)
         for (n,) in duckdb.connect()
         .execute(
-            'select distinct "Entity.LegalName" from read_parquet(?)', [str(landing / REGISTER)]
+            'select distinct "Entity_LegalName" from read_parquet(?)', [str(landing / REGISTER)]
         )
         .fetchall()
     ]

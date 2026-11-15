@@ -67,12 +67,13 @@ venv = ".venv"
 [tool.pytest.ini_options]
 # The live stack test needs `make stack-test` to have started this checkout's stack, a landed
 # test needs its source landed, a pages test reads publishers' pages over the network, a tofu
-# test needs the pinned OpenTofu initialised (`make fences-validate` runs them), and the bucket
-# test reads the lab's landing bucket, so a plain run (and `make check`) leaves all five out;
+# test needs the pinned OpenTofu initialised (`make fences-validate` runs them), the bucket
+# test reads the lab's landing bucket, and a warehouse test reads the lab's loaded tables, so a
+# plain run (and `make check`) leaves all six out;
 # `-m <marker>` on the command line selects them.
 addopts = [
   "-q", "--strict-markers", "--strict-config", "-ra", "-m",
-  "not stack and not landed and not pages and not tofu and not bucket",
+  "not stack and not landed and not pages and not tofu and not bucket and not warehouse",
 ]
 markers = [
   "stack: needs this checkout's running container stack (`make stack-test`)",
@@ -80,6 +81,7 @@ markers = [
   "pages: reads the publishers' pages for the pinned files over the network",
   "tofu: has the pinned OpenTofu evaluate platform/gcp after `tofu init` (`make fences-validate`)",
   "bucket: lists the lab's landing bucket and compares it with the local landing, reading only",
+  "warehouse: reads the lab's `landed` tables and compares them with the local landing, by capped queries",
 ]
 testpaths = ["tests"]
 # platform/ holds scripts run by path; tests import them as top-level modules.

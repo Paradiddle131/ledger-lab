@@ -9,7 +9,7 @@
 with countries as (
     select string_agg(country || ' ' || records, ', ' order by country) as records_of_countries
     from (
-        select "Entity.LegalAddress.Country" as country, count(*) as records
+        select "Entity_LegalAddress_Country" as country, count(*) as records
         from landed
         group by 1
     )
@@ -28,11 +28,11 @@ left_out as (
 select
     landed.*,
     cast(
-        strftime(try_cast(left("Registration.LastUpdateDate", 10) as date), '%Y%m%d')
+        strftime(try_cast(left("Registration_LastUpdateDate", 10) as date), '%Y%m%d')
         as integer
     ) as updated_on,
     countries.records_of_countries,
-    cast("Entity.LegalForm.EntityLegalFormCode" in ('8888', '9999') as integer)
+    cast("Entity_LegalForm_EntityLegalFormCode" in ('8888', '9999') as integer)
         as is_without_real_legal_form,
     left_out.sole_proprietors as left_out_sole_proprietors,
     left_out.unknown_category as left_out_unknown_category,

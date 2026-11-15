@@ -6,9 +6,10 @@ are (`chicago-contracts`), so no name holds a slash. The bucket must be the lab'
 `LEDGER_LAB_GCP_PROJECT` through `platform/gcp_project.py` as `platform/gcp/landing.tf` names it;
 any other bucket, a folder inside it, or another scheme is refused before any call.
 
-One landing at a time: a landing first creates the lock object `.landing.lock` at the bucket's
-root, only if no object of that name exists (a generation-match-0 precondition), and deletes it at
-the end; a landing that finds it refuses, naming the lock and how to remove it. A killed landing,
+One landing at a time, and no load from the bucket during one (`load.py` holds the same lock for
+its whole run): a landing first creates the lock object `.landing.lock` at the bucket's root, only
+if no object of that name exists (a generation-match-0 precondition), and deletes it at the end; a
+landing that finds it refuses, naming the lock and how to remove it. A killed landing,
 or one whose rollback failed, leaves the lock behind on purpose: nothing lands until an operator
 has checked the landed files and deleted it by hand.
 
@@ -46,8 +47,8 @@ SCHEME = "gs://"
 LOCK = ".landing.lock"
 PROJECT_SEAM = Path(__file__).resolve().parent.parent / "platform" / "gcp_project.py"
 HELD = (
-    f"another landing holds the lock object {LOCK} at the landing bucket's root, or a killed one"
-    " left it: once no landing runs and the landed files are checked, delete it by hand"
+    f"another landing or load holds the lock object {LOCK} at the landing bucket's root, or a"
+    " killed one left it: once none runs and the landed files are checked, delete it by hand"
     f" (`gcloud storage rm gs://<lab project>-landing/{LOCK}`)"
 )
 
@@ -165,7 +166,8 @@ class Bucket:
         except Exception as error:
             raise BucketError(f"cannot delete {name} ({type(error).__name__})") from None
 
-    def _lock(self) -> None:
+    def lock(self) -> None:
+        """Create the lock object, only if none exists: one landing or load at a time."""
         try:
             self.fs.pipe_file(self._at(LOCK), b"", mode="create")
         except FileExistsError:
@@ -173,9 +175,12 @@ class Bucket:
         except Exception as error:
             raise BucketError(f"cannot create the lock {LOCK} ({type(error).__name__})") from None
 
+    def unlock(self) -> None:
+        self._remove(LOCK)
+
     def land_all(self, files: Mapping[str, bytes]) -> list[str]:
         """Land every file or none, by name, leaving what was landed before as it was."""
-        self._lock()
+        self.lock()
         self.left_behind = []
         partials: dict[str, str] = {}
         aside: dict[str, str] = {}
@@ -232,5 +237,5 @@ class Bucket:
                 # An old object's copy goes only now: until here it may be the only copy.
                 for old in aside.values():
                     self._discard(old)
-                self._remove(LOCK)
+                self.unlock()
         return list(files)
