@@ -55,7 +55,7 @@ metrics:
       numerator: chicago_repeat_rows
       denominator: chicago_payment_rows
     config:
-      meta: {owner: payables-clerk, term: duplicate-payment-rate, role: headline}
+      meta: {owner: payables-clerk, term: duplicate-payment-rate, role: headline, version: 1}
 
   - name: duplicate_payment_amount_rate
     label: Duplicate-payment rate by amount
@@ -68,7 +68,7 @@ metrics:
       numerator: chicago_repeat_amount
       denominator: chicago_payment_amount
     config:
-      meta: {owner: payables-clerk, term: duplicate-payment-rate, role: headline}
+      meta: {owner: payables-clerk, term: duplicate-payment-rate, role: headline, version: 1}
 
   - name: chicago_payment_rows
     label: Chicago payment rows served
@@ -80,7 +80,7 @@ metrics:
       measure: payment_rows
     filter: "{{ Dimension('payment__entity_id') }} = 'chicago'"
     config:
-      meta: {owner: payables-clerk, term: duplicate-payment-rate, role: input}
+      meta: {owner: payables-clerk, term: duplicate-payment-rate, role: input, version: 1}
 
   - name: chicago_repeat_rows
     label: Chicago payment rows served again
@@ -92,7 +92,7 @@ metrics:
       measure: repeat_rows
     filter: "{{ Dimension('payment__entity_id') }} = 'chicago'"
     config:
-      meta: {owner: payables-clerk, term: duplicate-payment-rate, role: input}
+      meta: {owner: payables-clerk, term: duplicate-payment-rate, role: input, version: 1}
 
   - name: chicago_payment_amount
     label: Chicago payments served, in dollars
@@ -104,7 +104,7 @@ metrics:
       measure: payment_amount
     filter: "{{ Dimension('payment__entity_id') }} = 'chicago'"
     config:
-      meta: {owner: payables-clerk, term: duplicate-payment-rate, role: input}
+      meta: {owner: payables-clerk, term: duplicate-payment-rate, role: input, version: 1}
 
   - name: chicago_repeat_amount
     label: Chicago payments served again, in dollars
@@ -116,4 +116,4 @@ metrics:
       measure: repeat_amount
     filter: "{{ Dimension('payment__entity_id') }} = 'chicago'"
     config:
-      meta: {owner: payables-clerk, term: duplicate-payment-rate, role: input}
+      meta: {owner: payables-clerk, term: duplicate-payment-rate, role: input, version: 1}
