@@ -16,13 +16,21 @@ flags:
   `main` and the persona's purpose schemas, a comment on a table, view or column, and a column
   default, a generated column among them (DuckDB reports its expression as the column's default).
 Its limits:
-- it compares names and types; in an aggregate table it also counts the rows and the distinct
-  groups, and compares each group's payees with the minimum;
+- of what those functions report it compares names, column types and whether each entry is a
+  table or a view, and checks whether a comment or a column default is there, not what it says;
+  it queries each purpose table for the purpose's listed columns and checks only that the query
+  answers; in an aggregate table it also counts the rows and the distinct groups, and compares
+  each group's payees with the minimum;
 - it does not look at which rows a purpose table holds or how many: one holding another entity's
   rows, or each row twice, passes it; the entity filter is checked elsewhere:
   `tests/access/test_compile.py`, `tests/access/test_visibility.py` and
-  `tests/access/test_identities.py` go red when the compiler's entity filter is dropped from its
-  purpose and aggregate tables;
+  `tests/access/test_identities.py` go red when it is dropped from the purpose tables, and
+  `tests/access/test_compile.py` when it is dropped from the aggregate tables;
+- it does not look at which entities' rows an aggregate table is grouped from: one built from
+  rows of entities the persona's grant does not give it passes it, as long as its groups are
+  distinct and no group's payees are null or under the minimum; of the tests `make test` runs, only
+  `tests/access/test_compile.py` goes red when the entity filter is dropped from the aggregate
+  tables;
 - it does not look at the values a purpose table's listed column holds: a listed column
   overwritten with another listed column's values passes it;
 - of the catalogue it reads only the functions above and `current_database()`.
