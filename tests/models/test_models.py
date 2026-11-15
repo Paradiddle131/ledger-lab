@@ -9,6 +9,8 @@ these tests never reach BigQuery whatever the session's environment holds.
 import csv
 import json
 import os
+import shutil
+import subprocess
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -17,7 +19,10 @@ import jinja2
 import pytest
 import yaml
 
-from tests.models.dbt_build import PROJECT, Build, dbt, query
+from models.contracts import engine
+from tests.models.dbt_build import DBT, PROJECT, Build, dbt, query
+
+GIT = shutil.which("git") or "git"
 
 with (PROJECT / "seeds" / "calendars" / "fiscal_year_starts.csv").open() as starts:
     ENTITIES = {row["entity_id"] for row in csv.DictReader(starts)}
@@ -198,3 +203,58 @@ def test_a_date_outside_the_calendar_fails_the_date_test(build: Build) -> None:
         ("chicago", "2019-06-30"),
         ("uk-transport", "2023-03-31"),
     ]
+
+
+REPO = PROJECT.parent
+
+
+def test_the_readme_build_runs_in_a_fresh_clone_with_no_target_folder(tmp_path: Path) -> None:
+    """The README's build, run from a clone's root with the profile's default database path, needs
+    no folder made first: dbt makes the project's target folder, where that path points, before it
+    opens the database."""
+    clone = tmp_path / "clone"
+    listed = subprocess.run(
+        [GIT, "-C", str(REPO), "ls-files", "-z", "--cached", "--others", "--exclude-standard"]
+        + ["--", "models", "semantics"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    for name in filter(None, listed.split("\0")):
+        if (REPO / name).is_file():
+            (clone / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(REPO / name, clone / name)
+    assert not (clone / "target").exists() and not (clone / "models" / "target").exists()
+    unset = {"LEDGER_LAB_GCP_PROJECT", "LEDGER_LAB_DUCKDB_PATH", "DBT_TARGET_PATH", "DBT_LOG_PATH"}
+    env = {k: v for k, v in os.environ.items() if k not in unset}
+    env["DBT_SEND_ANONYMOUS_USAGE_STATS"] = "false"
+    result = subprocess.run(
+        [str(DBT), "build", "--project-dir", "models", "--profiles-dir", "models"]
+        + ["--target", "local", "--select", "fiscal_year_starts"]
+        + ["--vars", json.dumps({"source_rows": "sample"})],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+        cwd=clone,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (clone / LOCAL_DATABASE).is_file()
+
+
+def default_database_path() -> str:
+    """The local output's database path when the environment names none, rendered as dbt does."""
+    output = yaml.safe_load((PROJECT / "profiles.yml").read_text())["ledger_lab"]["outputs"]
+    template = jinja2.Environment(autoescape=False).from_string(output["local"]["path"])  # noqa: S701
+    return template.render(env_var=lambda name, default="": default)
+
+
+LOCAL_DATABASE = "models/target/ledger_lab.duckdb"
+
+
+def test_the_local_database_defaults_to_the_projects_target_folder() -> None:
+    assert default_database_path() == LOCAL_DATABASE
+
+
+def test_the_contract_test_reads_the_database_the_default_build_writes() -> None:
+    assert REPO / default_database_path() == engine.BUILD

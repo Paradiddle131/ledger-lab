@@ -3,8 +3,9 @@
 The CLI's DuckDB engine needs DuckDB 1.5, which conflicts with the project's 2.0 and cannot open
 the database dbt builds, so the engine runs in a throwaway environment from the lock's `contract`
 group, never fetched here (`make sync` puts it in uv's cache), over a copy of the build written in
-1.5's storage format: `target/ledger_lab.duckdb` becomes `target/ledger_lab.cli.duckdb`, the file
-the contract's `local` server names. The test therefore runs on the older engine over a copy, not
+1.5's storage format: `models/target/ledger_lab.duckdb`, where the profile's local output writes by
+default, becomes `target/ledger_lab.cli.duckdb` under the repository's root, the file the contract's
+`local` server names. The test therefore runs on the older engine over a copy, not
 on the project's own engine, until the CLI supports DuckDB 2.0.
 """
 
@@ -18,12 +19,13 @@ import duckdb
 
 REPO = Path(__file__).resolve().parents[2]
 CONTRACT = REPO / "models/contracts/payments.odcs.yaml"
-BUILD = REPO / "target/ledger_lab.duckdb"
+BUILD = REPO / "models/target/ledger_lab.duckdb"
 COPY = REPO / "target/ledger_lab.cli.duckdb"
 
 
 def for_the_cli(database: Path, target: Path) -> Path:
     """A copy of a dbt build in DuckDB 1.5's storage format, which the CLI's engine reads."""
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.unlink(missing_ok=True)
     with duckdb.connect() as db:
         db.execute("attach ? as build (read_only)", [str(database)])
