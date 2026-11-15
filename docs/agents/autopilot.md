@@ -4,7 +4,7 @@ Unattended cloud wakes on this repo follow the `cloud:autopilot` skill (if missi
 A wake with no `~/.claude/cloud-target` (the environment's setup didn't run) first runs `bash <clone>/cloud/setup.sh ledger-lab`.
 The routine prompt: "Follow `docs/agents/autopilot.md` in ledger-lab and do one wake." (optionally "on #n").
 Standing permission: push the item branches `claude/<n>-<slug>` and the existing branch of an open agent PR being resumed, open and edit their PRs, issues and labels, comment, and merge under the merge policy below, without asking.
-Every item is one branch and one PR (a new item's branch is `claude/<n>-<slug>`; a PR an attended session opened keeps the branch it has), reviewed by the `review` skill and merged by the wake once its gates and review records pass, unless the merge policy holds it.
+Every item is one branch and one PR (a new item's branch is `claude/<n>-<slug>`; an open agent PR being resumed keeps its branch), reviewed by the `review` skill and merged by the wake once its gates and review records pass, unless the merge policy holds it.
 
 ## Merge policy
 
@@ -50,4 +50,4 @@ No `local` gates: cloud is the only environment.
 
 ## Known conditions
 
-- Which environment a session is in: only this lab's own environment may call GCP, on the project `LEDGER_LAB_GCP_PROJECT` names (`platform/gcp_project.py`) with the credential it injects; check with `[ -n "${LEDGER_LAB_GCP_PROJECT:-}" ] && [ -z "${GCP_PROJECT:-}" ]`, printing no value; when the check fails, make no GCP call and label the item `needs-gcp`.
+- A session outside this lab's own environment carries a GCP credential that is another lab's: `[ -n "${LEDGER_LAB_GCP_PROJECT:-}" ] && [ -z "${GCP_PROJECT:-}" ]` fails there (run it on the session as provisioned, printing no value, setting neither variable); make no GCP call and label the item `needs-gcp`; seen 2026-11-14.
