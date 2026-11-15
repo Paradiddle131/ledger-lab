@@ -15,6 +15,11 @@ flags:
 
 # The fiscal years the calendars cover, the same for every entity, each labelled by the calendar
 # year it starts in; the period-status seed holds a row for every period of these years.
+# The ECB rates (`ecb-rates` in ingest/sources.yaml) start at their first publication of 2023, on
+# 2 January, so 1 January 2023, the first day of the calendar-year entities' first fiscal year, has
+# no rate: a dated figure on it leaves its entity's first period out of the group totals whole, as
+# `no-rate` (the Dutch figures have no day). A `first` year before 2023 needs the rates' pin moved
+# back with it.
 vars:
   fiscal_years:
     first: 2023
