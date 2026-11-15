@@ -4,8 +4,8 @@
 #
 # A persona with a `read` or `edit` grant (access/personas.yaml) on a product the models build
 # tables of reads its rows only through its purposes: the local engine stores each purpose's
-# columns of a table, and nothing else of it, as `<purpose>.<table>` in the persona's database
-# (the purpose's id with `_` for `-`), and the table itself is not there (access/compile.py).
+# columns of a table as `<purpose>.<table>` in the persona's database (the purpose's id with `_`
+# for `-`), and the table itself is not there (access/compile.py).
 # A purpose narrows columns on top of the grants and the policy tags, and replaces neither: its
 # rows are still only the entities the persona's grants name, and a tagged column it lists is
 # still clear or masked as access/columns.yaml says for the persona.
@@ -16,18 +16,15 @@
 # and a row grant on a product with tables but no purpose of it. A product with no tables yet
 # needs no purpose until the models build one.
 #
-# A purpose lists every column it needs, by name, so a column the models add later reaches no one
-# until a purpose lists it. Two purposes below hold every column of their tables today, because
-# the duty they serve follows a payment or a figure to everything recorded about it; the other two
-# leave out columns that personas read before purposes existed. A column left out can still be
-# worked out from the columns a purpose keeps: each purpose's comment states the derivations found
-# so far, as known limits, and says which are tested.
+# A purpose lists its columns by name, so a column the models add later is in no purpose's table
+# until a purpose lists it. Each purpose's comment says which columns its tables hold.
+#
+# A purpose limits which columns a persona's database holds; it makes no claim about what can be
+# worked out from the columns it holds, and the tracker holds what review has found.
 purposes:
   # Booking and reconciling one entity's payments, paying them, and judging the entries drafted
-  # from them: each of these follows one payment to its payee, its document and the contract it
-  # was paid against, so every column is needed. A masked reader still reads the tagged columns
-  # masked. Known limit: the row key leads back to the published row, whose document numbers the
-  # purpose holds anyway.
+  # from them. Its payments table holds every column of the product's payments table, the tagged
+  # ones clear or masked as access/columns.yaml says for the persona.
   - id: payment-review
     for: Booking, reconciling, paying and approving payments one by one.
     personas:
@@ -55,16 +52,8 @@ purposes:
         - vendor_organisation_name
         - vendor_person_key
         - document_reference
-  # Closing the group's periods: each entity's payments summed by fiscal period, translated at the
-  # day's rate and at constant rates, repeats left out, and the group totals in full. Its payments
-  # table keeps the organisation paid, to find a payment between two of the group's entities
-  # (intercompany), which the group's figures must remove, and leaves out the columns no group
-  # figure sums or groups by: payment_key, vendor_name, vendor_is_hashed, vendor_person_key,
-  # document_number, document_reference, contract_number and award_after_revisions.
-  # Known limits: whether a payee is a person can be read on every payment, since the organisation
-  # name is empty exactly for a person (tested in tests/access/test_purposes.py); and a payment's
-  # amount and date can be matched to the publisher's public file, as ARCHITECTURE.md's line on
-  # the column list says for the masked readers (not tested here).
+  # Closing the group's periods. Its payments table holds the nine columns listed below; its
+  # group totals and left-out figures tables hold every column of theirs.
   - id: group-close
     for: Summing and translating every entity's payments into the group's figures by period.
     personas: [group-controller]
@@ -104,9 +93,9 @@ purposes:
         - payees
         - currency
         - amount
-  # Defining and versioning the governed metrics over the group totals: its group totals table
+  # Defining and versioning the governed metrics over the group totals. Its group totals table
   # holds the nine columns the metrics' semantic model reads (semantics/metricflow/group_totals.yml,
-  # held equal by a test), and it holds no table of the left-out figures, which no metric reads.
+  # held equal by a test); it has no table of the left-out figures.
   - id: metric-definition
     for: Defining and versioning the governed metrics on the group totals.
     personas: [metric-owner]
@@ -121,10 +110,9 @@ purposes:
         - reporting_currency
         - amount_at_constant_rates
         - constant_rates_on
-  # Reading everything there is and changing nothing: every column of every table the auditor's
-  # grants reach. Whether the auditor reads the tagged columns in clear or masked is open with the
-  # owner and is access/columns.yaml's line, not this one. Known limit: the row key leads back to
-  # the published row, whose document numbers the purpose holds anyway.
+  # Reading every record and changing nothing. Its payments, group totals and left-out figures
+  # tables hold every column of theirs, the tagged ones clear or masked as access/columns.yaml says
+  # for the auditor, which is open with the owner there.
   - id: audit
     for: Reading every record as it is, changing nothing.
     personas: [auditor]
