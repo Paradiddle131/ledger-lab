@@ -51,9 +51,9 @@ The ways a project's macros can decide relation names that the gate refuses:
 
 Stated limits of that refusal: it rests on dbt's default implementations of the three, in the dbt
 the lock pins, calling no other macro (the database one asks the adapter for a model's catalog
-integration, which the local DuckDB adapter offers none of); a macro dbt calls only when it runs models, not when it parses them, such as
-`generate_latest_version_pointer_alias` (the name of an extra view of a versioned model, not the
-relation a semantic model reads), is not refused.
+integration, which the local DuckDB adapter offers none of); a macro dbt calls only when it runs
+models, not when it parses them, such as `generate_latest_version_pointer_alias` (the name of an
+extra view of a versioned model, not the relation a semantic model reads), is not refused.
 
 The gate fails when:
 
@@ -66,8 +66,8 @@ The gate fails when:
   (`packages.yml`, `dependencies.yml`); has a project file holding Jinja, or a path setting that is
   absolute or outside the tree; defines a macro that decides relation names or sets a `dispatch`
   entry for the `dbt` namespace (both above); holds dbt Jinja where dbt renders it in a semantic
-  model or metric entry, or in the entry of a model, seed or snapshot a semantic model reads or a time spine is
-  (dbt renders that Jinja with the environment, command-line variables and the clock);
+  model or metric entry, or in the entry of a model, seed or snapshot a semantic model reads or a
+  time spine is (dbt renders that Jinja with the environment, command-line variables and the clock);
 - dbt cannot parse either tree: the message names the tree and dbt's error class, never dbt's own
   output;
 - a metric `origin/main` defines is gone from the working tree or renamed;
