@@ -15,6 +15,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import jinja2
 import pytest
 import yaml
@@ -208,14 +209,14 @@ def test_a_date_outside_the_calendar_fails_the_date_test(build: Build) -> None:
 REPO = PROJECT.parent
 
 
-def test_the_readme_build_runs_in_a_fresh_clone_with_no_target_folder(tmp_path: Path) -> None:
-    """The README's build, run from a clone's root with the profile's default database path, needs
-    no folder made first: dbt makes the project's target folder, where that path points, before it
-    opens the database."""
+def test_a_build_with_the_default_database_path_needs_no_folder_made_first(tmp_path: Path) -> None:
+    """A build of one seed on the local target, run from the root of a copy of the tracked files
+    under `models/` and `semantics/` with the profile's default database path, needs no folder made
+    first: dbt makes the project's target folder, where that path points, before it opens the
+    database."""
     clone = tmp_path / "clone"
     listed = subprocess.run(
-        [GIT, "-C", str(REPO), "ls-files", "-z", "--cached", "--others", "--exclude-standard"]
-        + ["--", "models", "semantics"],
+        [GIT, "-C", str(REPO), "ls-files", "-z", "--cached"] + ["--", "models", "semantics"],
         capture_output=True,
         text=True,
         check=True,
@@ -258,3 +259,11 @@ def test_the_local_database_defaults_to_the_projects_target_folder() -> None:
 
 def test_the_contract_test_reads_the_database_the_default_build_writes() -> None:
     assert REPO / default_database_path() == engine.BUILD
+
+
+def test_the_contract_tests_copy_goes_to_a_folder_not_made_yet(tmp_path: Path) -> None:
+    build = tmp_path / "build.duckdb"
+    with duckdb.connect(str(build)) as db:
+        db.execute("create table t as select 1 as x")
+    copy = engine.for_the_cli(build, tmp_path / "not-made-yet" / "copy.duckdb")
+    assert copy.is_file()

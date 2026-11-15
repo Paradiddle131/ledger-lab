@@ -1,9 +1,10 @@
-"""The linter reads the tree and nothing beside it: an agent's worktrees under `.claude/` are
-left out, and every tracked Python file is read."""
+"""The linter leaves an agent's worktrees under `.claude/` out, and reads every tracked Python
+file."""
 
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -30,7 +31,7 @@ def test_lint_and_format_leave_an_agents_worktree_out(tmp_path: Path) -> None:
         assert ".claude" not in out, out
 
 
-def test_the_linter_reads_every_tracked_python_file() -> None:
+def test_ruff_check_reads_every_tracked_python_file() -> None:
     shown = ruff(REPO, "check", "--show-files", ".")
     assert shown.returncode == 0, shown.stdout + shown.stderr
     read = {Path(line).resolve() for line in shown.stdout.splitlines() if line.strip()}
@@ -43,3 +44,9 @@ def test_the_linter_reads_every_tracked_python_file() -> None:
     tracked = {(REPO / name).resolve() for name in listed.split("\0") if name}
     assert tracked
     assert tracked <= read, sorted(str(p) for p in tracked - read)
+
+
+def test_the_formatter_excludes_nothing_of_its_own() -> None:
+    """`ruff format` reads what `ruff check` reads, less only an exclusion of its own."""
+    ruff_settings = tomllib.loads((REPO / "pyproject.toml").read_text())["tool"]["ruff"]
+    assert "exclude" not in ruff_settings.get("format", {})
