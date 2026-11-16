@@ -1130,12 +1130,16 @@ def test_a_padded_or_overlapping_value_is_hidden_whole(
     assert guarded("it", env, refuse) == f"it: LoadError: {seen or message}"
 
 
-# A probe of the live tests' path, run by pytest in a subprocess: the bq stand-in describes one
-# table, then answers a query with text that is no JSON, or interrupts. The invented project and
+# A probe of the live tests' path, run by pytest in a subprocess. The bq stand-in is `Bq` over the
+# probe's landed file, so each call answers as a loaded table that holds the file's rows would, but
+# one: the `show`, the counts query, the digest query or the distinct-values query (each the run,
+# not its dry run). That call raises a `LoadError` whose message holds the invented project and key,
+# or interrupts, after writing its name to the file `PROBE_REACHED` names. The invented project and
 # key come from the subprocess's environment, so the probe's source holds neither.
 PROBE = """
-import json
+import os
 import sys
+from pathlib import Path
 
 sys.path[:0] = [{paths}]
 
@@ -1143,19 +1147,34 @@ import duckdb
 import ingest.fetch
 import pytest
 import test_load as T
+from ingest.load import LoadError
 
+FAIL_AT = {fail_at!r}
 INTERRUPT = {interrupt}
+BQ = []
+
+
+def call_of(command):
+    verb = T.verb_of(command)
+    if verb != "query" or "--dry_run" in command:
+        return verb
+    if "SHA256" in command[-1]:
+        return "digest"
+    return "names" if "SELECT DISTINCT" in command[-1] else "counts"
 
 
 def answer(command):
-    if T.verb_of(command) == "show":
-        reference = {{"datasetId": "landed", "tableId": T.target_of(command)}}
-        fields = [{{"name": "vendor_name", "type": "STRING"}}]
-        shown = {{"tableReference": reference, "numRows": "1", "numBytes": "1"}}
-        return json.dumps({{**shown, "schema": {{"fields": fields}}}})
-    if INTERRUPT:
-        raise KeyboardInterrupt
-    return "garbage"
+    if not BQ:
+        T.PROJECT = os.environ["LEDGER_LAB_GCP_PROJECT"]
+        BQ.append(T.Bq())
+        BQ[0].tables["chicago_contracts"] = T.landing_path() / "chicago-contracts"
+    if call_of(command) == FAIL_AT:
+        Path(os.environ["PROBE_REACHED"]).write_text(FAIL_AT)
+        if INTERRUPT:
+            raise KeyboardInterrupt
+        project, key = os.environ["LEDGER_LAB_GCP_PROJECT"], os.environ["LEDGER_LAB_HASH_KEY"]
+        raise LoadError(f"denied in {{project}} for {{key}}")
+    return BQ[0](command)
 
 
 @pytest.fixture
@@ -1176,35 +1195,47 @@ def test_names(landing):
     T.test_no_name_the_landing_hashes_is_in_clear_in_the_warehouse("chicago-contracts")
 """
 
+# The stand-in's message as `guarded` reports it with the project and key hidden.
+HIDDEN = "LoadError: denied in <hidden> for <hidden>"
 
-@pytest.mark.parametrize("flags", [[], ["--tb=long", "-l", "--full-trace"]], ids=["default", "all"])
+
 @pytest.mark.parametrize(
-    ("interrupt", "test", "seen"),
+    "flags",
+    [[], ["--tb=long", "-l", "--full-trace"], ["-vv", "-l"]],
+    ids=["default", "all", "vvl"],
+)
+@pytest.mark.parametrize("interrupt", [False, True], ids=["load error", "interrupt"])
+@pytest.mark.parametrize(
+    ("test", "fail_at", "what"),
     [
-        (False, "test_rows", "its counts failed: LoadError: the dry run answered unexpectedly"),
-        (False, "test_names", "hashed names: LoadError: the dry run answered unexpectedly"),
-        (True, "test_rows", "KeyboardInterrupt"),
-        (True, "test_names", "KeyboardInterrupt"),
+        ("test_rows", "show", "not loaded"),
+        ("test_rows", "counts", "its counts failed"),
+        ("test_rows", "digest", "its digest failed"),
+        ("test_names", "names", "hashed names"),
     ],
 )
 def test_a_failing_live_test_prints_no_project_and_no_key(
-    tmp_path: Path, flags: list[str], interrupt: bool, test: str, seen: str
+    tmp_path: Path, flags: list[str], interrupt: bool, test: str, fail_at: str, what: str
 ) -> None:
-    """Each live test's path, made to fail by a `LoadError` and by an interrupt, under pytest's
-    default traceback and under `--tb=long -l --full-trace`: the output shows the failure and holds
+    """Each live test's path, made to fail at each of its BigQuery calls by a `LoadError` whose
+    message holds the invented project and key and by an interrupt, under pytest's default
+    traceback, under `--tb=long -l --full-trace` and under `-vv -l`: the failing call is reached,
+    the output shows the failure (for a `LoadError`, its message with both hidden) and holds
     neither the invented project nor the invented key."""
     project = f"invented-{secrets.token_hex(6)}"
     key = f"invented-key-{secrets.token_hex(16)}"
     paths = ", ".join(repr(str(p)) for p in (REPO, REPO / "tests", REPO / "tests" / "ingest"))
     probe = tmp_path / "probe_live.py"
-    probe.write_text(PROBE.format(paths=paths, interrupt=interrupt))
+    probe.write_text(PROBE.format(paths=paths, fail_at=fail_at, interrupt=interrupt))
     (tmp_path / "pytest.ini").write_text("[pytest]\n")
+    reached = tmp_path / "reached"
     env = {
         "PATH": os.environ.get("PATH", ""),
         "HOME": os.environ.get("HOME", ""),
         "LEDGER_LAB_GCP_PROJECT": project,
         LOCATION_VARIABLE: "us-central1",
         KEY_VARIABLE: key,
+        "PROBE_REACHED": str(reached),
     }
     ran = subprocess.run(  # noqa: S603
         [
@@ -1228,6 +1259,8 @@ def test_a_failing_live_test_prints_no_project_and_no_key(
         check=False,
     )
     out = ran.stdout + ran.stderr
+    seen = "KeyboardInterrupt" if interrupt else f"{what}: {HIDDEN}"
+    assert reached.exists() and reached.read_text() == fail_at, out[-2000:]
     assert ran.returncode != 0 and seen in out, out[-2000:]
     assert (out.count(project), out.count(key)) == (0, 0)
 
