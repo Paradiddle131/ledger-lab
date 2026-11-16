@@ -5,10 +5,12 @@ sources:
       lands them (`python -m ingest.fetch nl-government-budget`): one row per served row and
       budget moment, every field the publisher's text but the served row's position. Read unless
       the `source_rows` var is `sample`; on DuckDB from the landing path the kit uses, so
-      a build with nothing landed fails on the missing file. Source: Ministerie van Financiën,
-      CC0 1.0.
+      a build with nothing landed fails on the missing file; on BigQuery from the `landed` table
+      its load job wrote. Source: Ministerie van Financiën, CC0 1.0.
+    schema: landed
     tables:
       - name: budget
+        identifier: nl_government_budget
         config:
           external_location: "read_parquet('{{ env_var('LEDGER_LAB_LANDING', 'landing') }}/nl-government-budget')"
 
@@ -99,7 +101,8 @@ seeds:
       Source: Ministerie van Financiën, CC0 1.0, copied unchanged.
     config:
       column_types:
-        source_row: bigint
+        # BigQuery's load job takes INT64, not DuckDB's BIGINT, for the same 64-bit integer.
+        source_row: "{{ 'int64' if target.type == 'bigquery' else 'bigint' }}"
         Begrotingsjaar: string
         VUO: string
         HoofdstukRomeins: string

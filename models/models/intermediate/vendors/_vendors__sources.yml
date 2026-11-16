@@ -3,14 +3,21 @@ sources:
     description: >
       The landed files under the landing path (`LEDGER_LAB_LANDING`, default `landing/`), read in
       place as Parquet when the `source_rows` var is `landed`; `python -m ingest.fetch <source>`
-      lands each. With `sample`, the vendor seeds below stand in for them.
+      lands each. With `sample`, the vendor seeds below stand in for them. On BigQuery each is the
+      `landed` table its load job wrote, named with underscores for the file name's hyphens
+      (`identifier`); the external location is the local engine's only.
+    schema: landed
     meta:
       external_location: "read_parquet('{{ env_var('LEDGER_LAB_LANDING', 'landing') }}/{name}')"
     tables:
       - name: chicago-contracts
+        identifier: chicago_contracts
       - name: chicago-payments
+        identifier: chicago_payments
       - name: uk-transport-spend-2025
+        identifier: uk_transport_spend_2025
       - name: gleif-legal-entities
+        identifier: gleif_legal_entities
 
 seeds:
   - name: vendor_contracts_sample

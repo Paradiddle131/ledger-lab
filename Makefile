@@ -4,7 +4,7 @@
 LOADOUT ?= $(or $(shell sed -n 's/^The collection .* is cloned at `\([^`]*\)`.*/\1/p' $(HOME)/.claude/CLAUDE.md 2>/dev/null),../loadout)
 GUARDS := $(LOADOUT)/cloud/githooks
 
-.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
+.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test warehouse-parity stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
 
 check: lint typecheck test ids portable scan contract metric-versions
 	@echo "make check: all passed"
@@ -53,6 +53,13 @@ metric-versions: sync
 # DuckDB 1.5 engine over a copy in its storage format (models/contracts/engine.py).
 contract-test: sync
 	@uv run python models/contracts/engine.py
+
+# The payments mart's `datacontract test` on BigQuery, then the BigQuery build compared with a local
+# build over the same landing, by capped queries (models/contracts/warehouse.py,
+# tests/models/bigquery_parity.py); GCP calls in the lab's own environment, kept out of `make check`.
+warehouse-parity: sync
+	@uv run python models/contracts/warehouse.py
+	@uv run python -m tests.models.bigquery_parity $(or $(LEDGER_LAB_DUCKDB_PATH),models/target/ledger_lab.duckdb)
 
 # The container stack: the shared database always, one more service per PROFILE=<name>.
 # Each checkout is its own Compose project (containers, network, volume) and the database takes a

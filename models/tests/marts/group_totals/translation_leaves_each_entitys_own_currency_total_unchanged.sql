@@ -128,11 +128,18 @@ worked_out as (
     group by figures.entity_id, figures.fiscal_year, figures.fiscal_period
 ),
 
+-- The having clause names the mart's column through its alias: BigQuery would read a bare
+-- `currency` there as the select's `min(currency)`, an aggregate of an aggregate.
 group_totals as (
-    select entity_id, fiscal_year, fiscal_period, min(currency) as currency, sum(amount) as amount
-    from {{ ref('group_totals') }}
-    group by entity_id, fiscal_year, fiscal_period
-    having min(currency) = max(currency)
+    select
+        totals.entity_id,
+        totals.fiscal_year,
+        totals.fiscal_period,
+        min(totals.currency) as currency,
+        sum(totals.amount) as amount
+    from {{ ref('group_totals') }} as totals
+    group by totals.entity_id, totals.fiscal_year, totals.fiscal_period
+    having min(totals.currency) = max(totals.currency)
 )
 
 select

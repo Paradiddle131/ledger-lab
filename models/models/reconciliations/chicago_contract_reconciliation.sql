@@ -201,7 +201,7 @@ measured as (
         coalesce(repeats.paid_in_repeats, 0) as paid_in_repeats,
         term_agreements.contract_number is not null as is_term_agreement,
         numbers.paid - numbers.award_held_to as difference,
-        0.05 * numbers.revision_count as rounding_allowance
+        {{ exact_decimal('0.05') }} * numbers.revision_count as rounding_allowance
     from numbers
     left join repeats on numbers.contract_number = repeats.contract_number
     left join term_agreements on numbers.contract_number = term_agreements.contract_number

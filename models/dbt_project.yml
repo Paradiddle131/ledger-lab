@@ -34,6 +34,11 @@ vars:
     reporting_currency: EUR
     constant_rates_on: "2023-12-29"
 
+# On BigQuery every model and seed is built in the profile's dataset, `intermediate` (declared in
+# platform/gcp/warehouse.tf), the data products' marts among them: the entity-scoped `payments`
+# dataset takes its table only with its row access policies, which the models do not create yet,
+# and routing a node to another dataset needs a schema-name macro, which the metric versions gate
+# (semantics/versions.py) refuses.
 models:
   ledger_lab:
     +materialized: view

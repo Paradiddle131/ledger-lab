@@ -4,10 +4,13 @@ sources:
       The ECB's daily euro reference rates as the fetch kit lands them (`python -m ingest.fetch
       ecb-rates`), one row per publication date and currency, every field the publisher's text.
       Read unless the `source_rows` var is `sample`; on DuckDB from the landing path the kit uses,
-      so a build with nothing landed fails on the missing file. Source: European Central Bank;
-      published for information purposes only.
+      so a build with nothing landed fails on the missing file; on BigQuery from the `landed`
+      table its load job wrote. Source: European Central Bank; published for information purposes
+      only.
+    schema: landed
     tables:
       - name: rates
+        identifier: ecb_rates
         config:
           external_location: "read_parquet('{{ env_var('LEDGER_LAB_LANDING', 'landing') }}/ecb-rates')"
 

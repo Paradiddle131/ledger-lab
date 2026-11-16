@@ -20,7 +20,8 @@ import jinja2
 import pytest
 import yaml
 
-from models.contracts import engine
+from models.contracts import engine, warehouse
+from tests.models import bigquery_parity
 from tests.models.dbt_build import DBT, PROJECT, Build, dbt, query
 
 GIT = shutil.which("git") or "git"
@@ -59,6 +60,8 @@ def test_the_profile_picks_bigquery_only_in_the_labs_own_environment(
 # external-oauth-wif): `dbt parse --target bigquery` in another lab's session ends with
 # "Credentials in profile ... invalid: 'refused-in-another-labs-session' is not one of [...]".
 REFUSED = "refused-in-another-labs-session"
+# The access token gcloud sends, which the profile sends too while the environment holds one.
+FROM_GCLOUD = "oauth-secrets"
 
 
 def render(field: str, env: dict[str, str]) -> str:
@@ -73,8 +76,20 @@ def render(field: str, env: dict[str, str]) -> str:
     ("env", "method"),
     [
         ({"LEDGER_LAB_GCP_PROJECT": "the-lab"}, "oauth"),
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "the-lab", "CLOUDSDK_AUTH_ACCESS_TOKEN": "stand-in"},
+            FROM_GCLOUD,
+        ),
         ({"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": "another-lab"}, REFUSED),
         ({"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": " "}, REFUSED),
+        (
+            {
+                "LEDGER_LAB_GCP_PROJECT": "the-lab",
+                "GCP_PROJECT": "another-lab",
+                "CLOUDSDK_AUTH_ACCESS_TOKEN": "stand-in",
+            },
+            REFUSED,
+        ),
     ],
 )
 def test_an_explicit_bigquery_target_is_refused_in_another_labs_session(
@@ -85,9 +100,25 @@ def test_an_explicit_bigquery_target_is_refused_in_another_labs_session(
     assert render("method", env) == method
 
 
+@pytest.mark.parametrize("env", [{}, {"LEDGER_LAB_BQ_DATASET": "scratch"}])
+def test_the_bigquery_target_builds_in_the_declared_intermediate_dataset(
+    env: dict[str, str],
+) -> None:
+    """The one dataset, whatever the environment holds, and the one the parity check and the
+    warehouse contract run read."""
+    assert render("dataset", env) == "intermediate"
+    assert bigquery_parity.DATASET == warehouse.DATASET == "intermediate"
+
+
+def test_the_bigquery_target_sends_the_environments_access_token() -> None:
+    assert render("token", {"CLOUDSDK_AUTH_ACCESS_TOKEN": "stand-in"}) == "stand-in"
+
+
 def test_the_bigquery_target_caps_every_job() -> None:
     outputs = yaml.safe_load((PROJECT / "profiles.yml").read_text())["ledger_lab"]["outputs"]
-    assert "maximum_bytes_billed" in outputs["bigquery"]
+    cap = outputs["bigquery"]["maximum_bytes_billed"]
+    assert isinstance(cap, int) and not isinstance(cap, bool)
+    assert 0 < cap <= 1_000_000_000
     assert "LEDGER_LAB_GCP_PROJECT" in outputs["bigquery"]["project"]
 
 
