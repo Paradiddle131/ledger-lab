@@ -2,16 +2,17 @@
 -- to pounds at the pound's, both legs from the same day's set, rounded once: it lies within half
 -- a penny of amount ÷ dollars per euro × pounds per euro. The check multiplies instead of
 -- dividing (|pounds × dollars per euro − amount × pounds per euro| ≤ half a penny × dollars per
--- euro), so it is exact on every engine. The same holds from pounds to dollars, on every
+-- euro), so it is exact on every engine (each literal an exact decimal there,
+-- `exact_decimal`). The same holds from pounds to dollars, on every
 -- publication date.
 with amounts as (
-    select 1.00 as amount
+    select {{ exact_decimal('1.00') }} as amount
     union all
-    select 100.00
+    select {{ exact_decimal('100.00') }}
     union all
-    select 12345.67
+    select {{ exact_decimal('12345.67') }}
     union all
-    select -2500.10
+    select {{ exact_decimal('-2500.10') }}
 ),
 
 postings as (
@@ -57,4 +58,4 @@ where
     or abs(
         translated.translated_amount * from_leg.units_per_euro
         - translated.amount * to_leg.units_per_euro
-    ) > 0.005 * from_leg.units_per_euro
+    ) > {{ exact_decimal('0.005') }} * from_leg.units_per_euro

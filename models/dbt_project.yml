@@ -34,9 +34,19 @@ vars:
     reporting_currency: EUR
     constant_rates_on: "2023-12-29"
 
+# The dataset each node is built in on BigQuery (the `generate_schema_name` macro reads `schema`
+# there only; the local engine keeps `main`): the group-totals product in `group_totals`, every
+# other model and every seed in `intermediate`, both declared in platform/gcp/warehouse.tf. The
+# payments mart stays in `intermediate` too: `payments` is entity-scoped, so its table goes there
+# only with its row access policies, which the models do not create yet.
+seeds:
+  ledger_lab:
+    +schema: intermediate
+
 models:
   ledger_lab:
     +materialized: view
+    +schema: intermediate
     calendars:
       +materialized: table
     intermediate:
@@ -45,5 +55,7 @@ models:
       +materialized: table
     marts:
       +materialized: table
+      group_totals:
+        +schema: group_totals
     reconciliations:
       +materialized: table

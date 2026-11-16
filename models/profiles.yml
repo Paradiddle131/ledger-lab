@@ -6,7 +6,10 @@
 # `bigquery`: chosen when LEDGER_LAB_GCP_PROJECT is set and the session carries no GCP_PROJECT,
 # whose credential is another lab's (`platform/gcp_project.py`); needs `uv sync --group bigquery`;
 # every job is capped by maximum_bytes_billed. In such a session an explicit `--target bigquery`
-# names a method dbt refuses when it reads the profile, before any connection.
+# names a method dbt refuses when it reads the profile, before any connection. Its credential is
+# Application Default Credentials (`oauth`), or, while CLOUDSDK_AUTH_ACCESS_TOKEN is set, that
+# access token (`oauth-secrets`), the one gcloud and bq send, which a session whose proxy injects
+# the credential holds as a stand-in the proxy replaces; the token is not refreshed.
 ledger_lab:
   target: "{{ 'bigquery' if env_var('LEDGER_LAB_GCP_PROJECT', '') | trim and not env_var('GCP_PROJECT', '') else 'local' }}"
   outputs:
@@ -16,7 +19,8 @@ ledger_lab:
       threads: 4
     bigquery:
       type: bigquery
-      method: "{{ 'refused-in-another-labs-session' if env_var('GCP_PROJECT', '') else 'oauth' }}"
+      method: "{{ 'refused-in-another-labs-session' if env_var('GCP_PROJECT', '') else ('oauth-secrets' if env_var('CLOUDSDK_AUTH_ACCESS_TOKEN', '') else 'oauth') }}"
+      token: "{{ env_var('CLOUDSDK_AUTH_ACCESS_TOKEN', '') }}"
       project: "{{ env_var('LEDGER_LAB_GCP_PROJECT', '') }}"
       dataset: "{{ env_var('LEDGER_LAB_BQ_DATASET', 'ledger_lab') }}"
       location: "{{ env_var('LEDGER_LAB_BQ_LOCATION', 'US') }}"

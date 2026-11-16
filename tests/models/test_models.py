@@ -59,6 +59,8 @@ def test_the_profile_picks_bigquery_only_in_the_labs_own_environment(
 # external-oauth-wif): `dbt parse --target bigquery` in another lab's session ends with
 # "Credentials in profile ... invalid: 'refused-in-another-labs-session' is not one of [...]".
 REFUSED = "refused-in-another-labs-session"
+# The access token gcloud sends, which the profile sends too while the environment holds one.
+TOKEN = "oauth-secrets"
 
 
 def render(field: str, env: dict[str, str]) -> str:
@@ -73,8 +75,17 @@ def render(field: str, env: dict[str, str]) -> str:
     ("env", "method"),
     [
         ({"LEDGER_LAB_GCP_PROJECT": "the-lab"}, "oauth"),
+        ({"LEDGER_LAB_GCP_PROJECT": "the-lab", "CLOUDSDK_AUTH_ACCESS_TOKEN": "stand-in"}, TOKEN),
         ({"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": "another-lab"}, REFUSED),
         ({"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": " "}, REFUSED),
+        (
+            {
+                "LEDGER_LAB_GCP_PROJECT": "the-lab",
+                "GCP_PROJECT": "another-lab",
+                "CLOUDSDK_AUTH_ACCESS_TOKEN": "stand-in",
+            },
+            REFUSED,
+        ),
     ],
 )
 def test_an_explicit_bigquery_target_is_refused_in_another_labs_session(
@@ -83,6 +94,10 @@ def test_an_explicit_bigquery_target_is_refused_in_another_labs_session(
     """dbt checks the method against its own list when it reads the profile, so a method outside
     it stops `--target bigquery` before any connection."""
     assert render("method", env) == method
+
+
+def test_the_bigquery_target_sends_the_environments_access_token() -> None:
+    assert render("token", {"CLOUDSDK_AUTH_ACCESS_TOKEN": "stand-in"}) == "stand-in"
 
 
 def test_the_bigquery_target_caps_every_job() -> None:

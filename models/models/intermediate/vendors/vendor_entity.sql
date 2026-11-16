@@ -41,10 +41,10 @@ vendor_keys as (
 
 entity_names as (
     select
-        "LEI" as lei,
-        "Entity_LegalAddress_Country" as country,
-        coalesce("Entity_EntityStatus" = 'ACTIVE', false) as active,
-        {{ vendor_match_key('"Entity_LegalName"') }} as match_key
+        {{ adapter.quote('LEI') }} as lei,
+        {{ adapter.quote('Entity_LegalAddress_Country') }} as country,
+        coalesce({{ adapter.quote('Entity_EntityStatus') }} = 'ACTIVE', false) as active,
+        {{ vendor_match_key(adapter.quote('Entity_LegalName')) }} as match_key
     from {{ landed_or_sample('landing', 'gleif-legal-entities', 'vendor_legal_entities_sample') }}
 ),
 

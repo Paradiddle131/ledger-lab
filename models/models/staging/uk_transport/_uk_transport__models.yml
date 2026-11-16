@@ -79,7 +79,7 @@ seeds:
     config:
       column_types:
         source_file: string
-        source_row: bigint
+        source_row: "{{ 'int64' if target.type == 'bigquery' else 'bigint' }}"
         department_family: string
         entity: string
         date: string
