@@ -20,7 +20,8 @@ import jinja2
 import pytest
 import yaml
 
-from models.contracts import engine
+from models.contracts import engine, warehouse
+from tests.models import bigquery_parity
 from tests.models.dbt_build import DBT, PROJECT, Build, dbt, query
 
 GIT = shutil.which("git") or "git"
@@ -99,8 +100,14 @@ def test_an_explicit_bigquery_target_is_refused_in_another_labs_session(
     assert render("method", env) == method
 
 
-def test_the_bigquery_target_builds_in_the_declared_intermediate_dataset() -> None:
-    assert render("dataset", {}) == "intermediate"
+@pytest.mark.parametrize("env", [{}, {"LEDGER_LAB_BQ_DATASET": "scratch"}])
+def test_the_bigquery_target_builds_in_the_declared_intermediate_dataset(
+    env: dict[str, str],
+) -> None:
+    """The one dataset, whatever the environment holds, and the one the parity check and the
+    warehouse contract run read."""
+    assert render("dataset", env) == "intermediate"
+    assert bigquery_parity.DATASET == warehouse.DATASET == "intermediate"
 
 
 def test_the_bigquery_target_sends_the_environments_access_token() -> None:
@@ -109,7 +116,9 @@ def test_the_bigquery_target_sends_the_environments_access_token() -> None:
 
 def test_the_bigquery_target_caps_every_job() -> None:
     outputs = yaml.safe_load((PROJECT / "profiles.yml").read_text())["ledger_lab"]["outputs"]
-    assert "maximum_bytes_billed" in outputs["bigquery"]
+    cap = outputs["bigquery"]["maximum_bytes_billed"]
+    assert isinstance(cap, int) and not isinstance(cap, bool)
+    assert 0 < cap <= 1_000_000_000
     assert "LEDGER_LAB_GCP_PROJECT" in outputs["bigquery"]["project"]
 
 
