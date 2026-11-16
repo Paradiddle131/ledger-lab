@@ -562,6 +562,62 @@ def test_a_table_answer_of_another_shape_project_dataset_or_table_is_refused(ans
         load(["chicago-contracts"], ENV, lambda c: answer, bucket_holding("chicago-contracts"))
 
 
+def counted(rows: Any, size: Any) -> str:
+    """A `bq show` answer for `landed.chicago_contracts` with these JSON values as its counts."""
+    return json.dumps(
+        {
+            "tableReference": {"datasetId": DATASET, "tableId": "chicago_contracts"},
+            "numRows": rows,
+            "numBytes": size,
+            "schema": {"fields": []},
+        }
+    )
+
+
+# Counts `int()` takes or truncates that are no JSON string of ASCII digits, each tried as the row
+# count and as the byte count. `float("inf")` goes out as JSON's `Infinity`, which `json.loads`
+# reads back.
+NOT_A_COUNT = [
+    True,
+    False,
+    None,
+    0,
+    5,
+    0.9,
+    -0.5,
+    -0.9,
+    float("inf"),
+    "１２",
+    "١",
+    "-1",
+    "+1",
+    " 1",
+    "1 ",
+    "1\n",
+    "1_000",
+    "1.0",
+    "",
+    ["1"],
+]
+
+
+@pytest.mark.parametrize("value", NOT_A_COUNT, ids=[repr(v) for v in NOT_A_COUNT])
+@pytest.mark.parametrize("field", ["numRows", "numBytes"])
+def test_a_count_that_is_no_ascii_digit_string_is_an_answer_of_unexpected_shape(
+    field: str, value: Any
+) -> None:
+    answer = counted(value, "1") if field == "numRows" else counted("1", value)
+    with pytest.raises(LoadError, match="unexpected shape"):
+        table_of("chicago-contracts", answer, PROJECT)
+
+
+def test_an_ascii_digit_string_is_a_count() -> None:
+    table = table_of("chicago-contracts", counted("0", "007"), PROJECT)
+    assert (table.rows, table.bytes) == (0, 7)
+    table = table_of("chicago-contracts", counted("12", str(STORAGE_CAP)), PROJECT)
+    assert (table.rows, table.bytes) == (12, STORAGE_CAP)
+
+
 def test_main_prints_tables_and_never_the_project(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(list(LANDED), ENV, Bq(), bucket_holding(*LANDED)) == 0
     out = capsys.readouterr()
