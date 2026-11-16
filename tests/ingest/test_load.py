@@ -812,7 +812,7 @@ def guarded[T](what: str, env: Mapping[str, str], call: Callable[[], T]) -> T | 
             message = re.sub("|".join(map(re.escape, longest)), "<hidden>", message)
         return f"{what}: {type(error).__name__}" + (f": {message}" if message else "")
     except BaseException as error:
-        interrupted = type(error)
+        raise
     try:
         again = interrupted()
     except TypeError:
