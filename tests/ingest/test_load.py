@@ -812,7 +812,7 @@ def guarded[T](what: str, env: Mapping[str, str], call: Callable[[], T]) -> T | 
             message = re.sub("|".join(map(re.escape, longest)), "<hidden>", message)
         return f"{what}: {type(error).__name__}" + (f": {message}" if message else "")
     except BaseException as error:
-        interrupted = type(error)
+        raise
     try:
         again = interrupted()
     except TypeError:
@@ -1206,8 +1206,8 @@ ALL = ["--tb=long", "-l", "--full-trace"]
 # one line with no frame and no local, so the other flag sets would show the hiding nothing.
 @pytest.mark.parametrize(
     ("interrupt", "flags"),
-    [(False, []), (False, ALL), (False, ["-vv", "-l"]), (True, ALL)],
-    ids=["load error-default", "load error-all", "load error-vvl", "interrupt-all"],
+    [(False, []), (False, ALL), (False, ["-vv", "-l"]), (True, ALL), (True, []), (True, ["-vv", "-l"]), (True, ["--tb=long", "-l"])],
+    ids=["load error-default", "load error-all", "load error-vvl", "interrupt-all", "i-def", "i-vvl", "i-tbl"],
 )
 @pytest.mark.parametrize(
     ("test", "fail_at", "what"),
