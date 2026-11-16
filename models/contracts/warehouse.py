@@ -4,8 +4,8 @@ The committed contract names one server, the local DuckDB copy, and DuckDB's phy
 runs the same contract against the payments mart on BigQuery from a copy written to a temporary
 folder outside the repository and deleted after the run, which differs from the committed file in
 two things only: its one server is BigQuery, the lab's project (from `platform/gcp_project.py`,
-through `ingest/bucket.py`) and the `intermediate` dataset where `models/dbt_project.yml` builds
-the mart, in `LEDGER_LAB_BQ_LOCATION`; and each column's `physicalType` is BigQuery's type for the
+through `ingest/bucket.py`) and the `intermediate` dataset where the profile builds the mart, in
+`LEDGER_LAB_BQ_LOCATION`; and each column's `physicalType` is BigQuery's type for the
 DuckDB type the contract declares (`TYPES`), a type not in that map stopping the run before any
 call. The CLI then checks the column types against BigQuery's INFORMATION_SCHEMA, so a DuckDB
 `DECIMAL(28,6)` is held to BigQuery's `NUMERIC` (38 digits, 9 after the point), not to its own

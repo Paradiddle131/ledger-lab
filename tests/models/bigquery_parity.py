@@ -1,11 +1,12 @@
 """The BigQuery build against a local build on the same landing, relation by relation.
 
-For each relation a build makes, the local DuckDB file's `main` schema and the lab's BigQuery
-datasets `intermediate` and `group_totals` (where `models/dbt_project.yml` routes them) are each
-asked, by one query apiece, for the row count and a digest: the MD5 of every row's canonical text,
-sorted and joined, then hashed again, so two relations with the same digest hold the same multiset
-of canonical rows whatever their order, short of an MD5 collision. The column names, in order, are
-compared from each engine's own schema (DuckDB's catalog, `bq show`, which bills nothing).
+For each relation in the local DuckDB file's `main` schema or in the lab's BigQuery datasets
+`intermediate` (where the profile builds every model and seed) and `group_totals` (the group
+totals product's, which a relation built there would be in), each engine is asked, by one query
+apiece, for the row count and a digest: the MD5 of every row's canonical text, sorted and joined,
+then hashed again, so two relations with the same digest hold the same multiset of canonical rows
+whatever their order, short of an MD5 collision. The column names, in order, are compared from
+each engine's own schema (DuckDB's catalog, `bq show`, which bills nothing).
 
 A row's canonical text is its cells in column order, joined by the unit separator (U+001F), a
 null as the record separator (U+001E). A cell is written the same way on both engines by its type
