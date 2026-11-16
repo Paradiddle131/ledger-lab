@@ -80,7 +80,7 @@ def start(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> Engine:
 
 
 def test_the_copy_on_disk_holds_no_project_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    project = "invented-lab-project-1234"
+    project = "example-project"
     env = {"LEDGER_LAB_GCP_PROJECT": project, "LEDGER_LAB_BQ_LOCATION": "us-central1"}
     engine = start(monkeypatch, env)
     assert warehouse.main() == 0
