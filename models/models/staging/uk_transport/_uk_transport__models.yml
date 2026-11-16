@@ -79,6 +79,7 @@ seeds:
     config:
       column_types:
         source_file: string
+        # BigQuery's load job takes INT64, not DuckDB's BIGINT, for the same 64-bit integer.
         source_row: "{{ 'int64' if target.type == 'bigquery' else 'bigint' }}"
         department_family: string
         entity: string

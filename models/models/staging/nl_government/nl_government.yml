@@ -101,6 +101,7 @@ seeds:
       Source: Ministerie van Financiën, CC0 1.0, copied unchanged.
     config:
       column_types:
+        # BigQuery's load job takes INT64, not DuckDB's BIGINT, for the same 64-bit integer.
         source_row: "{{ 'int64' if target.type == 'bigquery' else 'bigint' }}"
         Begrotingsjaar: string
         VUO: string
