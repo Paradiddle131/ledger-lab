@@ -49,7 +49,7 @@ contract: sync
 metric-versions: sync
 	@uv run python semantics/versions.py
 
-# `datacontract test` over the local dbt build (target/ledger_lab.duckdb), run on the CLI's own
+# `datacontract test` over the local dbt build (models/target/ledger_lab.duckdb), run on the CLI's own
 # DuckDB 1.5 engine over a copy in its storage format (models/contracts/engine.py).
 contract-test: sync
 	@uv run python models/contracts/engine.py

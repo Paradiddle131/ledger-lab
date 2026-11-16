@@ -82,7 +82,8 @@ Outside what it compares: model SQL, command-line `--vars`, and relation names d
 It compares with the `origin/main` last fetched, which it cannot check offline: fetch and merge the default branch before taking a change's gates.
 `make sync` also puts the Data Contract CLI's DuckDB engine (the lock's `contract` group) in uv's cache; the contract tests and `make contract-test`, which runs `datacontract test` over a local dbt build, use it offline on DuckDB 1.5 over a copy of the build in that version's storage format, and the tests skip, saying so, when it is not cached.
 
-The dbt models build on DuckDB in the session by default, reading the landed files in place under `LEDGER_LAB_LANDING`; setting `LEDGER_LAB_GCP_PROJECT` (with `uv sync --group bigquery`) in a session that carries no `GCP_PROJECT` moves them to BigQuery:
+The dbt models build on DuckDB in the session by default, reading the landed files in place under `LEDGER_LAB_LANDING`; setting `LEDGER_LAB_GCP_PROJECT` (with `uv sync --group bigquery`) in a session that carries no `GCP_PROJECT` moves them to BigQuery.
+Run from the repository's root, a DuckDB build writes its database to `models/target/ledger_lab.duckdb`, in the project's target folder, which dbt makes when it parses the project, so a fresh clone needs no folder made first; `LEDGER_LAB_DUCKDB_PATH` names another file, in a folder that must exist, and a build that moves the target folder (`--target-path`, `DBT_TARGET_PATH`) needs it:
 
 ```bash
 uv run dbt build --project-dir models --profiles-dir models
@@ -100,10 +101,9 @@ A dbt build writes the semantic manifest `mf` reads (`models/target/semantic_man
 
 The `mf` command checks for a newer release of itself on every run, and has no setting to stop it: it sends one HTTPS request to `pypi.org` for `dbt-metricflow`'s public release list (`/pypi/dbt-metricflow/json`, the client library's default user agent, nothing about the project or its data), waits at most one second, keeps the answer for an hour in the system's temporary folder (`update_checker_cache.pkl`), and carries on silently when the request fails.
 To run it with no network call, use the runner beside the definitions, which turns that check off and ends the run on any connection or name lookup.
-The build below reads the committed samples (`source_rows: sample`), so it needs no landing; its database goes to `target/ledger_lab.duckdb` under the folder you run from, which must exist, hence the `mkdir`:
+The build below reads the committed samples (`source_rows: sample`), so it needs no landing; the `mf` queries after it read its database through the same profile, so they too run from the repository's root:
 
 ```bash
-mkdir -p target
 uv run dbt build --project-dir models --profiles-dir models --vars '{source_rows: sample}'
 DBT_PROJECT_DIR=models DBT_PROFILES_DIR=models uv run python -I semantics/offline/offline_mf.py validate-configs
 DBT_PROJECT_DIR=models DBT_PROFILES_DIR=models uv run python -I semantics/offline/offline_mf.py query --metrics spend_against_award,remaining_commitment --group-by contract__break_class

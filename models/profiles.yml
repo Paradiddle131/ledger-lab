@@ -1,5 +1,8 @@
 # Where the models run, read from the environment; nothing here names a project or an account.
-# `local`: an in-process DuckDB file, the default.
+# `local`: an in-process DuckDB file, the default; with no LEDGER_LAB_DUCKDB_PATH, it is
+# `models/target/ledger_lab.duckdb` under the folder dbt runs from (the README runs it from the
+# repository's root), inside the project's target folder, which dbt makes when it parses the
+# project (a build does; `dbt debug` does not).
 # `bigquery`: chosen when LEDGER_LAB_GCP_PROJECT is set and the session carries no GCP_PROJECT,
 # whose credential is another lab's (`platform/gcp_project.py`); needs `uv sync --group bigquery`;
 # every job is capped by maximum_bytes_billed. In such a session an explicit `--target bigquery`
@@ -9,7 +12,7 @@ ledger_lab:
   outputs:
     local:
       type: duckdb
-      path: "{{ env_var('LEDGER_LAB_DUCKDB_PATH', 'target/ledger_lab.duckdb') }}"
+      path: "{{ env_var('LEDGER_LAB_DUCKDB_PATH', 'models/target/ledger_lab.duckdb') }}"
       threads: 4
     bigquery:
       type: bigquery
