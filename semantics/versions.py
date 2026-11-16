@@ -424,6 +424,8 @@ def parse_and_refuse(project: Path, report: Path) -> int:
     project_file = load_yaml_text((project / "dbt_project.yml").read_text()) or {}
     project_vars = project_file.get("vars")
     # dbt's and its adapter's own macros, installed beside dbt.
+    if dbt.__file__ is None:
+        raise RuntimeError("dbt is installed without a package file to find its macros beside")
     installed = Path(dbt.__file__).resolve().parents[1]
     root = manifest.metadata.project_name
     read_by_semantics = {

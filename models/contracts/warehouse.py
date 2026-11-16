@@ -16,10 +16,11 @@ The CLI runs in a throwaway environment with its BigQuery engine (`uv run --isol
 resolve when it runs. In that environment, before the test, two of the CLI's own functions are
 wrapped (`engine`): the connection's credentials are the access token in
 `CLOUDSDK_AUTH_ACCESS_TOKEN` when the environment holds one (the one gcloud and bq send), else
-Application Default Credentials as the CLI resolves them, and every query job the connection
-makes carries `maximum_bytes_billed` of 1,000,000,000 bytes through the client's default job
-configuration. Only each check's name and result are printed, never a reason, since a reason can
-name the project or hold a value.
+Application Default Credentials as the CLI resolves them; and the connection's client carries
+`maximum_bytes_billed` of 1,000,000,000 bytes in its default job configuration, which every query
+job it makes takes, and reads results over the REST API, its Storage Read API client (gRPC, which
+this session's proxy does not carry) neither passed nor created. Only each check's name and result
+are printed, never a reason, since a reason can name the project or hold a value.
 
 `uv run python models/contracts/warehouse.py`; exits 1 when the contract fails or cannot run.
 """
@@ -95,11 +96,9 @@ def engine(contract_file: str) -> int:
         con.client.default_query_job_config.maximum_bytes_billed = CAP
         # Results come back through the REST API, not the Storage Read API's gRPC stream.
         con.storage_client = None
+        type(con.client)._ensure_bqstorage_client = lambda self, *args, **kwargs: None
         return con
 
-    from google.cloud.bigquery.client import Client
-
-    Client._ensure_bqstorage_client = lambda self, *args, **kwargs: None  # type: ignore[method-assign]
     connect._bigquery_credentials = credentials
     connect._connect_bigquery = capped
     run = DataContract(data_contract_file=contract_file, server="bigquery").test()
