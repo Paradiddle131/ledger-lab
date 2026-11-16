@@ -31,9 +31,10 @@ operator to delete by hand once nothing runs.
 Load jobs from Cloud Storage bill nothing, and the loader runs no streaming insert. Before the first
 load and after each load it lists `landed` (`bq ls`) and describes each listed table (`bq show`),
 which bill nothing, and refuses to go on when the listing leaves out a table this run has loaded (an
-empty listing included), when a `bq show` answer gives a negative row or byte count, or when the
-stored total is above `STORAGE_CAP` bytes, far inside BigQuery's free 10 GiB; a run that starts
-above the cap loads nothing. A table this run loaded counts at the larger of the bytes its `bq show`
+empty listing included), when a `bq show` answer gives a row or byte count that is not a JSON
+string of ASCII digits (`count`; a negative count is one such), or when the stored total is above
+`STORAGE_CAP` bytes, far inside BigQuery's free 10 GiB; a run that starts above the cap loads
+nothing. A table this run loaded counts at the larger of the bytes its `bq show`
 gave right after its load and the bytes the later `bq show` gives. A table this run did not load
 counts only as the listing and its `bq show` report it: the cap trusts `bq ls` for those.
 
@@ -179,11 +180,24 @@ class Table:
     columns: tuple[tuple[str, str], ...]
 
 
+# A count as `bq show` gives one: a JSON string of ASCII digits.
+COUNT = re.compile(r"[0-9]+")
+
+
+def count(value: object) -> int:
+    """A `bq show` count, refused unless it is a JSON string that `COUNT` matches whole, so a JSON
+    number or boolean, a sign, a fraction, whitespace, an underscore and a digit outside ASCII
+    are refused."""
+    if not isinstance(value, str) or not COUNT.fullmatch(value):
+        raise ValueError("a count that is no string of ASCII digits")
+    return int(value)
+
+
 def described(
     project: str, table: str, answer: str
 ) -> tuple[int, int, tuple[tuple[str, str], ...]]:
     """Rows, bytes and columns of the table `bq show` describes, refused unless it is
-    `<lab project>.landed.<table>`."""
+    `<lab project>.landed.<table>` and each count passes `count`."""
     try:
         shown: Any = json.loads(answer)
         reference = shown["tableReference"]
@@ -194,9 +208,7 @@ def described(
         ):
             raise LoadError(f"the table shown is not {DATASET}.{table}")
         columns = tuple((str(f["name"]), str(f["type"])) for f in shown["schema"]["fields"])
-        rows, size = int(shown["numRows"]), int(shown["numBytes"])
-        if rows < 0 or size < 0:
-            raise ValueError("a negative count")
+        rows, size = count(shown["numRows"]), count(shown["numBytes"])
         return rows, size, columns
     except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as error:
         if isinstance(error, LoadError):

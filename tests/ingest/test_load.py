@@ -562,6 +562,62 @@ def test_a_table_answer_of_another_shape_project_dataset_or_table_is_refused(ans
         load(["chicago-contracts"], ENV, lambda c: answer, bucket_holding("chicago-contracts"))
 
 
+def counted(rows: Any, size: Any) -> str:
+    """A `bq show` answer for `landed.chicago_contracts` with these JSON values as its counts."""
+    return json.dumps(
+        {
+            "tableReference": {"datasetId": DATASET, "tableId": "chicago_contracts"},
+            "numRows": rows,
+            "numBytes": size,
+            "schema": {"fields": []},
+        }
+    )
+
+
+# Counts `int()` takes or truncates that are no JSON string of ASCII digits, each tried as the row
+# count and as the byte count. `float("inf")` goes out as JSON's `Infinity`, which `json.loads`
+# reads back.
+NOT_A_COUNT = [
+    True,
+    False,
+    None,
+    0,
+    5,
+    0.9,
+    -0.5,
+    -0.9,
+    float("inf"),
+    "１２",
+    "١",
+    "-1",
+    "+1",
+    " 1",
+    "1 ",
+    "1\n",
+    "1_000",
+    "1.0",
+    "",
+    ["1"],
+]
+
+
+@pytest.mark.parametrize("value", NOT_A_COUNT, ids=[repr(v) for v in NOT_A_COUNT])
+@pytest.mark.parametrize("field", ["numRows", "numBytes"])
+def test_a_count_that_is_no_ascii_digit_string_is_an_answer_of_unexpected_shape(
+    field: str, value: Any
+) -> None:
+    answer = counted(value, "1") if field == "numRows" else counted("1", value)
+    with pytest.raises(LoadError, match="unexpected shape"):
+        table_of("chicago-contracts", answer, PROJECT)
+
+
+def test_an_ascii_digit_string_is_a_count() -> None:
+    table = table_of("chicago-contracts", counted("0", "007"), PROJECT)
+    assert (table.rows, table.bytes) == (0, 7)
+    table = table_of("chicago-contracts", counted("12", str(STORAGE_CAP)), PROJECT)
+    assert (table.rows, table.bytes) == (12, STORAGE_CAP)
+
+
 def test_main_prints_tables_and_never_the_project(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(list(LANDED), ENV, Bq(), bucket_holding(*LANDED)) == 0
     out = capsys.readouterr()
@@ -738,7 +794,9 @@ def test_the_digest_holds_no_column_type_without_a_rule() -> None:
 
 def guarded[T](what: str, env: Mapping[str, str], call: Callable[[], T]) -> T | str:
     """`call()`'s answer, or on an `Exception` fixed text: `what`, the exception's type and, for a
-    `LoadError`, its message with each value of `env` but the location replaced by `<hidden>`. An
+    `LoadError`, its message with each value of `env` but the location, stripped of surrounding
+    whitespace, replaced by `<hidden>`; one pattern holds the values, longest first, so a value
+    that holds another (a session project that holds the lab's) is replaced whole. An
     interrupt (a `BaseException` that is no `Exception`) is raised again as a new exception of its
     type with no arguments, after the `except` block, so its traceback starts in this frame and
     holds no frame of `call` and no exception context; this frame's locals are then `what`, `env`,
@@ -748,9 +806,10 @@ def guarded[T](what: str, env: Mapping[str, str], call: Callable[[], T]) -> T | 
         return call()
     except Exception as error:
         message = str(error) if isinstance(error, LoadError) else ""
-        for key, value in env.items():
-            if value and key != LOCATION_VARIABLE:
-                message = message.replace(value, "<hidden>")
+        values = {v.strip() for k, v in env.items() if k != LOCATION_VARIABLE} - {""}
+        if values:
+            longest = sorted(values, key=len, reverse=True)
+            message = re.sub("|".join(map(re.escape, longest)), "<hidden>", message)
         return f"{what}: {type(error).__name__}" + (f": {message}" if message else "")
     except BaseException as error:
         interrupted = type(error)
@@ -1024,12 +1083,63 @@ def test_a_load_error_message_has_the_project_and_key_hidden() -> None:
     assert guarded("it", ENV_KEYED, refuse) == "it: LoadError: <hidden> <hidden> us-central1"
 
 
-# A probe of the live tests' path, run by pytest in a subprocess: the bq stand-in describes one
-# table, then answers a query with text that is no JSON, or interrupts. The invented project and
+@pytest.mark.parametrize(
+    ("env", "message", "seen"),
+    [
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "lab", "GCP_PROJECT": "lab-session-7"},
+            "x lab-session-7 y lab",
+            "x <hidden> y <hidden>",
+        ),
+        (
+            {"GCP_PROJECT": "lab-session-7", "LEDGER_LAB_GCP_PROJECT": "lab"},
+            "x lab-session-7 y lab",
+            "x <hidden> y <hidden>",
+        ),
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "invented-lab", KEY_VARIABLE: "invented-lab-k3y-0123abcd"},
+            "key invented-lab-k3y-0123abcd",
+            "key <hidden>",
+        ),
+        ({"LEDGER_LAB_GCP_PROJECT": "invented-proj\n"}, "x invented-proj y", "x <hidden> y"),
+        ({"LEDGER_LAB_GCP_PROJECT": " invented-proj "}, "x invented-proj y", "x <hidden> y"),
+        ({"GCP_PROJECT": "another-lab-42"}, "in another-lab-42", "in <hidden>"),
+        ({"LEDGER_LAB_GCP_PROJECT": "a.b"}, "axb a.b", "axb <hidden>"),
+        ({"LEDGER_LAB_GCP_PROJECT": "  ", LOCATION_VARIABLE: "us-central1"}, "us-central1", None),
+    ],
+    ids=[
+        "the session project holds the lab's",
+        "the same, the lab's first",
+        "the key holds the project",
+        "a project with a new line",
+        "a project padded with spaces",
+        "the session project alone",
+        "a value with a pattern character",
+        "a blank value and the location",
+    ],
+)
+def test_a_padded_or_nested_value_is_hidden_whole(
+    env: dict[str, str], message: str, seen: str | None
+) -> None:
+    def refuse() -> None:
+        raise LoadError(message)
+
+    assert guarded("it", LabEnv({LOCATION_VARIABLE: "us-central1", **env}), refuse) == (
+        f"it: LoadError: {seen or message}"
+    )
+    assert guarded("it", env, refuse) == f"it: LoadError: {seen or message}"
+
+
+# A probe of the live tests' path, run by pytest in a subprocess. The bq stand-in is `Bq` over the
+# probe's landed file, so each call answers as a loaded table that holds the file's rows would, but
+# one: the `show`, the counts query, the digest query or the distinct-values query (each the run,
+# not its dry run). That call raises a `LoadError` whose message holds the invented project and key,
+# or interrupts, after writing its name to the file `PROBE_REACHED` names. The invented project and
 # key come from the subprocess's environment, so the probe's source holds neither.
 PROBE = """
-import json
+import os
 import sys
+from pathlib import Path
 
 sys.path[:0] = [{paths}]
 
@@ -1037,19 +1147,34 @@ import duckdb
 import ingest.fetch
 import pytest
 import test_load as T
+from ingest.load import LoadError
 
+FAIL_AT = {fail_at!r}
 INTERRUPT = {interrupt}
+BQ = []
+
+
+def call_of(command):
+    verb = T.verb_of(command)
+    if verb != "query" or "--dry_run" in command:
+        return verb
+    if "SHA256" in command[-1]:
+        return "digest"
+    return "names" if "SELECT DISTINCT" in command[-1] else "counts"
 
 
 def answer(command):
-    if T.verb_of(command) == "show":
-        reference = {{"datasetId": "landed", "tableId": T.target_of(command)}}
-        fields = [{{"name": "vendor_name", "type": "STRING"}}]
-        shown = {{"tableReference": reference, "numRows": "1", "numBytes": "1"}}
-        return json.dumps({{**shown, "schema": {{"fields": fields}}}})
-    if INTERRUPT:
-        raise KeyboardInterrupt
-    return "garbage"
+    if not BQ:
+        T.PROJECT = os.environ["LEDGER_LAB_GCP_PROJECT"]
+        BQ.append(T.Bq())
+        BQ[0].tables["chicago_contracts"] = T.landing_path() / "chicago-contracts"
+    if call_of(command) == FAIL_AT:
+        Path(os.environ["PROBE_REACHED"]).write_text(FAIL_AT)
+        if INTERRUPT:
+            raise KeyboardInterrupt
+        project, key = os.environ["LEDGER_LAB_GCP_PROJECT"], os.environ["LEDGER_LAB_HASH_KEY"]
+        raise LoadError(f"denied in {{project}} for {{key}}")
+    return BQ[0](command)
 
 
 @pytest.fixture
@@ -1070,35 +1195,53 @@ def test_names(landing):
     T.test_no_name_the_landing_hashes_is_in_clear_in_the_warehouse("chicago-contracts")
 """
 
+# The stand-in's message as `guarded` reports it with the project and key hidden.
+HIDDEN = "LoadError: denied in <hidden> for <hidden>"
 
-@pytest.mark.parametrize("flags", [[], ["--tb=long", "-l", "--full-trace"]], ids=["default", "all"])
+
+ALL = ["--tb=long", "-l", "--full-trace"]
+
+
+# An interrupt runs only under `ALL`: without `--full-trace` pytest prints a `KeyboardInterrupt` as
+# one line with no frame and no local, so the other flag sets would show the hiding nothing.
 @pytest.mark.parametrize(
-    ("interrupt", "test", "seen"),
+    ("interrupt", "flags"),
+    [(False, []), (False, ALL), (False, ["-vv", "-l"]), (True, ALL)],
+    ids=["load error-default", "load error-all", "load error-vvl", "interrupt-all"],
+)
+@pytest.mark.parametrize(
+    ("test", "fail_at", "what"),
     [
-        (False, "test_rows", "its counts failed: LoadError: the dry run answered unexpectedly"),
-        (False, "test_names", "hashed names: LoadError: the dry run answered unexpectedly"),
-        (True, "test_rows", "KeyboardInterrupt"),
-        (True, "test_names", "KeyboardInterrupt"),
+        ("test_rows", "show", "not loaded"),
+        ("test_rows", "counts", "its counts failed"),
+        ("test_rows", "digest", "its digest failed"),
+        ("test_names", "names", "hashed names"),
     ],
 )
 def test_a_failing_live_test_prints_no_project_and_no_key(
-    tmp_path: Path, flags: list[str], interrupt: bool, test: str, seen: str
+    tmp_path: Path, flags: list[str], interrupt: bool, test: str, fail_at: str, what: str
 ) -> None:
-    """Each live test's path, made to fail by a `LoadError` and by an interrupt, under pytest's
-    default traceback and under `--tb=long -l --full-trace`: the output shows the failure and holds
+    """Each live test's path, made to fail at its first `show`, its counts query, its digest query
+    or its distinct-values query (the run, not the dry run), by a `LoadError` whose message holds
+    the invented project and key under pytest's default traceback, under `--tb=long -l
+    --full-trace` and under `-vv -l`, and by an interrupt under `--tb=long -l --full-trace` only
+    (without `--full-trace` pytest prints no frame of an interrupt): the failing call is reached,
+    the output shows the failure (for a `LoadError`, its message with both hidden) and holds
     neither the invented project nor the invented key."""
     project = f"invented-{secrets.token_hex(6)}"
     key = f"invented-key-{secrets.token_hex(16)}"
     paths = ", ".join(repr(str(p)) for p in (REPO, REPO / "tests", REPO / "tests" / "ingest"))
     probe = tmp_path / "probe_live.py"
-    probe.write_text(PROBE.format(paths=paths, interrupt=interrupt))
+    probe.write_text(PROBE.format(paths=paths, fail_at=fail_at, interrupt=interrupt))
     (tmp_path / "pytest.ini").write_text("[pytest]\n")
+    reached = tmp_path / "reached"
     env = {
         "PATH": os.environ.get("PATH", ""),
         "HOME": os.environ.get("HOME", ""),
         "LEDGER_LAB_GCP_PROJECT": project,
         LOCATION_VARIABLE: "us-central1",
         KEY_VARIABLE: key,
+        "PROBE_REACHED": str(reached),
     }
     ran = subprocess.run(  # noqa: S603
         [
@@ -1122,6 +1265,8 @@ def test_a_failing_live_test_prints_no_project_and_no_key(
         check=False,
     )
     out = ran.stdout + ran.stderr
+    seen = "KeyboardInterrupt" if interrupt else f"{what}: {HIDDEN}"
+    assert reached.exists() and reached.read_text() == fail_at, out[-2000:]
     assert ran.returncode != 0 and seen in out, out[-2000:]
     assert (out.count(project), out.count(key)) == (0, 0)
 
