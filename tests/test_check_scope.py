@@ -4,14 +4,18 @@ Checked:
 - an untidy file under `.claude/` (an agent's worktree) is left out of `ruff check` and
   `ruff format --check`, while one in the tree is reported;
 - an untidy file planted at the path of each tracked Python file, in a copy holding only the
-  tracked ruff settings and `.gitignore` files, is reported by `ruff check` (rule F401) and by
-  `ruff format --check`: a top-level, lint or format `exclude`, or a per-file ignore covering F401
-  (`ALL` among them), on a tracked path turns it red;
+  tracked files named in SETTINGS (`pyproject.toml`, `ruff.toml`, `.ruff.toml`, `.gitignore` and
+  `.ignore`, at any level), is reported by `ruff check` (rule F401) and by `ruff format --check`:
+  a top-level, lint or format `exclude`, a per-file ignore covering F401 (`ALL` among them), or a
+  pattern in a tracked `.gitignore` or `.ignore`, on a tracked path turns it red;
 - no tracked Python file opts out of linting whole with a file-level `# ruff: noqa` or
   `# flake8: noqa`.
 
 Not checked: a per-file ignore of rules other than F401, a line's `# noqa`, a `# fmt: off`
-region, and settings given on the command line.
+region, and settings given on the command line; and the ignore sources the copy leaves out:
+`.git/info/exclude`, a global `core.excludesFile`, an ignore file in a folder above the
+repository, untracked ruff settings, `.gitignore` or `.ignore` files, and ignore files of any
+other name.
 """
 
 import json
@@ -25,7 +29,7 @@ REPO = Path(__file__).resolve().parents[1]
 RUFF = Path(sys.executable).with_name("ruff")
 GIT = shutil.which("git") or "git"
 UNTIDY = "import os\nx=1\n"
-SETTINGS = ("pyproject.toml", "ruff.toml", ".ruff.toml", ".gitignore")
+SETTINGS = ("pyproject.toml", "ruff.toml", ".ruff.toml", ".gitignore", ".ignore")
 FILE_LEVEL_NOQA = re.compile(r"^\s*#\s*(?:ruff|flake8)\s*:\s*noqa\b", re.IGNORECASE | re.MULTILINE)
 
 
