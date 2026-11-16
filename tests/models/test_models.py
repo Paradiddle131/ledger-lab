@@ -60,7 +60,7 @@ def test_the_profile_picks_bigquery_only_in_the_labs_own_environment(
 # "Credentials in profile ... invalid: 'refused-in-another-labs-session' is not one of [...]".
 REFUSED = "refused-in-another-labs-session"
 # The access token gcloud sends, which the profile sends too while the environment holds one.
-TOKEN = "oauth-secrets"
+OAUTH_SECRETS = "oauth-secrets"
 
 
 def render(field: str, env: dict[str, str]) -> str:
@@ -75,7 +75,10 @@ def render(field: str, env: dict[str, str]) -> str:
     ("env", "method"),
     [
         ({"LEDGER_LAB_GCP_PROJECT": "the-lab"}, "oauth"),
-        ({"LEDGER_LAB_GCP_PROJECT": "the-lab", "CLOUDSDK_AUTH_ACCESS_TOKEN": "stand-in"}, TOKEN),
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "the-lab", "CLOUDSDK_AUTH_ACCESS_TOKEN": "stand-in"},
+            OAUTH_SECRETS,
+        ),
         ({"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": "another-lab"}, REFUSED),
         ({"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": " "}, REFUSED),
         (
