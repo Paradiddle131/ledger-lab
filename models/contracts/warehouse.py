@@ -154,7 +154,7 @@ def main() -> int:
             check=False,
             cwd=folder,
         )
-    print(run.stdout.replace(project, "<project>"))
+    print(run.stdout)
     if run.returncode != 0 and not run.stdout.strip():
         print(f"warehouse contract test: the engine exited {run.returncode}", file=sys.stderr)
     return run.returncode
