@@ -73,7 +73,9 @@ def digest(rows: str) -> tuple[int, str]:
     return int(found[0]), str(found[1])
 
 
-def test_the_digest_ignores_row_order_and_tells_a_changed_cell_or_a_null_apart() -> None:
+def test_the_digest_ignores_row_order_and_tells_these_changed_rows_apart() -> None:
+    """Row order kept out, and a changed decimal, a null in place of a decimal and a duplicated
+    row told apart; not a text cell holding U+001E or U+001F (see the module's docstring)."""
     rows = "('a', 1.50::decimal(28,6)), ('b', 2::decimal(28,6))"
     same = digest(rows)
     assert digest("('b', 2::decimal(28,6)), ('a', 1.50::decimal(28,6))") == same
@@ -215,6 +217,22 @@ def test_a_digest_or_a_row_count_that_differs_differs(
     assert run(tmp_path, monkeypatch, LOCAL, {"r": (columns, other)})[0] == 1
     fewer = remote_digest("('a', 0.15::decimal(28,6))", "k, amt")
     assert run(tmp_path / "b", monkeypatch, LOCAL, {"r": (columns, fewer)})[0] == 1
+
+
+def test_a_row_count_alone_that_differs_differs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same digest stubbed with another count, which the digest itself would not allow."""
+    columns = [Column("k", "STRING"), Column("amt", "NUMERIC")]
+    rows, digest_ = remote_digest(ROWS, "k, amt")
+    assert run(tmp_path, monkeypatch, LOCAL, {"r": (columns, (rows + 1, digest_))})[0] == 1
+
+
+def test_a_renamed_column_differs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Even with the same digest."""
+    columns = [Column("k", "STRING"), Column("amount", "NUMERIC")]
+    status, _ = run(tmp_path, monkeypatch, LOCAL, {"r": (columns, remote_digest(ROWS, "k, amt"))})
+    assert status == 1
 
 
 def test_a_relation_on_one_side_only_differs(

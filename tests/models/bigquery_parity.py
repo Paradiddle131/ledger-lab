@@ -17,7 +17,8 @@ then written as a decimal, since dbt's float type is DuckDB's 32-bit FLOAT and B
 FLOAT64 (a score of 0.9 is 0.8999999761... in the first); a boolean as `true` or `false`; a date as
 `YYYY-MM-DD`; a BigQuery TIMESTAMP in UTC, and a DuckDB TIMESTAMP or BigQuery DATETIME as it is
 stored, as `YYYY-MM-DD HH:MM:SS.ffffff`. A type outside these stops the comparison, naming the
-engine and type.
+engine and type. A text cell holding U+001E reads as a null, and a U+001F inside a text cell as a
+cell boundary, so rows that differ only so share a digest.
 
 A relation matches when it is on both sides, its column names are the same in the same order,
 every column's pair of families is one of `SAME_FAMILY`, and its row count and digest are equal.
