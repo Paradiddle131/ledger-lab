@@ -794,7 +794,9 @@ def test_the_digest_holds_no_column_type_without_a_rule() -> None:
 
 def guarded[T](what: str, env: Mapping[str, str], call: Callable[[], T]) -> T | str:
     """`call()`'s answer, or on an `Exception` fixed text: `what`, the exception's type and, for a
-    `LoadError`, its message with each value of `env` but the location replaced by `<hidden>`. An
+    `LoadError`, its message with each value of `env` but the location, stripped of surrounding
+    whitespace, replaced by `<hidden>`; one pattern holds the values, longest first, so a value
+    that holds another (a session project that holds the lab's) is replaced whole. An
     interrupt (a `BaseException` that is no `Exception`) is raised again as a new exception of its
     type with no arguments, after the `except` block, so its traceback starts in this frame and
     holds no frame of `call` and no exception context; this frame's locals are then `what`, `env`,
@@ -804,9 +806,10 @@ def guarded[T](what: str, env: Mapping[str, str], call: Callable[[], T]) -> T | 
         return call()
     except Exception as error:
         message = str(error) if isinstance(error, LoadError) else ""
-        for key, value in env.items():
-            if value and key != LOCATION_VARIABLE:
-                message = message.replace(value, "<hidden>")
+        values = {v.strip() for k, v in env.items() if k != LOCATION_VARIABLE} - {""}
+        if values:
+            longest = sorted(values, key=len, reverse=True)
+            message = re.sub("|".join(map(re.escape, longest)), "<hidden>", message)
         return f"{what}: {type(error).__name__}" + (f": {message}" if message else "")
     except BaseException as error:
         interrupted = type(error)
@@ -1078,6 +1081,53 @@ def test_a_load_error_message_has_the_project_and_key_hidden() -> None:
         raise LoadError(f"{PROJECT} {ENV_KEYED[KEY_VARIABLE]} us-central1")
 
     assert guarded("it", ENV_KEYED, refuse) == "it: LoadError: <hidden> <hidden> us-central1"
+
+
+@pytest.mark.parametrize(
+    ("env", "message", "seen"),
+    [
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "lab", "GCP_PROJECT": "lab-session-7"},
+            "x lab-session-7 y lab",
+            "x <hidden> y <hidden>",
+        ),
+        (
+            {"GCP_PROJECT": "lab-session-7", "LEDGER_LAB_GCP_PROJECT": "lab"},
+            "x lab-session-7 y lab",
+            "x <hidden> y <hidden>",
+        ),
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "invented-lab", KEY_VARIABLE: "invented-lab-k3y-0123abcd"},
+            "key invented-lab-k3y-0123abcd",
+            "key <hidden>",
+        ),
+        ({"LEDGER_LAB_GCP_PROJECT": "invented-proj\n"}, "x invented-proj y", "x <hidden> y"),
+        ({"LEDGER_LAB_GCP_PROJECT": " invented-proj "}, "x invented-proj y", "x <hidden> y"),
+        ({"GCP_PROJECT": "another-lab-42"}, "in another-lab-42", "in <hidden>"),
+        ({"LEDGER_LAB_GCP_PROJECT": "a.b"}, "axb a.b", "axb <hidden>"),
+        ({"LEDGER_LAB_GCP_PROJECT": "  ", LOCATION_VARIABLE: "us-central1"}, "us-central1", None),
+    ],
+    ids=[
+        "the session project holds the lab's",
+        "the same, the lab's first",
+        "the key holds the project",
+        "a project with a new line",
+        "a project padded with spaces",
+        "the session project alone",
+        "a value with a pattern character",
+        "a blank value and the location",
+    ],
+)
+def test_a_padded_or_overlapping_value_is_hidden_whole(
+    env: dict[str, str], message: str, seen: str | None
+) -> None:
+    def refuse() -> None:
+        raise LoadError(message)
+
+    assert guarded("it", LabEnv({LOCATION_VARIABLE: "us-central1", **env}), refuse) == (
+        f"it: LoadError: {seen or message}"
+    )
+    assert guarded("it", env, refuse) == f"it: LoadError: {seen or message}"
 
 
 # A probe of the live tests' path, run by pytest in a subprocess: the bq stand-in describes one
