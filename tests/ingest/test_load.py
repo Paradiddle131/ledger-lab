@@ -1217,8 +1217,9 @@ HIDDEN = "LoadError: denied in <hidden> for <hidden>"
 def test_a_failing_live_test_prints_no_project_and_no_key(
     tmp_path: Path, flags: list[str], interrupt: bool, test: str, fail_at: str, what: str
 ) -> None:
-    """Each live test's path, made to fail at each of its BigQuery calls by a `LoadError` whose
-    message holds the invented project and key and by an interrupt, under pytest's default
+    """Each live test's path, made to fail at its first `show`, its counts query, its digest query
+    or its distinct-values query (the run, not the dry run) by a `LoadError` whose message holds
+    the invented project and key and by an interrupt, under pytest's default
     traceback, under `--tb=long -l --full-trace` and under `-vv -l`: the failing call is reached,
     the output shows the failure (for a `LoadError`, its message with both hidden) and holds
     neither the invented project nor the invented key."""
