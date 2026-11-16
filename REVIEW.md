@@ -10,7 +10,7 @@ Each item is backticked globs and its lenses only, a form every version of `tier
 - `ingest/**`, `tests/ingest/**`, `models/tests/**`; lenses: leak-hunter
 - `models/models/staging/**`, `models/models/intermediate/**`, `models/models/marts/**`, `models/models/reconciliations/**`, `models/macros/vendor_match.sql`, `models/contracts/payments.odcs.yaml`, `semantics/metricflow/**`, `tests/models/**`; lenses: leak-hunter
 - `models/seeds/**`, `tests/models/*_sample.*`, `models/macros/landed_or_sample.sql`, `models/dbt_project.yml`; lenses: leak-hunter, guardrail-reviewer
-- `ingest/fetch.py`, `ingest/bucket.py`, `ingest/sources.yaml`, `ingest/sources.schema.json`, `tests/ingest/test_fetch.py`, `tests/ingest/test_bucket.py`; lenses: control-prober, guardrail-reviewer
+- `ingest/fetch.py`, `ingest/bucket.py`, `ingest/load.py`, `ingest/sources.yaml`, `ingest/sources.schema.json`, `tests/ingest/test_fetch.py`, `tests/ingest/test_bucket.py`, `tests/ingest/test_load.py`; lenses: control-prober, guardrail-reviewer
 - `access/personas.yaml`, `access/schema.json`, `controls/**`, `tests/test_access.py`, `tests/test_controls.py`; lenses: guardrail-reviewer, control-prober, claims-auditor
 - `access/**`, `tests/access/**`, `tests/platform/test_access_rules.py`, `tests/platform/predefined_roles.json`; lenses: guardrail-reviewer, leak-hunter, control-prober
 - `tests/conftest.py`; lenses: control-prober
@@ -27,7 +27,7 @@ Each item is backticked globs and its lenses only, a form every version of `tier
 2. Landing: every source's step that writes landed rows, the quality suites that may only count a column holding a name, the landed leak hunts, and the dbt tests, among them those that no identifier sits in clear beside a hashed name.
 3. The models and metric definitions that carry landed payees, suppliers and document numbers, hashed or in clear, into the data products, the payments contract that names the personal columns, and their tests.
 4. Committed samples of real rows, each needing its licence confirmed and none carrying a person in clear or a hash made with a real key, and the macro that picks the landed files or the samples for every model and refuses a bucket landing, with the dbt project file that sets its default and where the models are read from.
-5. The fetch-and-verify kit: the recorded sources and checksums, the download that refuses bytes it cannot verify, and the bucket landing.
+5. The fetch-and-verify kit: the recorded sources and checksums, the download that refuses bytes it cannot verify, the bucket landing, and the warehouse loader, which takes its project only from the lab's project module and its location only from the free-tier regions `platform/gcp/variables.tf` allows, refusing a run without either before any call, and stops a run, before its first load or after any load, when the tables `bq ls` lists in `landed` hold more than its storage cap.
 6. The persona and controls catalogues: who holds which duty and grant, and a control marked implemented only beside its proving test.
 7. Access and identity definitions: the column tags, visibility matrix, aggregates, access review, the persona identities and the BigQuery grants generated from them.
 8. The shared test fixtures, among them the `as_persona` fixture every access test acts through.
