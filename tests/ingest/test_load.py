@@ -686,6 +686,26 @@ def test_a_query_answer_of_unexpected_shape_is_refused(answer: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("answer", "rows"),
+    [
+        ("", 0),
+        ("[]", 0),
+        (json.dumps([{"n": "1", "c0": "1"}] * 2), 2),
+        (json.dumps([{"n": "1", **{f"s{i}": "1" for i in range(8)}}] * 2), 2),
+    ],
+    ids=["an empty answer", "an empty list", "two rows of counts", "two rows of a digest"],
+)
+@pytest.mark.parametrize("ask", [counts, digest], ids=["counts", "digest"])
+def test_a_one_row_query_answered_with_another_number_of_rows_is_refused(
+    ask: Callable[[str, Mapping[str, str], Bq], Any], answer: str, rows: int
+) -> None:
+    bq = Bq()
+    bq.answer = answer
+    with pytest.raises(LoadError, match=f"^the query answered {rows} rows, not one$"):
+        ask("chicago-contracts", ENV, bq)
+
+
+@pytest.mark.parametrize(
     "env",
     [
         {"GCP_PROJECT": "another-lab", "LEDGER_LAB_BQ_LOCATION": "us-central1"},
@@ -792,11 +812,27 @@ def test_the_digest_holds_no_column_type_without_a_rule() -> None:
         bigquery_digest_sql("`t`", [("`x`", "FLOAT")])
 
 
+def test_a_local_digest_answered_with_no_row_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DuckDB answers an aggregate with one row; a query that answers none is refused as a
+    `LoadError`, not an unpacking error."""
+    path = landed_table(tmp_path, ROWS)
+    monkeypatch.setattr(
+        "ingest.load.duckdb_digest_sql",
+        lambda source, columns: f"SELECT 1 AS n FROM {source} LIMIT 0",  # noqa: S608
+    )
+    with pytest.raises(LoadError, match="^the digest answered unexpectedly$"):
+        local_digest(path)
+
+
 def guarded[T](what: str, env: Mapping[str, str], call: Callable[[], T]) -> T | str:
     """`call()`'s answer, or on an `Exception` fixed text: `what`, the exception's type and, for a
     `LoadError`, its message with each value of `env` but the location, stripped of surrounding
-    whitespace, replaced by `<hidden>`; one pattern holds the values, longest first, so a value
-    that holds another (a session project that holds the lab's) is replaced whole. An
+    whitespace, hidden: each place in the message where a value occurs, overlapping places
+    included, is found, and each run of places that overlap or touch is replaced by one
+    `<hidden>`, so a value that holds another (a session project that holds the lab's) or that
+    starts inside another is hidden whole. An
     interrupt (a `BaseException` that is no `Exception`) is raised again as a new exception of its
     type with no arguments, after the `except` block, so its traceback starts in this frame and
     holds no frame of `call` and no exception context; this frame's locals are then `what`, `env`,
@@ -807,9 +843,19 @@ def guarded[T](what: str, env: Mapping[str, str], call: Callable[[], T]) -> T | 
     except Exception as error:
         message = str(error) if isinstance(error, LoadError) else ""
         values = {v.strip() for k, v in env.items() if k != LOCATION_VARIABLE} - {""}
-        if values:
-            longest = sorted(values, key=len, reverse=True)
-            message = re.sub("|".join(map(re.escape, longest)), "<hidden>", message)
+        spans = sorted(
+            (found.start(), found.start() + len(value))
+            for value in values
+            for found in re.finditer(f"(?={re.escape(value)})", message)
+        )
+        merged: list[list[int]] = []
+        for start, end in spans:
+            if merged and start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        for start, end in reversed(merged):
+            message = message[:start] + "<hidden>" + message[end:]
         return f"{what}: {type(error).__name__}" + (f": {message}" if message else "")
     except BaseException as error:
         interrupted = type(error)
@@ -1130,6 +1176,45 @@ def test_a_padded_or_nested_value_is_hidden_whole(
     assert guarded("it", env, refuse) == f"it: LoadError: {seen or message}"
 
 
+@pytest.mark.parametrize(
+    ("env", "message", "seen"),
+    [
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "ab-cd", "GCP_PROJECT": "cd-ef"},
+            "x ab-cd-ef y",
+            "x <hidden> y",
+        ),
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "cd-ef", "GCP_PROJECT": "ab-cd"},
+            "x ab-cd-ef y",
+            "x <hidden> y",
+        ),
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "ab-cd", KEY_VARIABLE: "cd-ef-gh"},
+            "x ab-cd-ef-gh y cd-ef-gh",
+            "x <hidden> y <hidden>",
+        ),
+        ({"LEDGER_LAB_GCP_PROJECT": "ab-ab"}, "x ab-ab-ab y", "x <hidden> y"),
+        ({"LEDGER_LAB_GCP_PROJECT": "ab", "GCP_PROJECT": "cd"}, "x abcd y", "x <hidden> y"),
+    ],
+    ids=[
+        "the end of one value starts another",
+        "the same, the other value first",
+        "the key starts at the end of the project",
+        "a value overlapping itself",
+        "two values side by side",
+    ],
+)
+def test_overlapping_or_touching_values_are_hidden_as_one(
+    env: dict[str, str], message: str, seen: str
+) -> None:
+    def refuse() -> None:
+        raise LoadError(message)
+
+    assert guarded("it", LabEnv(env), refuse) == f"it: LoadError: {seen}"
+    assert guarded("it", env, refuse) == f"it: LoadError: {seen}"
+
+
 # A probe of the live tests' path, run by pytest in a subprocess. The bq stand-in is `Bq` over the
 # probe's landed file, so each call answers as a loaded table that holds the file's rows would, but
 # one: the `show`, the counts query, the digest query or the distinct-values query (each the run,
@@ -1203,7 +1288,8 @@ ALL = ["--tb=long", "-l", "--full-trace"]
 
 
 # An interrupt runs only under `ALL`: without `--full-trace` pytest prints a `KeyboardInterrupt` as
-# one line with no frame and no local, so the other flag sets would show the hiding nothing.
+# one line, where it was raised and its type, so the other flag sets would show the hiding nothing;
+# with it, pytest prints each frame with its arguments, never its locals.
 @pytest.mark.parametrize(
     ("interrupt", "flags"),
     [(False, []), (False, ALL), (False, ["-vv", "-l"]), (True, ALL)],
