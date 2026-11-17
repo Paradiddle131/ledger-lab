@@ -350,7 +350,13 @@ def test_aggregate_group_totals_are_each_entitys_rows_of_the_minimum_group(
         "amount_at_actual_rates",
     }
     readers = aggregate_readers(access, "group-totals")
-    assert {"metric-owner", *accountants(access)} - {"payables-clerk"} <= set(readers)
+    assert set(readers) == {
+        "accountant-chicago",
+        "accountant-uk-transport",
+        "accountant-nl-government",
+        "approver",
+        "metric-owner",
+    }
 
     def tables(doc: Doc, persona: str) -> list[Aggregate]:
         return [

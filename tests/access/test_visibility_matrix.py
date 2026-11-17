@@ -47,10 +47,10 @@ KINDS = ("clear", "masked")
 # The cells that reach rows, those that only aggregate them, and those that change something.
 ROWS = {"clear", "edit"}
 WRITES = {"edit", "draft", "post"}
-# Each group product of figures summed from an entity-scoped product's rows, stated here: a group
-# total covers the payments of one entity's span and basis, so a row of it can cover fewer payees
-# than the minimum group, and a persona that reads payments only in aggregate reads it only in
-# aggregate too.
+# Each group product of figures summed from an entity-scoped product's rows, stated here: a
+# group-totals row sums one entity's figures of a span and basis, so read in clear it can cover
+# fewer payees than the minimum group, and a persona that reads payments in aggregate reads it in
+# aggregate too, or not at all.
 SUMMED_FROM = {"group-totals": "payments"}
 
 
