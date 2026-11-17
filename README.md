@@ -86,7 +86,8 @@ The dbt models build on DuckDB in the session by default, reading the landed fil
 The BigQuery target needs `LEDGER_LAB_BQ_LOCATION` set to one of the free-tier regions `platform/gcp/variables.tf` allows (`us-west1`, `us-central1`, `us-east1`, in lower case; surrounding whitespace is trimmed); unset, empty or any other value, `US` included, makes dbt refuse the profile when it reads it, before any connection.
 Run dbt from the repository's root: the default database path is read relative to the folder dbt starts in.
 From the root, a DuckDB build writes its database to `models/target/ledger_lab.duckdb`, in the project's target folder, which dbt makes when it parses the project, so a fresh clone needs no folder made first; `LEDGER_LAB_DUCKDB_PATH` names another file, in a folder that must exist, and a build that moves the target folder (`--target-path`, `DBT_TARGET_PATH`) needs it.
-A build started inside `models/` with no `LEDGER_LAB_DUCKDB_PATH` stops when it opens the database, with DuckDB's `Cannot open file ".../models/models/target/ledger_lab.duckdb": No such file or directory`; start it from the root instead:
+On a fresh clone, a build started inside `models/` with no `LEDGER_LAB_DUCKDB_PATH` stops when it opens the database, with DuckDB's `Cannot open file ".../models/models/target/ledger_lab.duckdb": No such file or directory`; if `models/models/target/` exists, it writes a second database there instead.
+Start it from the root:
 
 ```bash
 uv run dbt build --project-dir models --profiles-dir models

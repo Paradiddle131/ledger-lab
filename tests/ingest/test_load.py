@@ -575,9 +575,8 @@ def counted(rows: Any, size: Any) -> str:
     )
 
 
-# Counts `int()` takes or truncates that are no JSON string of ASCII digits, each tried as the row
-# count and as the byte count. `float("inf")` goes out as JSON's `Infinity`, which `json.loads`
-# reads back.
+# Values that are no JSON string of 1 to 19 ASCII digits, each tried at every count the loader
+# reads. `float("inf")` goes out as JSON's `Infinity`, which `json.loads` reads back.
 NOT_A_COUNT = [
     True,
     False,
@@ -1049,19 +1048,32 @@ def test_the_lab_env_holds_only_the_variables_read_and_shows_no_value() -> None:
     assert all(value not in shown for value in source.values())
 
 
+def shows_no_value(text: str, key: str, token: str) -> bool:
+    """Whether `text` holds neither invented value nor this process's value of any of
+    `LabEnv.KEYS`; the values are read inside the expression, by name, so no frame of this
+    function binds one."""
+    return (
+        key not in text
+        and token not in text
+        and not any(
+            os.environ.get(name, "").strip() and os.environ[name] in text for name in LabEnv.KEYS
+        )
+    )
+
+
 def lab_env_shape(key: str, token: str) -> tuple[str, bool, bool, bool]:
     """What `lab_env()` gives, as its type's name, whether it reads the hash key, whether it leaves
-    the token out and whether its `repr` and `str` show none of the invented values nor this
-    process's values of `LabEnv.KEYS`. Only these come back, so a failing assertion on them shows
-    no value of this process's environment, under `-l` included."""
+    the token out and whether its `repr` and `str` pass `shows_no_value`. Anything but a `LabEnv`
+    comes back at once as its type's name and three falses, before any other use of it, and no
+    local of this function holds a value of this process's environment."""
     env = lab_env()
-    shown = repr(env) + str(env)
-    present = [os.environ[k] for k in LabEnv.KEYS if os.environ.get(k, "").strip()]
+    if not isinstance(env, LabEnv):
+        return (type(env).__name__, False, False, False)
     return (
         type(env).__name__,
         env.get(KEY_VARIABLE) == key,
         "SOME_TOKEN" not in env,
-        all(value not in shown for value in [key, token, *present]),
+        shows_no_value(repr(env) + str(env), key, token),
     )
 
 
@@ -1076,6 +1088,38 @@ def test_the_live_tests_env_is_a_lab_env_of_the_process_environment(
     monkeypatch.setenv(KEY_VARIABLE, key)
     monkeypatch.setenv("SOME_TOKEN", token)
     assert lab_env_shape(key, token) == ("LabEnv", True, True, True)
+
+
+def planted_hits(planted: Sequence[str], key: str, token: str) -> int:
+    """How many of `planted` the outcome of `lab_env_shape` shows: its answer's `repr`, or, when it
+    raises, its failure as pytest prints it under `-l` (long style, with each frame's locals).
+    Only the count comes back."""
+    try:
+        text = repr(lab_env_shape(key, token))
+    except Exception:  # noqa: BLE001
+        text = str(pytest.ExceptionInfo.from_current().getrepr(showlocals=True, style="long"))
+    return sum(value in text for value in planted)
+
+
+@pytest.mark.parametrize(
+    "regression",
+    [lambda: None, object, lambda: list(os.environ.items()), lambda: tuple(os.environ)],
+    ids=["none", "an object", "the environment's items", "the environment's names"],
+)
+def test_a_lab_env_regression_shows_no_value_through_the_shape_helper(
+    monkeypatch: pytest.MonkeyPatch, regression: Callable[[], object]
+) -> None:
+    """With `lab_env` broken to give something other than a `LabEnv`, `lab_env_shape` shows no
+    value of the environment: neither in its answer nor, should it raise, in the failure pytest
+    prints with each frame's locals. The planted values are invented and set on two of
+    `LabEnv.KEYS`, the hash key and the location."""
+    key, token = f"invented-key-{secrets.token_hex(16)}", f"invented-{secrets.token_hex(8)}"
+    location = f"invented-region-{secrets.token_hex(6)}"
+    monkeypatch.setenv(KEY_VARIABLE, key)
+    monkeypatch.setenv(LOCATION_VARIABLE, location)
+    monkeypatch.setenv("SOME_TOKEN", token)
+    monkeypatch.setitem(globals(), "lab_env", regression)
+    assert planted_hits([key, location, token], key, token) == 0
 
 
 def local_files() -> list[str]:
