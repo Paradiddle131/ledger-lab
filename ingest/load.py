@@ -137,7 +137,7 @@ def landed_names() -> frozenset[str]:
 
 def table_name(name: str, landed: frozenset[str] | None = None) -> str:
     """The `landed` table a landed file loads into."""
-    if not LANDED_NAME.match(name) or name not in (landed or landed_names()):
+    if not LANDED_NAME.fullmatch(name) or name not in (landed or landed_names()):
         raise LoadError(f"{name!r} is not a landed file's name")
     return name.replace("-", "_")
 
@@ -368,6 +368,14 @@ def _query(project: str, where: str, sql: str, run: Runner) -> list[dict[str, An
     return rows
 
 
+def _one_row(project: str, where: str, sql: str, run: Runner) -> dict[str, Any]:
+    """The one row of a query that answers one, refused when the answer holds another number."""
+    rows = _query(project, where, sql, run)
+    if len(rows) != 1:
+        raise LoadError(f"the query answered {len(rows)} rows, not one")
+    return rows[0]
+
+
 @dataclass(frozen=True)
 class Asked:
     """One landed table to ask of: where it is and its columns, from its own `bq show`."""
@@ -399,7 +407,7 @@ def counts(name: str, env: Mapping[str, str], run: Runner = run_tool) -> tuple[i
     """The loaded table's rows and each column's non-null cells, in column order."""
     t = asked(name, env, run)
     cells = ", ".join(f"COUNT({t.column(c)}) AS c{i}" for i, (c, _) in enumerate(t.columns))
-    (row,) = _query(t.project, t.where, f"SELECT COUNT(*) AS n, {cells} FROM {t.reference}", run)  # noqa: S608
+    row = _one_row(t.project, t.where, f"SELECT COUNT(*) AS n, {cells} FROM {t.reference}", run)  # noqa: S608
     try:
         return count(row["n"]), [count(row[f"c{i}"]) for i in range(len(t.columns))]
     except (KeyError, TypeError, ValueError):
@@ -491,8 +499,7 @@ def digest(name: str, env: Mapping[str, str], run: Runner = run_tool) -> Digest:
     """The loaded table's digest, in BigQuery."""
     t = asked(name, env, run)
     sql = bigquery_digest_sql(t.reference, [(t.column(c), kind) for c, kind in t.columns])
-    (row,) = _query(t.project, t.where, sql, run)
-    return digest_of(row)
+    return digest_of(_one_row(t.project, t.where, sql, run))
 
 
 def local_digest(path: Path) -> Digest:
@@ -504,8 +511,10 @@ def local_digest(path: Path) -> Digest:
     columns = [('"' + str(c).replace('"', '""') + '"', str(k)) for c, k, *_ in kinds]
     cursor = con.execute(duckdb_digest_sql("read_parquet(?)", columns), [str(path)])
     names = [d[0] for d in cursor.description or ()]
-    values = cursor.fetchone()
-    cells = (None if v is None else str(v) for v in values or ())
+    rows = cursor.fetchall()
+    if len(rows) != 1:
+        raise LoadError(f"the local digest answered {len(rows)} rows, not one")
+    cells = (None if v is None else str(v) for v in rows[0])
     return digest_of(dict(zip(names, cells, strict=True)))
 
 
