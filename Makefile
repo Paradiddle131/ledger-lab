@@ -27,8 +27,10 @@ lint: sync
 typecheck: sync
 	uv run pyright
 
+# LOADOUT reaches pytest for the cross-check with the review skill's tier.sh
+# (tests/test_review_routing.py), which skips, saying so, without it.
 test: sync
-	uv run pytest
+	LOADOUT='$(LOADOUT)' uv run pytest
 
 ids:
 	@test -f $(GUARDS)/check-process-ids.py || { echo "ids: no rules collection at $(LOADOUT); pass LOADOUT=<clone>" >&2; exit 1; }

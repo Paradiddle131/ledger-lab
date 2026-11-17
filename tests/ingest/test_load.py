@@ -38,6 +38,7 @@ from ingest.load import (
     Digest,
     LoadError,
     bigquery_digest_sql,
+    count,
     counts,
     digest,
     distinct_values,
@@ -658,9 +659,8 @@ def counted(rows: Any, size: Any) -> str:
     )
 
 
-# Counts `int()` takes or truncates that are no JSON string of ASCII digits, each tried as the row
-# count and as the byte count. `float("inf")` goes out as JSON's `Infinity`, which `json.loads`
-# reads back.
+# Values that are no JSON string of 1 to 19 ASCII digits, each tried at every count the loader
+# reads. `float("inf")` goes out as JSON's `Infinity`, which `json.loads` reads back.
 NOT_A_COUNT = [
     True,
     False,
@@ -671,6 +671,8 @@ NOT_A_COUNT = [
     -0.5,
     -0.9,
     float("inf"),
+    float("-inf"),
+    float("nan"),
     "１２",
     "١",
     "-1",
@@ -681,6 +683,8 @@ NOT_A_COUNT = [
     "1_000",
     "1.0",
     "",
+    "1" * 20,
+    "1" * 5000,
     ["1"],
 ]
 
@@ -693,6 +697,24 @@ def test_a_count_that_is_no_ascii_digit_string_is_an_answer_of_unexpected_shape(
     answer = counted(value, "1") if field == "numRows" else counted("1", value)
     with pytest.raises(LoadError, match="unexpected shape"):
         table_of("chicago-contracts", answer, PROJECT)
+
+
+@pytest.mark.parametrize("value", NOT_A_COUNT, ids=[repr(v)[:20] for v in NOT_A_COUNT])
+def test_count_refuses_with_a_value_error(value: Any) -> None:
+    with pytest.raises(ValueError, match="no string of ASCII digits"):
+        count(value)
+
+
+def test_count_bounds_the_digits_without_pythons_integer_string_limit() -> None:
+    limit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(0)
+    try:
+        for value in ("1" * 20, "1" * 5000):
+            with pytest.raises(ValueError, match="no string of ASCII digits"):
+                count(value)
+        assert count("9223372036854775807") == 2**63 - 1
+    finally:
+        sys.set_int_max_str_digits(limit)
 
 
 def test_an_ascii_digit_string_is_a_count() -> None:
@@ -774,6 +796,47 @@ def test_a_dry_run_answer_of_unexpected_shape_is_refused_and_nothing_runs(dry: s
     with pytest.raises(LoadError, match="dry run answered unexpectedly"):
         counts("chicago-contracts", ENV, bq)
     assert bq.verbs() == ["show", "query"]
+
+
+@pytest.mark.parametrize("value", NOT_A_COUNT, ids=[repr(v)[:20] for v in NOT_A_COUNT])
+def test_a_dry_run_byte_count_that_is_no_ascii_digit_string_is_refused_and_nothing_runs(
+    value: Any,
+) -> None:
+    bq = Bq()
+    bq.dry_answer = json.dumps({"statistics": {"totalBytesProcessed": value}})
+    with pytest.raises(LoadError, match="dry run answered unexpectedly"):
+        counts("chicago-contracts", ENV, bq)
+    assert bq.verbs() == ["show", "query"]
+
+
+@pytest.mark.parametrize("value", NOT_A_COUNT, ids=[repr(v)[:20] for v in NOT_A_COUNT])
+@pytest.mark.parametrize("cell", ["n", "c0"])
+def test_a_count_cell_that_is_no_ascii_digit_string_is_refused(cell: str, value: Any) -> None:
+    bq = Bq()
+    bq.answer = json.dumps([{"n": "3", "c0": "2", cell: value}])
+    with pytest.raises(LoadError, match="^the counts answered unexpectedly$"):
+        counts("chicago-contracts", ENV, bq)
+
+
+NOT_A_SUM = [v for v in NOT_A_COUNT if v is not None]
+
+
+@pytest.mark.parametrize("value", NOT_A_SUM, ids=[repr(v)[:20] for v in NOT_A_SUM])
+@pytest.mark.parametrize("cell", ["n", "s0", "s7"])
+def test_a_digest_cell_that_is_no_ascii_digit_string_is_refused(cell: str, value: Any) -> None:
+    bq = Bq()
+    bq.answer = json.dumps([{"n": "3", **{f"s{i}": "2" for i in range(8)}, cell: value}])
+    with pytest.raises(LoadError, match="^the digest answered unexpectedly$"):
+        digest("chicago-contracts", ENV, bq)
+
+
+def test_a_digest_reads_a_null_sum_as_zero_and_refuses_a_null_row_count() -> None:
+    bq = Bq()
+    bq.answer = json.dumps([{"n": "0", **{f"s{i}": None for i in range(8)}}])
+    assert digest("chicago-contracts", ENV, bq) == Digest(0, (0,) * 8)
+    bq.answer = json.dumps([{"n": None, **{f"s{i}": "1" for i in range(8)}}])
+    with pytest.raises(LoadError, match="^the digest answered unexpectedly$"):
+        digest("chicago-contracts", ENV, bq)
 
 
 @pytest.mark.parametrize("answer", ["not json", json.dumps({"n": "1"}), json.dumps(["1"])])
@@ -1169,6 +1232,326 @@ def test_the_lab_env_holds_only_the_variables_read_and_shows_no_value() -> None:
     assert dict(env) == {k: v for k, v in source.items() if k != "SOME_TOKEN"}
     shown = repr(env) + str(env)
     assert all(value not in shown for value in source.values())
+
+
+# The check of `lab_env()` itself runs in a child Python that imports this module, plants an
+# invented value on each of the hash key, the location and `SOME_TOKEN` that its inherited
+# environment leaves unset or blank, calls `lab_env()` and compares what it gives against its own
+# `os.environ`. It prints one fixed token per check to stdout and writes what `lab_env()` gave to
+# stderr when a check fails, for a person running it by hand; the parent discards that stderr.
+# `LAB_ENV_REGRESSION`, set only by the probe below, names a regression the child applies to
+# `lab_env` or `LabEnv` before the call; a name it does not know stops it before it prints a token.
+LAB_ENV_CHILD = """
+import os
+import secrets
+import sys
+
+sys.path[:0] = sys.argv[1:]
+
+import test_load as T
+
+PLANTED = (T.KEY_VARIABLE, T.LOCATION_VARIABLE, "SOME_TOKEN")
+for name in PLANTED:
+    if not os.environ.get(name, "").strip():
+        os.environ[name] = f"invented-{secrets.token_hex(16)}"
+
+
+class Leaky(T.LabEnv):
+    def __repr__(self):
+        return repr(self._values)
+
+    def __contains__(self, key):
+        raise RuntimeError("broken")
+
+
+class Subclass(T.LabEnv):
+    pass
+
+
+def reads_an_unset_variable(self, source):
+    self._values = {key: source[key] for key in (*self.KEYS, "LAB_ENV_UNSET")}
+
+
+def drops_the_hash_key(self, source):
+    self._values = {k: source[k] for k in self.KEYS if k in source and k != T.KEY_VARIABLE}
+
+
+def raw_print():
+    sys.stdout.buffer.write(os.environ[T.KEY_VARIABLE].encode() + bytes([255, 10]))
+    sys.stdout.flush()
+    return T.LabEnv(os.environ)
+
+
+REGRESSIONS = {
+    "": lambda: None,
+    "none": lambda: setattr(T, "lab_env", lambda: None),
+    "a copy": lambda: setattr(T, "lab_env", lambda: dict(os.environ)),
+    "the environment": lambda: setattr(T, "lab_env", lambda: os.environ),
+    "a string": lambda: setattr(T, "lab_env", lambda: T.LabEnv(str(os.environ))),
+    "an unset variable read": lambda: setattr(T.LabEnv, "__init__", reads_an_unset_variable),
+    "a leaky subclass": lambda: setattr(T, "lab_env", lambda: Leaky(os.environ)),
+    "a raw print": lambda: setattr(T, "lab_env", raw_print),
+    "a plain subclass": lambda: setattr(T, "lab_env", lambda: Subclass(os.environ)),
+    "the hash key dropped": lambda: setattr(T.LabEnv, "__init__", drops_the_hash_key),
+    "a repr of the values": lambda: setattr(
+        T.LabEnv, "__repr__", lambda self: f"LabEnv({self._values!r})"
+    ),
+    "the token claimed": lambda: setattr(
+        T.LabEnv, "__contains__", lambda self, key: key == "SOME_TOKEN" or key in self._values
+    ),
+}
+REGRESSIONS[os.environ.get("LAB_ENV_REGRESSION", "")]()
+
+
+def shows_a_value(text):
+    return any(
+        os.environ.get(k, "").strip() and os.environ[k] in text
+        for k in (*T.LabEnv.KEYS, "SOME_TOKEN")
+    )
+
+
+CHECKS = {
+    "type": lambda env: type(env) is T.LabEnv,
+    "values": lambda env: dict(env)
+    == {k: os.environ[k] for k in T.LabEnv.KEYS if k in os.environ},
+    "shown": lambda env: not shows_a_value(repr(env) + str(env)),
+    "token": lambda env: "SOME_TOKEN" not in env,
+}
+
+try:
+    env = T.lab_env()
+except Exception:
+    print("call:bad")
+    raise
+print("call:ok")
+failed = False
+for name, check in CHECKS.items():
+    try:
+        ok = check(env) is True
+    except Exception:
+        ok = False
+    failed = failed or not ok
+    print(f"{name}:{'ok' if ok else 'bad'}")
+if failed:
+    print(f"lab_env() gave {env!r}", file=sys.stderr)
+"""
+LAB_ENV_CHECKS = ("call", "type", "values", "shown", "token")
+LAB_ENV_OK = tuple(f"{check}:ok" for check in LAB_ENV_CHECKS)
+LAB_ENV_BAD = tuple(f"{check}:bad" for check in LAB_ENV_CHECKS)
+
+
+def lab_env_checks() -> tuple[str, ...]:
+    """The child's verdict on `lab_env()`, as fixed tokens only: each line of its stdout, read as
+    bytes and decoded as ASCII with replacement, that is one of `LAB_ENV_OK` or `LAB_ENV_BAD`; any
+    other line as "unexpected"; "timeout" when the child does not finish in 120 seconds; and "not
+    run" for any other exception out of the run or the decode, which is caught here, so no frame
+    of the run reaches pytest. The child inherits this process's environment (no mapping of it is
+    built here) and its stderr is discarded. Limits: an interrupt (`KeyboardInterrupt`) is not
+    caught."""
+    try:
+        return tuple(
+            [
+                line if line in LAB_ENV_OK + LAB_ENV_BAD else "unexpected"
+                for line in subprocess.run(  # noqa: S603
+                    [
+                        sys.executable,
+                        "-c",
+                        LAB_ENV_CHILD,
+                        *(str(p) for p in (REPO, REPO / "tests", REPO / "tests" / "ingest")),
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    cwd=REPO,
+                    timeout=120,
+                    check=False,
+                )
+                .stdout.decode("ascii", errors="replace")
+                .splitlines()
+            ]
+        )
+    except subprocess.TimeoutExpired:
+        return ("timeout",)
+    except Exception:  # noqa: BLE001
+        return ("not run",)
+
+
+def test_the_live_tests_env_is_a_lab_env_of_the_process_environment() -> None:
+    """`lab_env()` itself, which the live tests call, checked in a child process against the
+    child's environment, with invented values on those of the hash key, the location and
+    `SOME_TOKEN` that the environment leaves unset or blank: the call returns; its answer's type
+    is `LabEnv` exactly; it holds the child's values of `LabEnv.KEYS` that the child's environment
+    carries and no other variable; its `repr` and `str` show none of those values and not the
+    value of `SOME_TOKEN`; it does not hold `SOME_TOKEN`; the child prints nothing else to stdout.
+    This frame holds the fixed tokens only. Limits: the live `warehouse` tests bind
+    `env = lab_env()` themselves and are not covered here; `LEDGER_LAB_GCP_PROJECT` and
+    `GCP_PROJECT` keep the environment's own values, so the `repr` check sees them only when the
+    environment sets them."""
+    assert lab_env_checks() == LAB_ENV_OK
+
+
+# Prints, for the file `argv[1]`, the checks whose bad token the file holds as pytest shows one,
+# and "unexpected" if it holds that token, comma-separated or "-" for none; then how many times it
+# holds the strings `argv[3:]`, and how many times it holds this process's non-blank values of the
+# comma-separated names in `argv[2]`: a word and two integers, nothing else.
+LAB_ENV_COUNT = """
+import os
+import sys
+
+text = open(sys.argv[1], errors="replace").read()
+real = [os.environ[k] for k in sys.argv[2].split(",") if os.environ.get(k, "").strip()]
+checks = ("call", "type", "values", "shown", "token")
+shown = [c for c in checks if f"'{c}:bad'" in text] + ["unexpected"] * ("'unexpected'" in text)
+print(
+    ",".join(shown) or "-",
+    sum(text.count(v) for v in sys.argv[3:]),
+    sum(text.count(v) for v in real),
+)
+"""
+LAB_ENV_CONTRACT = (
+    "tests/ingest/test_load.py::test_the_live_tests_env_is_a_lab_env_of_the_process_environment"
+)
+
+
+def lab_env_probe(regression: str, out: Path, *target: str) -> tuple[int, str, int, int]:
+    """Runs `target` (pytest arguments; by default the check of `lab_env()`) under pytest `-l
+    -vvv` in a subprocess whose environment is this process's with `LAB_ENV_REGRESSION` set to
+    `regression` and invented values on the hash key, the location and `SOME_TOKEN`, which the
+    check's child keeps; the output goes to `out`. Returns pytest's exit code; the checks whose bad
+    token the output holds, and "unexpected" when it holds that token, comma-separated, or "-";
+    how many times the output holds the invented values, which stand in for the hash key, the
+    location and `SOME_TOKEN`; and how many times it holds this process's non-blank values of
+    `LabEnv.KEYS`, which past the invented ones are those of `LEDGER_LAB_GCP_PROJECT` and
+    `GCP_PROJECT` when they are set. The counting runs in a further child, so no frame of this
+    process holds the output, and `out` is deleted before this returns. Any exception out of
+    either run comes back as -1, "-" and two zeros."""
+    planted = [f"invented-{secrets.token_hex(16)}" for _ in range(3)]
+    try:
+        with out.open("w") as sink:
+            code = subprocess.run(  # noqa: S603
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "-p",
+                    "no:cacheprovider",
+                    "-l",
+                    "-vvv",
+                    *(target or (LAB_ENV_CONTRACT,)),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=sink,
+                stderr=subprocess.STDOUT,
+                cwd=REPO,
+                env={
+                    **os.environ,
+                    KEY_VARIABLE: planted[0],
+                    LOCATION_VARIABLE: planted[1],
+                    "SOME_TOKEN": planted[2],
+                    "LAB_ENV_REGRESSION": regression,
+                },
+                timeout=300,
+                check=False,
+            ).returncode
+        bad, planted_hits, real_hits = (
+            subprocess.run(  # noqa: S603
+                [sys.executable, "-c", LAB_ENV_COUNT, str(out), ",".join(LabEnv.KEYS), *planted],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=True,
+            )
+            .stdout.strip()
+            .split(" ")
+        )
+        return (code, bad, int(planted_hits), int(real_hits))
+    except Exception:  # noqa: BLE001
+        return (-1, "-", 0, 0)
+    finally:
+        out.unlink(missing_ok=True)
+
+
+def test_the_lab_env_check_passes_and_its_output_shows_no_value(tmp_path: Path) -> None:
+    """The probe's baseline: with no regression, the check of `lab_env()` passes under `-l -vvv`,
+    and its output holds no bad token, none of the invented values (which stand in for the hash
+    key, the location and `SOME_TOKEN`) and no non-blank value of this process's
+    `LEDGER_LAB_GCP_PROJECT` or `GCP_PROJECT`."""
+    assert lab_env_probe("", tmp_path / "out") == (0, "-", 0, 0)
+
+
+@pytest.mark.parametrize(
+    ("regression", "bad"),
+    [
+        ("none", "type,values,token"),
+        ("a copy", "type,values,shown,token"),
+        ("the environment", "type,values,shown,token"),
+        ("a string", "call"),
+        ("an unset variable read", "call"),
+        ("a leaky subclass", "type,shown,token"),
+        ("a raw print", "unexpected"),
+        ("a plain subclass", "type"),
+        ("the hash key dropped", "values"),
+        ("a repr of the values", "shown"),
+        ("the token claimed", "token"),
+    ],
+)
+def test_a_lab_env_regression_fails_the_check_and_its_output_shows_no_value(
+    tmp_path: Path, regression: str, bad: str
+) -> None:
+    """Eleven regressions, each applied in the check's child only. `lab_env()` returns: `None`; a
+    `dict` of the environment; `os.environ` itself; a `LabEnv` of the environment's `str` (which
+    raises inside `LabEnv.__init__`, its `source` local bound to that text); a `LabEnv` subclass
+    whose `repr` shows its values and whose `__contains__` raises; a `LabEnv` after writing the
+    hash key's value and a byte that is not ASCII to stdout; or a `LabEnv` subclass that changes
+    nothing. Or `LabEnv` itself is changed: its `__init__` reads, past `LabEnv.KEYS`, a variable
+    the environment does not hold (which raises with its `source` local bound to the environment);
+    its `__init__` leaves out the hash key; its `repr` shows its values; or its `__contains__`
+    answers yes for `SOME_TOKEN`. Under each, pytest `-l -vvv` fails the check (exit code 1), its
+    output holds the bad tokens of exactly the checks `bad` names (the last four each fail one
+    check alone), and it holds none of the invented values (which stand in for the hash key, the
+    location and `SOME_TOKEN`) and no non-blank value of this process's `LEDGER_LAB_GCP_PROJECT`
+    or `GCP_PROJECT`. Limits: these eleven regressions only; the rest of the environment is not
+    counted; a value short enough to occur in pytest's own text fails this test without a leak."""
+    assert lab_env_probe(regression, tmp_path / "out") == (1, bad, 0, 0)
+
+
+# A copy of the check that binds the environment to a local, which `-l` prints when it fails: the
+# probe's positive control.
+LAB_ENV_LEAKY_CHECK = """
+import os
+import sys
+
+sys.path[:0] = [{paths}]
+
+import test_load as T
+
+
+def test_leaky_check():
+    env = dict(os.environ)
+    assert T.lab_env_checks() == T.LAB_ENV_OK
+"""
+
+
+def test_the_probe_counts_a_leak_when_the_check_shows_one(tmp_path: Path) -> None:
+    """The probe's positive control: a copy of the check whose frame holds a `dict` of the
+    environment, run by the probe under the "a copy" regression, fails with the checks' bad
+    tokens, and the probe counts the invented values in its output at least three times, so a
+    counter that stops counting them fails this test."""
+    paths = ", ".join(repr(str(p)) for p in (REPO, REPO / "tests", REPO / "tests" / "ingest"))
+    leaky = tmp_path / "leaky_check.py"
+    leaky.write_text(LAB_ENV_LEAKY_CHECK.format(paths=paths))
+    (tmp_path / "pytest.ini").write_text("[pytest]\n")
+    code, bad, planted_hits, _ = lab_env_probe(
+        "a copy",
+        tmp_path / "out",
+        "-c",
+        str(tmp_path / "pytest.ini"),
+        "--rootdir",
+        str(tmp_path),
+        f"{leaky}::test_leaky_check",
+    )
+    assert (code, bad, planted_hits >= 3) == (1, "type,values,shown,token", True)
 
 
 def local_files() -> list[str]:
