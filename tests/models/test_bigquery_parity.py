@@ -262,11 +262,14 @@ def test_a_relation_in_a_routed_dataset_is_compared_there(
 def test_a_relation_in_two_of_the_build_datasets_differs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A copy left in the profile's dataset beside the routed one, even with the same rows."""
+    """A copy left in the profile's dataset beside the routed one, even with the same rows; a
+    second relation matches, so the copy is the only difference."""
     columns = [Column("k", "STRING"), Column("amt", "NUMERIC")]
     same = (columns, remote_digest(ROWS, "k, amt"))
-    status, _ = run(tmp_path, monkeypatch, LOCAL, {"group_totals.r": same, "r": same})
-    assert status == 1
+    local = LOCAL | {"s": LOCAL["r"]}
+    assert run(tmp_path / "a", monkeypatch, local, {"group_totals.r": same, "s": same})[0] == 0
+    remote = {"group_totals.r": same, "r": same, "s": same}
+    assert run(tmp_path / "b", monkeypatch, local, remote)[0] == 1
 
 
 def test_nothing_compared_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -58,7 +58,7 @@ from semantics.versions import ROUTES
 # The dataset models/profiles.yml builds a model or seed in on BigQuery when no route names another.
 DATASET = "intermediate"
 # Every dataset the BigQuery build writes models and seeds in.
-DATASETS = (DATASET, *sorted(set(ROUTES.values())))
+DATASETS = (DATASET, *sorted({route.dataset for route in ROUTES.values()}))
 # The pairs of cell families (local, BigQuery) a column may have and still match: the same family,
 # and DuckDB's TIMESTAMP against BigQuery's TIMESTAMP, the two spellings the build produces for the
 # UK files' publication times, whose local value holds the time in UTC. Any other pair, a DuckDB

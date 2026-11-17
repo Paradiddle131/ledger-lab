@@ -48,26 +48,32 @@ The ways a project's macros can decide relation names that the gate refuses:
   or one of those after a `<prefix>__`, such as `default__generate_alias_name` or
   `duckdb__generate_schema_name`, which dbt's own versions of the three dispatch to, except one
   `generate_schema_name` whose macro block is the gate's own text (`SCHEMA_MACRO`) character for
-  character: on BigQuery it returns a node's `schema` config verbatim, else the profile's dataset,
-  and on any other target the profile's schema, reading nothing but `target.type`,
+  character: on BigQuery it returns a node's `schema` config trimmed of surrounding whitespace,
+  else the profile's dataset, and on any other target the profile's schema, reading nothing but `target.type`,
   `target.schema` and that config, and calling no macro;
 - a project file `dispatch` entry for the `dbt` macro namespace, which those three dispatch in, or
   a `dispatch` setting the gate cannot read as entries for other namespaces.
 
-The routing, which the gate holds (`ROUTES`: a folder of the project mapped to a BigQuery dataset;
-a test holds each to a data product's dataset in platform/gcp/warehouse.tf), and the rules each
-model, seed and snapshot of the project is held to:
+The routing, which the gate holds (`ROUTES`: a folder of the project mapped to a BigQuery dataset
+and the relation names the folder holds; a test holds each to a data product's dataset in
+platform/gcp/warehouse.tf and to its `tables` in access/personas.yaml), and the rules each model,
+seed and snapshot of the project is held to:
 
 - on either tree: a `schema` config equals the unrendered value dbt's parse records for it (so it
   is a literal, not dbt Jinja, and no later setting overrides it), is not set in a SQL `config()`
   call, and is set only where the project defines the allowed macro (dbt's own prefixes it with
-  the profile's dataset); `database`, and a snapshot's `target_schema` and `target_database`, are
-  not set;
+  the profile's dataset); none of `database`, a snapshot's `target_schema` and `target_database`,
+  or dbt-bigquery's names for those and for `schema` (`dataset`, `project`, `target_dataset`,
+  `target_project`, which dbt translates only on a BigQuery target) is in the node's rendered
+  config, its unrendered config or its SQL `config()` call;
 - on the working tree: its `schema` config is the dataset `ROUTES` gives its folder, and none
-  outside those folders.
+  outside those folders; a routed folder's relation names (an alias, else the node's name) are
+  its route's tables, each built once.
 
-With the allowed macro, such a node is built on BigQuery in its route's dataset, or in the
-profile's. Stated limits of the routing: data tests are not checked (their `schema` is where
+Stated limits of the routing: config keys are read as dbt's local parse records them, so a
+placement key dbt-bigquery adds after the locked version is not refused until it is listed (a
+test compares the listed names with the locked adapter's `_ALIASES` when uv's cache holds that
+adapter, and skips otherwise); data tests are not checked (their `schema` is where
 stored failures go, which no semantic model reads); an alias is not routed, and is compared only
 as the local parse names it, for what a semantic model reads; the macro's text is compared, its
 behaviour rests on dbt's `target` (a project macro named `target` makes the pinned dbt's parse
@@ -140,7 +146,8 @@ PACKAGE_FILES = ("packages.yml", "dependencies.yml")
 RELATION_MACROS = ("generate_alias_name", "generate_schema_name", "generate_database_name")
 # The one relation macro a project may define: `generate_schema_name` with exactly this text (dbt's
 # parse of the macro block, from `{% macro` to `{%- endmacro %}`). On BigQuery it returns a node's
-# `schema` config verbatim, else the profile's dataset; on any other target the profile's schema.
+# `schema` config trimmed of surrounding whitespace, else the profile's dataset; on any other target
+# the profile's schema.
 SCHEMA_MACRO_NAME = "generate_schema_name"
 SCHEMA_MACRO = (
     "{% macro generate_schema_name(custom_schema_name, node) -%}\n"
@@ -151,19 +158,41 @@ SCHEMA_MACRO = (
     "{%- endif -%}\n"
     "{%- endmacro %}"
 )
+
+
+@dataclass(frozen=True)
+class Route:
+    """Where the models, seeds and snapshots of one folder are built on BigQuery: the dataset,
+    and the relation names the folder holds, which are the data product's `tables`."""
+
+    dataset: str
+    tables: tuple[str, ...]
+
+
 # The routing that macro implements, which the project file's `+schema` settings must match: each
 # folder of the project (as dbt gives a node's path, relative to `models/`) mapped to the BigQuery
-# dataset its models, seeds and snapshots are built in. A node in no folder here has no `schema`
-# config, so it is built in the profile's dataset. Each dataset is one platform/gcp/warehouse.tf
-# declares for a data product (a test holds that).
+# dataset its models, seeds and snapshots are built in and the relations it holds. A node in no
+# folder here has no `schema` config. A test holds each route to a data product's dataset in
+# platform/gcp/warehouse.tf and to that product's `tables` in access/personas.yaml.
 ROUTES = {
-    "models/marts/group_totals": "group_totals",
+    "models/marts/group_totals": Route("group_totals", ("group_totals", "group_totals_left_out")),
 }
 # The kinds of node that are built as relations, whose routing the gate checks.
 BUILT = ("model", "seed", "snapshot")
 # Configs that would place a node outside the routing: another database (a BigQuery project), and
 # a snapshot's own schema or database, which dbt uses in place of the schema macro.
 UNROUTED = ("database", "target_schema", "target_database")
+# dbt-bigquery's own names for the placement configs (`BigQueryCredentials._ALIASES`, which a test
+# compares with the locked adapter's): dbt translates them only on a BigQuery target, so the local
+# parse the gate reads keeps them under these names; each is refused.
+BIGQUERY_ALIASES = {
+    "dataset": "schema",
+    "project": "database",
+    "target_dataset": "target_schema",
+    "target_project": "target_database",
+}
+# Every config key the gate refuses outright, wherever dbt records it.
+REFUSED_CONFIGS = (*UNROUTED, *BIGQUERY_ALIASES)
 # The macro namespace dbt's own macros, the three above among them, dispatch in.
 DBT_NAMESPACE = "dbt"
 # The largest integer the audit record (agent/audit.schema.json) carries exactly.
@@ -513,14 +542,25 @@ def parse_and_refuse(project: Path, report: Path) -> int:
     for node in built:
         what = f"{in_tree(project, node.original_file_path, tree)}: {node.resource_type.value}"
         what += f" {node.name}"
+        in_sql = getattr(node, "config_call_dict", None) or {}
         refused += unroutable(
             what,
-            {key: getattr(node.config, key, None) for key in ("schema", *UNROUTED)},
-            node.unrendered_config.get("schema"),
-            "schema" in (getattr(node, "config_call_dict", None) or {}),
+            {key: node.config.get(key) for key in ("schema", *REFUSED_CONFIGS)},
+            dict(node.unrendered_config),
+            dict(in_sql),
             macro_allowed,
         )
         off_routes += off_route(what, node.original_file_path, node.config.schema)
+    off_routes += off_tables(
+        [
+            (
+                node.original_file_path,
+                in_tree(project, node.original_file_path, tree),
+                node.alias or node.name,
+            )
+            for node in built
+        ]
+    )
     schema_of = {node.unique_id: node.config.schema for node in built}
     routes = {
         "semantic_models": {
@@ -582,44 +622,81 @@ def allowed_macro(name: str, text: str) -> bool:
     return name == SCHEMA_MACRO_NAME and text == SCHEMA_MACRO
 
 
-def route(path: str) -> str | None:
-    """The dataset `ROUTES` builds a node at this path (relative to `models/`) in, or None for
-    the profile's dataset."""
-    found = [
-        dataset
-        for folder, dataset in ROUTES.items()
-        if path == folder or path.startswith(folder + "/")
-    ]
+def folder_of(path: str) -> str | None:
+    """The folder of `ROUTES` that holds a node at this path (relative to `models/`), or None
+    when no folder, or more than one, does."""
+    found = [folder for folder in ROUTES if path == folder or path.startswith(folder + "/")]
     return found[0] if len(found) == 1 else None
 
 
+def route(path: str) -> str | None:
+    """The dataset `ROUTES` builds a node at this path (relative to `models/`) in, or None for
+    the profile's dataset."""
+    folder = folder_of(path)
+    return ROUTES[folder].dataset if folder else None
+
+
 def unroutable(
-    what: str, config: Block, unrendered_schema: object, set_in_sql: bool, macro_allowed: bool
+    what: str, config: Block, unrendered: Block, in_sql: Block, macro_allowed: bool
 ) -> list[str]:
-    """Why a built node's routing cannot be read from its parse, on either tree, or nothing: a
-    `schema` config must be the literal dbt's parse wrote down unrendered (no dbt Jinja, which the
-    build renders with another environment, and no later setting that overrides it), not in a
-    SQL `config()` call, and only beside the allowed schema macro
-    (dbt's own prefixes it with the profile's dataset); none of `UNROUTED` may be set."""
+    """Why a built node's routing cannot be read from its parse, on either tree, or nothing.
+    `config` is its rendered config, `unrendered` the config dbt records as written, and `in_sql`
+    the keys its SQL `config()` call set. A `schema` config must equal its unrendered value (no
+    dbt Jinja, which the build renders with another environment, and no later setting that
+    overrides it), not be set in a SQL `config()` call, and be set only beside the allowed schema
+    macro (dbt's own prefixes it with the profile's dataset); no key of `REFUSED_CONFIGS` may be in
+    any of the three."""
     found: list[str] = []
     schema = config.get("schema")
-    if schema is not None and unrendered_schema != schema:
+    if schema is not None and unrendered.get("schema") != schema:
         found.append(
             f"{what} sets its schema other than as the literal dbt renders (dbt Jinja, or a"
             " setting it overrides), which the gate does not compare"
         )
-    if set_in_sql:
+    if "schema" in in_sql:
         found.append(f"{what} sets its schema in a SQL config() call, which the gate does not read")
     if schema is not None and not macro_allowed:
         found.append(
             f"{what} sets a schema while the project has no {SCHEMA_MACRO_NAME} with the gate's"
             " own text, so dbt would prefix it with the profile's dataset"
         )
-    found += [
-        f"{what} sets {key}, which places it outside the gate's routing"
-        for key in UNROUTED
-        if config.get(key) is not None
-    ]
+    for key in REFUSED_CONFIGS:
+        if not any(
+            key in block and block[key] is not None for block in (config, unrendered, in_sql)
+        ):
+            continue
+        alias = BIGQUERY_ALIASES.get(key)
+        named = f" (dbt-bigquery's name for {alias}, which the local parse does not read)"
+        found.append(
+            f"{what} sets {key}{named if alias else ''}, which places it outside the gate's routing"
+        )
+    return found
+
+
+def off_tables(nodes: list[tuple[str, str, str]]) -> list[str]:
+    """The working tree's routed folders whose relations are not their route's `tables`: a node
+    in such a folder whose relation name (its alias, else its name) is not one of them, and a
+    table none of them builds, or more than one does. `nodes` holds each built node's path, its
+    place in the tree and its relation name."""
+    found: list[str] = []
+    held: dict[str, list[str]] = {folder: [] for folder in ROUTES}
+    for path, place, relation in sorted(nodes):
+        folder = folder_of(path)
+        if folder is None:
+            continue
+        held[folder].append(relation)
+        if relation not in ROUTES[folder].tables:
+            found.append(
+                f"{place}: builds {relation} in {folder}, which the gate's routing"
+                f" (semantics/versions.py ROUTES) holds to {', '.join(ROUTES[folder].tables)}"
+            )
+    for folder, relations in held.items():
+        for table in ROUTES[folder].tables:
+            if relations.count(table) != 1:
+                found.append(
+                    f"{folder} builds {table} {relations.count(table)} times, where the gate's"
+                    " routing (semantics/versions.py ROUTES) holds it to once"
+                )
     return found
 
 

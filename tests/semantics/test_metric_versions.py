@@ -11,7 +11,9 @@ committed tree, changed in place.
 """
 
 import copy
+import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -703,6 +705,25 @@ def without_schema_macro(files: dict[str, str]) -> None:
 GROUP_TOTALS_SQL = "models/models/marts/group_totals/group_totals.sql"
 LEFT_OUT = "models/models/marts/group_totals/group_totals_left_out.sql: model group_totals_left_out"
 PAYMENTS_NODE = "models/models/marts/payments/payments.sql: model payments"
+PAYMENTS_DOCS = "models/models/marts/payments/_payments__models.yml"
+NEW_IN_FOLDER = "models/models/marts/group_totals/payment_rows.sql"
+SNAPSHOT_FILE = "models/snapshots/history.yml"
+SNAPSHOT_NODE = f"{SNAPSHOT_FILE}: snapshot period_status_history"
+BIGQUERY_NAME = (
+    "(dbt-bigquery's name for {}, which the local parse does not read), which places it outside"
+    " the gate's routing"
+)
+
+
+def snapshot_with(setting: str) -> str:
+    """A snapshot of the period statuses, invented for the test, with one config `setting`."""
+    return (
+        "snapshots:\n  - name: period_status_history\n    relation: ref('period_status')\n"
+        "    config:\n      unique_key: entity_id || fiscal_year || fiscal_period\n"
+        f"      strategy: check\n      check_cols: all\n      {setting}\n"
+    )
+
+
 NOT_THE_GATES = (
     f"{SCHEMA_MACRO_FILE}: macro generate_schema_name decides relation names, which the gate does"
     " not compare, other than generate_schema_name with the gate's own text"
@@ -740,9 +761,7 @@ ROUTING_REFUSED: dict[str, tuple[Edit, list[str]]] = {
         ],
     ),
     "a model's schema naming a dataset outside the routing": (
-        node_config(
-            "models/models/marts/payments/_payments__models.yml", "payments", "{schema: scratch}"
-        ),
+        node_config(PAYMENTS_DOCS, "payments", "{schema: scratch}"),
         [
             f"{PAYMENTS_NODE} sets schema 'scratch', where the gate's routing"
             " (semantics/versions.py ROUTES) builds it in the profile's dataset"
@@ -790,6 +809,75 @@ ROUTING_REFUSED: dict[str, tuple[Edit, list[str]]] = {
             " database, which places it outside the gate's routing",
         ],
     ),
+    "a folder's dataset, dbt-bigquery's name for its schema": (
+        replaced(PROJECT_FILE, ROUTED, ROUTED + "        +dataset: scratch\n"),
+        [f"{LEFT_OUT} sets dataset {BIGQUERY_NAME.format('schema')}"],
+    ),
+    "a folder's project, dbt-bigquery's name for its database": (
+        replaced(PROJECT_FILE, ROUTED, ROUTED + "        +project: elsewhere\n"),
+        [f"{LEFT_OUT} sets project {BIGQUERY_NAME.format('database')}"],
+    ),
+    "the payments mart given its product's dataset by dbt-bigquery's name": (
+        node_config(PAYMENTS_DOCS, "payments", "{dataset: payments}"),
+        [f"{PAYMENTS_NODE} sets dataset {BIGQUERY_NAME.format('schema')}"],
+    ),
+    "a dataset set in a model's SQL": (
+        replaced(GROUP_TOTALS_SQL, "\nselect", "\n{{ config(dataset='scratch') }}\nselect"),
+        [
+            "models/models/marts/group_totals/group_totals.sql: model group_totals sets dataset"
+            f" {BIGQUERY_NAME.format('schema')}"
+        ],
+    ),
+    "a seed folder's schema off the routing": (
+        lambda files: files.update(
+            {
+                PROJECT_FILE: files[PROJECT_FILE]
+                + "\nseeds:\n  ledger_lab:\n    calendars:\n      +schema: scratch\n"
+            }
+        ),
+        [
+            "models/seeds/calendars/fiscal_year_starts.csv: seed fiscal_year_starts sets schema"
+            " 'scratch', where the gate's routing (semantics/versions.py ROUTES) builds it in the"
+            " profile's dataset"
+        ],
+    ),
+    "a snapshot's target schema": (
+        lambda files: files.update({SNAPSHOT_FILE: snapshot_with("target_schema: scratch")}),
+        [
+            f"{SNAPSHOT_NODE} sets target_schema, which places it outside the gate's routing",
+        ],
+    ),
+    "a snapshot's target dataset, dbt-bigquery's name for its target schema": (
+        lambda files: files.update({SNAPSHOT_FILE: snapshot_with("target_dataset: scratch")}),
+        [f"{SNAPSHOT_NODE} sets target_dataset {BIGQUERY_NAME.format('target_schema')}"],
+    ),
+    "a model added to a product's folder": (
+        lambda files: files.update({NEW_IN_FOLDER: "select * from {{ ref('payments') }}\n"}),
+        [
+            f"{NEW_IN_FOLDER}: builds payment_rows in models/marts/group_totals, which the gate's"
+            " routing (semantics/versions.py ROUTES) holds to group_totals, group_totals_left_out"
+        ],
+    ),
+    "an alias on a product's table": (
+        node_config(GROUP_TOTALS_DOCS, "group_totals", "{alias: group_totals_copy}"),
+        [
+            "models/models/marts/group_totals/group_totals.sql: builds group_totals_copy in"
+            " models/marts/group_totals, which the gate's routing (semantics/versions.py ROUTES)"
+            " holds to group_totals, group_totals_left_out",
+            "models/marts/group_totals builds group_totals 0 times, where the gate's routing"
+            " (semantics/versions.py ROUTES) holds it to once",
+        ],
+    ),
+    "a product's table moved out of its folder": (
+        moved(
+            "models/models/marts/group_totals/group_totals_left_out.sql",
+            "models/models/marts/group_totals_left_out.sql",
+        ),
+        [
+            "models/marts/group_totals builds group_totals_left_out 0 times, where the gate's"
+            " routing (semantics/versions.py ROUTES) holds it to once"
+        ],
+    ),
     "a schema without the allowed macro": (
         without_schema_macro,
         [schema_refused(LEFT_OUT)],
@@ -817,7 +905,7 @@ def test_a_main_with_a_routing_the_gate_cannot_read_fails_the_gate(tmp_path: Pat
 
 def test_a_metric_models_dataset_moved_is_a_changed_definition(tmp_path: Path) -> None:
     """The dataset a semantic model's node is built in on BigQuery (its `schema` config, which
-    the allowed macro takes verbatim) is part of the definition: against a main that builds the
+    the allowed macro returns) is part of the definition: against a main that builds the
     group totals in the profile's dataset, the committed routing changes their metrics."""
     main = changed_from(REAL, replaced(PROJECT_FILE, ROUTED, ""))
     routed = REAL[PROJECT_FILE]
@@ -826,22 +914,72 @@ def test_a_metric_models_dataset_moved_is_a_changed_definition(tmp_path: Path) -
     assert lines(report) == still(*GROUP_TOTALS_METRICS, at=2), report
 
 
+def test_a_time_spines_dataset_moved_is_a_changed_definition(tmp_path: Path) -> None:
+    """The time spine's `schema` config is part of every definition: against a main whose spine
+    names a dataset (a main the gate reads, as it holds the base tree to the routing's readable
+    rules only), the committed spine in the profile's dataset changes every metric."""
+    spine = node_config(CALENDARS, "metric_time_spine", "{schema: group_totals}")
+    main = changed_from(REAL, spine)
+    ok, report = versions.check(
+        working(tmp_path, lambda f: f.update({CALENDARS: REAL[CALENDARS]}), main)
+    )
+    assert not ok, report
+    assert lines(report) == all_still(), report
+
+
+# dbt-bigquery's config names for something other than where a relation is built.
+NOT_PLACEMENT = {"job_retries", "job_execution_timeout_seconds", "compute_region"}
+ALIASES = (
+    "import json; from dbt.adapters.bigquery.credentials import BigQueryCredentials as C;"
+    " print(json.dumps(C._ALIASES))"
+)
+
+
+def test_the_refused_bigquery_names_are_the_locked_adapters_placement_aliases() -> None:
+    """The gate's `BIGQUERY_ALIASES` are the locked dbt-bigquery's `_ALIASES` whose target is a
+    placement config, and each of its other aliases is one known not to place a relation, so an
+    alias the adapter adds fails here until it is sorted; read from the lock's `bigquery` group in
+    uv's cache, offline, and skipped when the cache does not hold it."""
+    uv = os.environ.get("UV") or shutil.which("uv") or "uv"
+    found = subprocess.run(  # noqa: S603
+        [uv, "run", "--isolated", "--frozen", "--offline", "--only-group", "bigquery"]
+        + ["python", "-I", "-c", ALIASES],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=versions.REPO,
+    )
+    if found.returncode != 0:
+        pytest.skip("dbt-bigquery is not in uv's cache: run `uv sync --group bigquery` once")
+    aliases = json.loads(found.stdout)
+    placement = {"schema", *versions.UNROUTED}
+    assert {k: v for k, v in aliases.items() if v in placement} == versions.BIGQUERY_ALIASES
+    assert {v for v in aliases.values() if v not in placement} <= NOT_PLACEMENT
+
+
 def test_an_alias_on_a_metric_model_is_a_changed_definition(tmp_path: Path) -> None:
     """An alias renames the relation on every target, so the local parse the gate compares sees
-    it."""
-    edit = node_config(GROUP_TOTALS_DOCS, "group_totals", "{alias: group_totals_copy}")
+    it (in a routed folder the routing's tables refuse it before; see `ROUTING_REFUSED`)."""
+    edit = node_config(
+        "models/models/reconciliations/_reconciliations__models.yml",
+        "chicago_contract_reconciliation",
+        "{alias: reconciliation_copy}",
+    )
     ok, report = versions.check(working(tmp_path, edit))
     assert not ok, report
-    assert lines(report) == still(*GROUP_TOTALS_METRICS, at=2), report
+    assert lines(report) == still(*CONTRACT_METRICS), report
 
 
 def test_the_routing_names_declared_product_datasets_and_the_project_file_implements_it() -> None:
     """Each routed dataset is one platform/gcp/warehouse.tf declares for a data product (its
-    `datasets` local: the products' ids with `_` for `-`), the committed macro is the gate's own
-    text, and the project file's `+schema` settings are exactly the routes."""
+    `datasets` local: the products' ids with `_` for `-`), each route's tables are that product's
+    `tables` in access/personas.yaml, the committed macro is the gate's own text, and the project
+    file's `+schema` settings are exactly the routes."""
     personas = yaml.safe_load((versions.REPO / "access" / "personas.yaml").read_text())
-    products = {p["id"].replace("-", "_") for p in personas["data_products"]}
-    assert set(versions.ROUTES.values()) <= products
+    products = {p["id"].replace("-", "_"): p for p in personas["data_products"]}
+    for route in versions.ROUTES.values():
+        assert route.dataset in products
+        assert sorted(route.tables) == sorted(products[route.dataset]["tables"])
     macros = (versions.REPO / SCHEMA_MACRO_FILE).read_text()
     assert macros.count(versions.SCHEMA_MACRO) == 1
     project = yaml.safe_load((versions.REPO / PROJECT_FILE).read_text())
@@ -854,7 +992,7 @@ def test_the_routing_names_declared_product_datasets_and_the_project_file_implem
                 yield from schemas(value, f"{at}/{key}")
 
     found = dict(schemas(project["models"]["ledger_lab"], "models"))
-    assert found == versions.ROUTES
+    assert found == {folder: route.dataset for folder, route in versions.ROUTES.items()}
     assert not any(key in project for key in ("seeds", "snapshots"))
 
 
@@ -862,6 +1000,7 @@ def test_the_routing_names_declared_product_datasets_and_the_project_file_implem
     ("adapter", "custom", "built_in"),
     [
         ("bigquery", "group_totals", "group_totals"),
+        ("bigquery", " group_totals ", "group_totals"),
         ("bigquery", None, "intermediate"),
         ("duckdb", "group_totals", "main"),
         ("duckdb", None, "main"),
@@ -871,8 +1010,8 @@ def test_the_allowed_macro_routes_only_on_bigquery(
     adapter: str, custom: str | None, built_in: str
 ) -> None:
     """The gate's copy of the macro, rendered by Jinja with the target dbt would give it: on
-    BigQuery a node's schema verbatim, else the profile's dataset; on another target the
-    profile's schema."""
+    BigQuery a node's schema trimmed of surrounding whitespace, else the profile's dataset; on
+    another target the profile's schema."""
     target = {"type": adapter, "schema": {"bigquery": "intermediate", "duckdb": "main"}[adapter]}
     template = versions.SCHEMA_MACRO + "{{ generate_schema_name(custom, none) }}"
     rendered = jinja2.Environment(autoescape=False).from_string(template)  # noqa: S701

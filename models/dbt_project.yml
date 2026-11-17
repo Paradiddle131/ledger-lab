@@ -36,8 +36,8 @@ vars:
 
 # On BigQuery a model or seed is built in the profile's dataset, `intermediate`, unless its folder
 # sets `+schema` below: the group totals' folder builds in the `group_totals` dataset (both declared
-# in platform/gcp/warehouse.tf). The project's `generate_schema_name` macro takes that schema
-# verbatim on BigQuery and keeps the profile's schema on the local engine; the metric versions gate
+# in platform/gcp/warehouse.tf). The project's `generate_schema_name` macro takes that schema on
+# BigQuery and keeps the profile's schema on the local engine; the metric versions gate
 # (semantics/versions.py) allows the macro only as its own copy, and each `+schema` only as its
 # `ROUTES` give it. The payments mart stays in `intermediate`: its dataset takes the table only with
 # its row access policies, which the models do not create yet.
