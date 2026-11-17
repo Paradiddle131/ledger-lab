@@ -180,15 +180,16 @@ class Table:
     columns: tuple[tuple[str, str], ...]
 
 
-# A count as `bq --format=json` gives one: a JSON string of ASCII digits.
-COUNT = re.compile(r"[0-9]+")
+# A count as `bq --format=json` gives one: a JSON string of ASCII digits, at most 19 of them, the
+# width of BigQuery's INT64 maximum (9223372036854775807).
+COUNT = re.compile(r"[0-9]{1,19}")
 
 
 def count(value: object) -> int:
     """A count from a `bq` answer, refused with a `ValueError` unless it is a JSON string that
     `COUNT` matches whole. Refused: a JSON number (`Infinity` and `NaN` among them), a boolean,
-    null, a sign, a fraction, whitespace, an underscore, a digit outside ASCII, and a string
-    longer than Python's integer-string limit. Read through it: `numRows` and `numBytes` of
+    null, a sign, a fraction, whitespace, an underscore, a digit outside ASCII, an empty string
+    and a string of more than 19 digits. Read through it: `numRows` and `numBytes` of
     `bq show`, `totalBytesProcessed` of a dry run, and the cells of the counts and digest
     queries."""
     if not isinstance(value, str) or not COUNT.fullmatch(value):

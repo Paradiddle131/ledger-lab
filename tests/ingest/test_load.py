@@ -36,6 +36,7 @@ from ingest.load import (
     Digest,
     LoadError,
     bigquery_digest_sql,
+    count,
     counts,
     digest,
     distinct_values,
@@ -599,6 +600,7 @@ NOT_A_COUNT = [
     "1_000",
     "1.0",
     "",
+    "1" * 20,
     "1" * 5000,
     ["1"],
 ]
@@ -612,6 +614,24 @@ def test_a_count_that_is_no_ascii_digit_string_is_an_answer_of_unexpected_shape(
     answer = counted(value, "1") if field == "numRows" else counted("1", value)
     with pytest.raises(LoadError, match="unexpected shape"):
         table_of("chicago-contracts", answer, PROJECT)
+
+
+@pytest.mark.parametrize("value", NOT_A_COUNT, ids=[repr(v)[:20] for v in NOT_A_COUNT])
+def test_count_refuses_with_a_value_error(value: Any) -> None:
+    with pytest.raises(ValueError, match="no string of ASCII digits"):
+        count(value)
+
+
+def test_count_bounds_the_digits_without_pythons_integer_string_limit() -> None:
+    limit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(0)
+    try:
+        for value in ("1" * 20, "1" * 5000):
+            with pytest.raises(ValueError, match="no string of ASCII digits"):
+                count(value)
+        assert count("9223372036854775807") == 2**63 - 1
+    finally:
+        sys.set_int_max_str_digits(limit)
 
 
 def test_an_ascii_digit_string_is_a_count() -> None:
@@ -1033,7 +1053,7 @@ def lab_env_shape(key: str, token: str) -> tuple[str, bool, bool, bool]:
     """What `lab_env()` gives, as its type's name, whether it reads the hash key, whether it leaves
     the token out and whether its `repr` and `str` show none of the invented values nor this
     process's values of `LabEnv.KEYS`. Only these come back, so a failing assertion on them shows
-    no value, under `-l` included."""
+    no value of this process's environment, under `-l` included."""
     env = lab_env()
     shown = repr(env) + str(env)
     present = [os.environ[k] for k in LabEnv.KEYS if os.environ.get(k, "").strip()]
