@@ -75,7 +75,8 @@ def digest(rows: str) -> tuple[int, str]:
 
 def test_the_digest_ignores_row_order_and_tells_these_changed_rows_apart() -> None:
     """Row order kept out, and a changed decimal, a null in place of a decimal and a duplicated
-    row told apart; not a text cell holding U+001E or U+001F (see the module's docstring)."""
+    row told apart; not a text cell that is U+001E alone or a U+001F inside a text cell (see the
+    module's docstring)."""
     rows = "('a', 1.50::decimal(28,6)), ('b', 2::decimal(28,6))"
     same = digest(rows)
     assert digest("('b', 2::decimal(28,6)), ('a', 1.50::decimal(28,6))") == same

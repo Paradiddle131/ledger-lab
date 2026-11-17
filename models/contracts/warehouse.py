@@ -13,21 +13,35 @@ against BigQuery's INFORMATION_SCHEMA, so a DuckDB `DECIMAL(28,6)` is held to Bi
 (38 digits, 9 after the point), not to its own precision and scale.
 
 The CLI runs in a throwaway environment with its BigQuery engine (`uv run --isolated --no-project
---with datacontract-cli[bigquery]==1.2.9`), which the lock does not pin, so its dependencies
-resolve when it runs. It is started with this environment less every `DATACONTRACT_` variable
-(`engine_environment`), the CLI's own settings, which would otherwise replace the copy's region,
-dataset or billing project, or the credentials. In that environment, before the test, two of the
-CLI's own functions are wrapped (`engine`): the connection's credentials are the access token in
-`CLOUDSDK_AUTH_ACCESS_TOKEN` when the environment holds one (the one gcloud and bq send), else
-Application Default Credentials as the CLI resolves them; and the connection is opened (`opened`)
-only while the copy's server holds the placeholder and none of the CLI's `get_bigquery_*` settings
-holds a value, on the lab's project, read there from `platform/gcp_project.py`, in place of the
-placeholder, and then restricted (`restrict`): its client carries `maximum_bytes_billed` of
-1,000,000,000 bytes in its default job configuration, which the client merges into each query job
-it starts, and reads results over the REST API: the Storage Read API client that ibis creates when
-it connects is dropped before any read and never re-created (gRPC, which this session's proxy does
-not carry). Only each check's name and result are printed, never a reason, since a reason can name
-the project or hold a value, and the project id is replaced by `<project>` in what is printed.
+--no-env-file --with datacontract-cli[bigquery]==1.2.9`), which the lock does not pin, so its
+dependencies resolve when it runs; `--no-env-file` keeps uv from loading a dotenv file into it. It
+is started with only the variables named in `ENGINE_NAMES`: `PATH`, `HOME`, `TMPDIR`, uv's path
+(`UV`), its cache, certificate and Python-location settings (`UV_CACHE_DIR`, `UV_SYSTEM_CERTS`,
+`UV_NATIVE_TLS`, `UV_PYTHON_INSTALL_DIR`) and the folders it reads (`XDG_CACHE_HOME`,
+`XDG_CONFIG_HOME`, `XDG_DATA_HOME`), the proxy variables (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`,
+`NO_PROXY`, each in upper or lower case), the CA variables (`SSL_CERT_FILE`, `SSL_CERT_DIR`,
+`REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`), `GCP_PROJECT` (so the engine's own read of the lab's
+project still refuses in another lab's session), `LEDGER_LAB_GCP_PROJECT` and
+`CLOUDSDK_AUTH_ACCESS_TOKEN`; the region reaches the engine inside the copy, not through
+`LEDGER_LAB_BQ_LOCATION`. Other names are not passed, including the individuals' hash key, uv's
+other settings (its env-file, index and publish variables) and the variables the CLI reads its
+settings from, among them `DATACONTRACT_*`, `ENTROPY_DATA_*` and `DATAMESH_MANAGER_*`. The engine
+is a child of this process and can still read this process's environment by other means (on Linux,
+from `/proc`), so the list narrows what the engine is handed, not what it can reach. In that
+environment, before the test, two of the CLI's own functions are wrapped (`engine`): the
+connection's credentials are the access token in `CLOUDSDK_AUTH_ACCESS_TOKEN` when the environment
+holds one (the one gcloud and bq send), else Application Default Credentials as the CLI resolves
+them in that environment; and the connection is opened (`opened`) only while the copy's server
+holds the placeholder, the CLI's settings object has each of the seven `get_bigquery_*` getters
+this file names (`GETTERS`, those of the pinned CLI), and none of them nor any other
+`get_bigquery_*` getter it has holds a value, on the lab's project, read there from
+`platform/gcp_project.py`, in place of the placeholder, and then restricted (`restrict`): its
+client carries `maximum_bytes_billed` of 1,000,000,000 bytes in its default job configuration,
+which the client merges into each query job it starts, and reads results over the REST API: the
+Storage Read API client that ibis creates when it connects is dropped before any read and never
+re-created (gRPC, which this session's proxy does not carry). Only each check's name and result are
+printed, never a reason, since a reason can name the project or hold a value, and the project id is
+replaced by `<project>` in what is printed.
 
 `uv run python models/contracts/warehouse.py`; exits 1 when the contract fails or cannot run.
 """
@@ -52,8 +66,50 @@ CAP = 1_000_000_000
 # What the copy on disk holds where the project goes; the engine opens the lab's project instead.
 PROJECT_PLACEHOLDER = "lab-project-from-the-environment"
 SEAM = REPO / "platform/gcp_project.py"
-# The prefix of the environment variables the CLI reads its own settings from.
-SETTINGS_PREFIX = "DATACONTRACT_"
+# The variables the engine is started with: what uv needs to fetch the CLI through a proxy, the
+# CA files Python's HTTP clients read, and the lab's project and access token, with
+# `GCP_PROJECT` so the engine's own `lab_project()` still refuses in another lab's session.
+ENGINE_NAMES = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "UV",
+        "UV_CACHE_DIR",
+        "UV_SYSTEM_CERTS",
+        "UV_NATIVE_TLS",
+        "UV_PYTHON_INSTALL_DIR",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "GCP_PROJECT",
+        "LEDGER_LAB_GCP_PROJECT",
+        "CLOUDSDK_AUTH_ACCESS_TOKEN",
+    }
+)
+# The CLI's BigQuery settings, as datacontract-cli 1.2.9 names their getters
+# (`datacontract/config/settings.py`); each must be found on its settings object and hold nothing.
+GETTERS = (
+    "get_bigquery_account_info_json_path",
+    "get_bigquery_billing_project",
+    "get_bigquery_dataset",
+    "get_bigquery_impersonation_account",
+    "get_bigquery_kms_key_name",
+    "get_bigquery_location",
+    "get_bigquery_project",
+)
 # BigQuery's type for each DuckDB type the contract declares, as INFORMATION_SCHEMA names it.
 TYPES = {
     "VARCHAR": "STRING",
@@ -110,19 +166,27 @@ def restrict(con: Any) -> Any:
 
 
 def engine_environment(env: Mapping[str, str]) -> dict[str, str]:
-    """The environment the engine runs in: this one without any `DATACONTRACT_` name, through
-    which the CLI would let its own settings replace the copy's server (its region, dataset or
-    billing project) or the credentials."""
-    return {k: v for k, v in env.items() if not k.startswith(SETTINGS_PREFIX)}
+    """The environment the engine runs in: the variables of `env` named in `ENGINE_NAMES`."""
+    return {k: v for k, v in env.items() if k in ENGINE_NAMES}
+
+
+def engine_command(uv: str) -> list[str]:
+    """`uv run` of Python in a throwaway environment with the CLI, reading no dotenv file."""
+    return [uv, "run", "--isolated", "--no-project", "--no-env-file", "--with", CLI, "python"]
+
+
+def missing(config: Any) -> list[str]:
+    """The names in `GETTERS` that `config` has no callable for."""
+    return [name for name in GETTERS if not callable(getattr(config, name, None))]
 
 
 def overrides(config: Any) -> list[str]:
-    """The names of the CLI's `get_bigquery_*` settings that hold a value on `config`."""
-    return [
-        name
-        for name in sorted(dir(config))
-        if name.startswith("get_bigquery_") and getattr(config, name)() is not None
-    ]
+    """The names, among `GETTERS` and any other `get_bigquery_*` callable `config` has, whose
+    getter answers a value other than None."""
+    found = {
+        n for n in dir(config) if n.startswith("get_bigquery_") and callable(getattr(config, n))
+    }
+    return [name for name in sorted(found | set(GETTERS)) if getattr(config, name)() is not None]
 
 
 def engine(contract_file: str) -> int:
@@ -145,6 +209,9 @@ def engine(contract_file: str) -> int:
     def opened(ibis: Any, server: Any, config: Any) -> Any:
         if server.project != PROJECT_PLACEHOLDER:
             raise RuntimeError("the contract copy names a project; it must hold the placeholder")
+        absent = missing(config)
+        if absent:
+            raise RuntimeError(f"the CLI's settings lack the getters this run checks: {absent}")
         overridden = overrides(config)
         if overridden:
             raise RuntimeError(f"the CLI's settings override the copy's server: {overridden}")
@@ -172,9 +239,8 @@ def main() -> int:
         copy = Path(folder) / "payments.odcs.yaml"
         copy.write_text(yaml.safe_dump(for_bigquery(contract, where), sort_keys=False))
         uv = os.environ.get("UV") or shutil.which("uv") or "uv"
-        command = [uv, "run", "--isolated", "--no-project", "--with", CLI, "python"]
         run = subprocess.run(  # noqa: S603
-            [*command, str(Path(__file__)), "--engine", str(copy)],
+            [*engine_command(uv), str(Path(__file__)), "--engine", str(copy)],
             capture_output=True,
             text=True,
             check=False,
