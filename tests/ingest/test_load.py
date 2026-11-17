@@ -924,18 +924,21 @@ def test_the_local_digest_holds_no_column_type_without_a_rule(tmp_path: Path, ki
 
 
 def test_the_digest_sums_eight_adjacent_slices_of_eight_hex_digits(tmp_path: Path) -> None:
-    """Each engine's digest SQL takes eight slices of the row hash's text, `s0` to `s7`, each eight
-    digits long and starting at digit 1, 9, ..., 57, so the slices are adjacent and together are
-    digits 1 to 64; eight hex digits summed over a million rows stay below 2**52; the local digest
-    gives eight sums."""
+    """Each engine's digest SQL has eight sums, `s0` to `s7`, each the `SUM` of one slice of the
+    row hash's text cast from hex to an integer, the slices eight digits long and starting at digit
+    1, 9, ..., 57, so they are adjacent and together are digits 1 to 64; eight hex digits summed
+    over a million rows stay below 2**52; the local digest gives eight sums."""
     assert (SLICES, SLICE) == (8, 8)
     assert 1_000_000 * (16**SLICE - 1) < 2**52
     assert len(local_digest(landed_table(tmp_path, ROWS)).sums) == 8
     for sql in (bigquery_digest_sql("`t`", []), duckdb_digest_sql("t", [])):
         assert re.findall(r"AS s(\d+)", sql) == [str(i) for i in range(8)]
-        assert re.findall(r"(?i)substr\(h, (\d+), (\d+)\)", sql) == [
-            (str(8 * i + 1), "8") for i in range(8)
-        ]
+        summed = re.findall(
+            r"(?i)\bSUM\(CAST\((?:CONCAT\('0x', |'0x' \|\| )substr\(h, (\d+), (\d+)\)\)?"
+            r" AS (?:INT64|BIGINT)\)\) AS s(\d+)",
+            sql,
+        )
+        assert summed == [(str(8 * i + 1), "8", str(i)) for i in range(8)]
 
 
 LOCAL_SUMS = ", ".join(f"{i} AS s{i}" for i in range(8))
