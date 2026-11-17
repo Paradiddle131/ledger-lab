@@ -1029,6 +1029,35 @@ def test_the_lab_env_holds_only_the_variables_read_and_shows_no_value() -> None:
     assert all(value not in shown for value in source.values())
 
 
+def lab_env_shape(key: str, token: str) -> tuple[str, bool, bool, bool]:
+    """What `lab_env()` gives, as its type's name, whether it reads the hash key, whether it leaves
+    the token out and whether its `repr` and `str` show none of the invented values nor this
+    process's values of `LabEnv.KEYS`. Only these come back, so a failing assertion on them shows
+    no value, under `-l` included."""
+    env = lab_env()
+    shown = repr(env) + str(env)
+    present = [os.environ[k] for k in LabEnv.KEYS if os.environ.get(k, "").strip()]
+    return (
+        type(env).__name__,
+        env.get(KEY_VARIABLE) == key,
+        "SOME_TOKEN" not in env,
+        all(value not in shown for value in [key, token, *present]),
+    )
+
+
+def test_the_live_tests_env_is_a_lab_env_of_the_process_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`lab_env()` itself, which the live tests call: a `LabEnv` of this process's environment, so
+    its `repr` shows no value whichever frame holds it. The leak probe of `test_names` does not
+    show this: that test passes `lab_env()` straight into `hashed_name_counts`, so under a
+    `LoadError` no frame pytest prints holds it."""
+    key, token = f"invented-key-{secrets.token_hex(16)}", f"invented-{secrets.token_hex(8)}"
+    monkeypatch.setenv(KEY_VARIABLE, key)
+    monkeypatch.setenv("SOME_TOKEN", token)
+    assert lab_env_shape(key, token) == ("LabEnv", True, True, True)
+
+
 def local_files() -> list[str]:
     names = sorted(p.name for p in landing_path().iterdir() if p.is_file())
     assert names, "the local landing is empty"
