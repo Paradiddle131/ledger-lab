@@ -23,9 +23,9 @@ the project file's `vars` as dbt loads them:
   manifest and parser of filters;
 - the semantic model of each measure those metrics resolve to and of each semantic model a metric
   aggregates directly, with the semantic models they join through a shared entity name: their
-  relation, entities, dimensions, defaults and other keys, and of their measures only the ones
-  resolved to;
-- the project's time spines;
+  relation, entities, dimensions, defaults and other keys, of their measures only the ones
+  resolved to, and the `schema` config of the node each reads (its BigQuery dataset, below);
+- the project's time spines, with the `schema` config of each time spine's node;
 - the project file's whole `vars` block, so a var changed means every metric's version goes up.
 
 Left out of it: the wording of a component (the `description` and `label` of an input metric, a
@@ -37,17 +37,37 @@ Outside the definition, so a change there is not seen by the gate:
 - the SQL of the dbt models a semantic model reads (caught, if at all, by the models' tests, the
   payments data contract's gate and the values pinned over the landed build);
 - command-line `--vars` a consumer passes to dbt;
-- relation names decided by the profile, by a model's SQL `config()`, or on a target other than
-  the local one: the gate compares the local target's parse;
+- relation names decided by the profile, by an alias or database set in a model's SQL `config()`,
+  or on a target other than the local one, but for the BigQuery dataset the routing below gives:
+  the gate compares the local target's parse;
 - dbt packages, which the gate refuses rather than reads.
 
 The ways a project's macros can decide relation names that the gate refuses:
 
 - a project macro named `generate_alias_name`, `generate_schema_name` or `generate_database_name`,
   or one of those after a `<prefix>__`, such as `default__generate_alias_name` or
-  `duckdb__generate_schema_name`, which dbt's own versions of the three dispatch to;
+  `duckdb__generate_schema_name`, which dbt's own versions of the three dispatch to, except one
+  `generate_schema_name` whose macro block is the gate's own text (`SCHEMA_MACRO`) character for
+  character: on BigQuery it returns a node's `schema` config verbatim, else the profile's dataset,
+  and on any other target the profile's schema, reading nothing but `target.type`,
+  `target.schema` and that config, and calling no macro;
 - a project file `dispatch` entry for the `dbt` macro namespace, which those three dispatch in, or
   a `dispatch` setting the gate cannot read as entries for other namespaces.
+
+The routing, which the gate holds (`ROUTES`: a folder of the project mapped to a BigQuery dataset
+a data product owns), and the rules a model, seed or snapshot of the project is held to:
+
+- on either tree, a `schema` config is the literal dbt's parse records unrendered, so neither dbt
+  Jinja nor a later setting that overrides it, is not set in a SQL `config()` call, and is set
+  only beside the allowed macro (dbt's own would prefix it with the profile's dataset); no
+  `database`, and no snapshot `target_schema` or `target_database`, is set;
+- on the working tree, its `schema` config is the dataset `ROUTES` gives its folder, and none
+  outside those folders.
+
+So on BigQuery a node is built in its route's dataset, or in the profile's. Stated limits of the
+routing: data tests are not checked (their `schema` is where stored failures go, which no model
+reads); a node's alias is not routed, but is compared on the local parse for what a semantic model
+reads.
 
 Stated limits of that refusal: it rests on dbt's default implementations of the three, in the dbt
 the lock pins, calling no other macro (the database one asks the adapter for a model's catalog
@@ -65,7 +85,7 @@ The gate fails when:
 - either tree holds, in what dbt reads, a symbolic link or a submodule; declares dbt packages
   (`packages.yml`, `dependencies.yml`); has a project file holding Jinja, or a path setting that is
   absolute or outside the tree; defines a macro that decides relation names or sets a `dispatch`
-  entry for the `dbt` namespace (both above); holds dbt Jinja where dbt renders it in a semantic
+  entry for the `dbt` namespace (both above); breaks a rule of the routing (above); holds dbt Jinja where dbt renders it in a semantic
   model or metric entry, or in the entry of a model, seed or snapshot a semantic model reads or a
   time spine is (dbt renders that Jinja with the environment, command-line variables and the clock);
 - dbt cannot parse either tree: the message names the tree and dbt's error class, never dbt's own
@@ -112,6 +132,32 @@ PACKAGE_FILES = ("packages.yml", "dependencies.yml")
 # project macro of one of these names, or of one of them after `<prefix>__` (the `default__` and
 # `<adapter>__` implementations dbt's own macros dispatch to), is refused.
 RELATION_MACROS = ("generate_alias_name", "generate_schema_name", "generate_database_name")
+# The one relation macro a project may define: `generate_schema_name` with exactly this text (dbt's
+# parse of the macro block, from `{% macro` to `{%- endmacro %}`). On BigQuery it returns a node's
+# `schema` config verbatim, else the profile's dataset; on any other target the profile's schema.
+SCHEMA_MACRO_NAME = "generate_schema_name"
+SCHEMA_MACRO = (
+    "{% macro generate_schema_name(custom_schema_name, node) -%}\n"
+    "{%- if custom_schema_name is none or target.type != 'bigquery' -%}\n"
+    "{{ target.schema }}\n"
+    "{%- else -%}\n"
+    "{{ custom_schema_name | trim }}\n"
+    "{%- endif -%}\n"
+    "{%- endmacro %}"
+)
+# The routing that macro implements, which the project file's `+schema` settings must match: each
+# folder of the project (as dbt gives a node's path, relative to `models/`) mapped to the BigQuery
+# dataset its models, seeds and snapshots are built in. A node in no folder here has no `schema`
+# config, so it is built in the profile's dataset. Each dataset is one platform/gcp/warehouse.tf
+# declares for a data product (a test holds that).
+ROUTES = {
+    "models/marts/group_totals": "group_totals",
+}
+# The kinds of node that are built as relations, whose routing the gate checks.
+BUILT = ("model", "seed", "snapshot")
+# Configs that would place a node outside the routing: another database (a BigQuery project), and
+# a snapshot's own schema or database, which dbt uses in place of the schema macro.
+UNROUTED = ("database", "target_schema", "target_database")
 # The macro namespace dbt's own macros, the three above among them, dispatch in.
 DBT_NAMESPACE = "dbt"
 # The largest integer the audit record (agent/audit.schema.json) carries exactly.
@@ -163,6 +209,7 @@ class Parsed:
 
     manifest: Block
     vars: object
+    routes: Block
 
 
 def git(repo: Path, *args: str, stdin: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
@@ -347,9 +394,10 @@ def environment(work: Path) -> dict[str, str]:
     }
 
 
-def parse(tree: Path, work: Path, which: str) -> Parsed:
+def parse(tree: Path, work: Path, which: str, routed: bool = False) -> Parsed:
     """What dbt's parse of the exported tree gives; Unreadable when dbt cannot parse it or it
-    holds what the gate refuses. The message never carries dbt's own output."""
+    holds what the gate refuses, and, when `routed`, a node off the gate's routing. The message
+    never carries dbt's own output."""
     project = tree / PROJECT
     for folder in ("home", "tmp"):
         (work / folder).mkdir(parents=True, exist_ok=True)
@@ -369,10 +417,11 @@ def parse(tree: Path, work: Path, which: str) -> Parsed:
     found = json.loads(report.read_text())
     if found.get("error"):
         raise Unreadable(f"dbt could not parse the {which} tree ({found['error']})")
-    if found["refused"]:
-        raise Unreadable("; ".join(found["refused"]))
+    refused = found["refused"] + (found["off_routes"] if routed else [])
+    if refused:
+        raise Unreadable("; ".join(refused))
     semantic = json.loads((work / "target" / "semantic_manifest.json").read_text())
-    return Parsed(semantic, found["vars"])
+    return Parsed(semantic, found["vars"], found["routes"])
 
 
 def jinja_at(
@@ -435,9 +484,51 @@ def parse_and_refuse(project: Path, report: Path) -> int:
     refused = [
         f"{in_tree(project, macro.original_file_path, tree)}: macro {macro.name} decides relation"
         " names, which the gate does not compare"
+        + (
+            f", other than {SCHEMA_MACRO_NAME} with the gate's own text (semantics/versions.py)"
+            if macro.name == SCHEMA_MACRO_NAME
+            else ""
+        )
         for macro in manifest.macros.values()
-        if macro.package_name == root and names_relations(macro.name)
+        if macro.package_name == root
+        and names_relations(macro.name)
+        and not allowed_macro(macro.name, macro.macro_sql)
     ]
+    built = [
+        node
+        for node in manifest.nodes.values()
+        if node.package_name == root and node.resource_type.value in BUILT
+    ]
+    macro_allowed = any(
+        macro.package_name == root and allowed_macro(macro.name, macro.macro_sql)
+        for macro in manifest.macros.values()
+    )
+    off_routes: list[str] = []
+    for node in built:
+        what = f"{in_tree(project, node.original_file_path, tree)}: {node.resource_type.value}"
+        what += f" {node.name}"
+        refused += unroutable(
+            what,
+            {key: getattr(node.config, key, None) for key in ("schema", *UNROUTED)},
+            node.unrendered_config.get("schema"),
+            "schema" in (getattr(node, "config_call_dict", None) or {}),
+            macro_allowed,
+        )
+        off_routes += off_route(what, node.original_file_path, node.config.schema)
+    schema_of = {node.unique_id: node.config.schema for node in built}
+    routes = {
+        "semantic_models": {
+            model.name: next(
+                (schema_of[uid] for uid in model.depends_on.nodes if uid in schema_of), None
+            )
+            for model in manifest.semantic_models.values()
+        },
+        "time_spines": {
+            node.name: node.config.schema
+            for node in built
+            if getattr(node, "time_spine", None) is not None
+        },
+    }
     if routes_dbt_macros(project_file.get("dispatch")):
         refused.append(
             f"{PROJECT_FILE}'s dispatch sets where dbt's own macros are found, among them the"
@@ -466,8 +557,77 @@ def parse_and_refuse(project: Path, report: Path) -> int:
                     continue
                 for place in jinja_at(key, entry, renders):
                     refused.append(f"{path}: {key} {name} holds dbt Jinja at {place}")
-    report.write_text(json.dumps({"refused": sorted(set(refused)), "vars": project_vars}))
+    report.write_text(
+        json.dumps(
+            {
+                "refused": sorted(set(refused)),
+                "off_routes": sorted(off_routes),
+                "vars": project_vars,
+                "routes": routes,
+            }
+        )
+    )
     return 0
+
+
+def allowed_macro(name: str, text: str) -> bool:
+    """Whether a project macro that decides relation names is the one the gate allows: named
+    `generate_schema_name`, its macro block exactly `SCHEMA_MACRO`, character for character."""
+    return name == SCHEMA_MACRO_NAME and text == SCHEMA_MACRO
+
+
+def route(path: str) -> str | None:
+    """The dataset `ROUTES` builds a node at this path (relative to `models/`) in, or None for
+    the profile's dataset."""
+    found = [
+        dataset
+        for folder, dataset in ROUTES.items()
+        if path == folder or path.startswith(folder + "/")
+    ]
+    return found[0] if len(found) == 1 else None
+
+
+def unroutable(
+    what: str, config: Block, unrendered_schema: object, set_in_sql: bool, macro_allowed: bool
+) -> list[str]:
+    """Why a built node's routing cannot be read from its parse, on either tree, or nothing: a
+    `schema` config must be the literal dbt's parse wrote down unrendered (no dbt Jinja, which the
+    build renders with another environment, and no later setting that overrides it), not in a
+    SQL `config()` call, and only beside the allowed schema macro
+    (dbt's own prefixes it with the profile's dataset); none of `UNROUTED` may be set."""
+    found: list[str] = []
+    schema = config.get("schema")
+    if schema is not None and unrendered_schema != schema:
+        found.append(
+            f"{what} sets its schema other than as the literal dbt renders (dbt Jinja, or a"
+            " setting it overrides), which the gate does not compare"
+        )
+    if set_in_sql:
+        found.append(f"{what} sets its schema in a SQL config() call, which the gate does not read")
+    if schema is not None and not macro_allowed:
+        found.append(
+            f"{what} sets a schema while the project has no {SCHEMA_MACRO_NAME} with the gate's"
+            " own text, so dbt would prefix it with the profile's dataset"
+        )
+    found += [
+        f"{what} sets {key}, which places it outside the gate's routing"
+        for key in UNROUTED
+        if config.get(key) is not None
+    ]
+    return found
+
+
+def off_route(what: str, path: str, schema: object) -> list[str]:
+    """A built node of the working tree whose `schema` config is not the one `ROUTES` gives its
+    path (none outside the routes), or nothing."""
+    expected = route(path)
+    if schema == expected:
+        return []
+    where = f"schema {expected}" if expected else "the profile's dataset"
+    return [
+        f"{what} sets schema {schema!r}, where the gate's routing (semantics/versions.py ROUTES)"
+        f" builds it in {where}"
+    ]
 
 
 def names_relations(macro: str) -> bool:
@@ -569,9 +729,14 @@ def parts(metric: object, granularities: list[str]) -> Parts:
     return found
 
 
-def definitions(manifest: Block, project_vars: object = None) -> dict[str, Metric]:
+def definitions(
+    manifest: Block, project_vars: object = None, routes: Block | None = None
+) -> dict[str, Metric]:
     """Every metric of a semantic manifest dbt wrote, with its definition; every definition holds
-    the project file's `vars`."""
+    the project file's `vars`, and the `schema` config (`routes`, from the parse) of the node each
+    semantic model it reads and each time spine is built from."""
+    routes = routes or {}
+    model_routes = routes.get("semantic_models") or {}
     from metricflow_semantic_interfaces.implementations.semantic_manifest import (
         PydanticSemanticManifest,
     )
@@ -585,6 +750,7 @@ def definitions(manifest: Block, project_vars: object = None) -> dict[str, Metri
     raw_models = {m["name"]: m for m in manifest.get("semantic_models") or []}
     built = {m.name: parts(m, granularities) for m in parsed.metrics}
     time = normal({k: spines.get(k) for k in ("time_spines", "time_spine_table_configurations")})
+    time["routes"] = normal(routes.get("time_spines") or {})
     found: dict[str, Metric] = {}
     for name, raw in raw_metrics.items():
         meta = (raw.get("config") or {}).get("meta") or {}
@@ -602,7 +768,7 @@ def definitions(manifest: Block, project_vars: object = None) -> dict[str, Metri
         definition = {
             "metric": own,
             "inputs": inputs,
-            "semantic_models": semantic(closure, built, measures, raw_models),
+            "semantic_models": semantic(closure, built, measures, raw_models, model_routes),
             "time_spines": time,
             "vars": normal(project_vars),
         }
@@ -626,10 +792,14 @@ def reached(name: str, built: dict[str, Parts]) -> set[str]:
 
 
 def semantic(
-    closure: set[str], built: dict[str, Parts], measures: set[str], models: dict[str, Block]
+    closure: set[str],
+    built: dict[str, Parts],
+    measures: set[str],
+    models: dict[str, Block],
+    routes: Block,
 ) -> dict[str, Block]:
     """The semantic models the metrics read, with every one they join through a shared entity,
-    each with only the measures resolved to."""
+    each with only the measures resolved to and the `schema` config of the node it reads."""
     owners = {
         m["name"]: name for name, model in models.items() for m in model.get("measures") or []
     }
@@ -648,15 +818,16 @@ def semantic(
     for name in sorted(reach):
         model = normal(models[name], WORDING)
         model["measures"] = [m for m in model.get("measures") or [] if m.get("name") in measures]
+        model["route"] = normal(routes.get(name))
         found[name] = model
     return found
 
 
-def read(tree: Path, work: Path, which: str) -> dict[str, Metric]:
+def read(tree: Path, work: Path, which: str, routed: bool = False) -> dict[str, Metric]:
     """Every metric dbt reads from the exported tree's project, with its definition; Unreadable
     when the tree cannot be parsed or holds what the gate refuses."""
-    parsed = parse(tree, work, which)
-    return definitions(parsed.manifest, parsed.vars)
+    parsed = parse(tree, work, which, routed)
+    return definitions(parsed.manifest, parsed.vars, parsed.routes)
 
 
 def valid_version(version: object) -> bool:
@@ -737,7 +908,7 @@ def check(repo: Path = REPO, base: str = BASE) -> tuple[bool, str]:
         tree.mkdir()
         try:
             export_working(repo, tree)
-            current = read(tree, Path(scratch) / "work", "working")
+            current = read(tree, Path(scratch) / "work", "working", routed=True)
         except Unreadable as e:
             return False, f"metric-versions: the working tree's metrics cannot be read: {e}"
     return compare(published, current, base)

@@ -132,27 +132,28 @@ ENV = {"LEDGER_LAB_GCP_PROJECT": "the-lab", "LEDGER_LAB_BQ_LOCATION": "us-centra
 
 class StubBq:
     """`bq` answering `ls`, `show` and `query` for the relations of `remote`, each given as its
-    BigQuery column types and a DuckDB table whose digest stands in for BigQuery's."""
+    BigQuery column types and a DuckDB table whose digest stands in for BigQuery's, keyed by
+    `<dataset>.<relation>`, or by the relation alone for one in `intermediate`."""
 
     def __init__(self, remote: dict[str, tuple[list[Column], tuple[int, str]]]) -> None:
-        self.remote = remote
+        self.remote = {k if "." in k else f"intermediate.{k}": v for k, v in remote.items()}
         self.calls: list[list[str]] = []
 
     def __call__(self, command: Sequence[str], **_: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(command))
         verb = next(c for c in command if not c.startswith("-") and not c.endswith("bq"))
         if verb == "ls":
-            out = [{"tableReference": {"tableId": name}} for name in self.remote]
+            out = [
+                {"tableReference": {"tableId": key.split(".")[1]}}
+                for key in self.remote
+                if key.split(".")[0] == command[-1]
+            ]
         elif verb == "show":
-            name = command[-1].split(".")[-1]
-            out = {
-                "schema": {
-                    "fields": [{"name": c.name, "type": c.type} for c in self.remote[name][0]]
-                }
-            }
+            fields = [{"name": c.name, "type": c.type} for c in self.remote[command[-1]][0]]
+            out = {"schema": {"fields": fields}}
         else:
-            name = command[-1].rsplit("`", 2)[-2].split(".")[-1]
-            out = [dict(zip(("n", "d"), map(str, self.remote[name][1]), strict=True))]
+            key = command[-1].rsplit("`", 2)[-2]
+            out = [dict(zip(("n", "d"), map(str, self.remote[key][1]), strict=True))]
         return subprocess.CompletedProcess(list(command), 0, json.dumps(out), "")
 
 
@@ -244,6 +245,28 @@ def test_a_relation_on_one_side_only_differs(
     assert run(tmp_path, monkeypatch, local_too, both)[0] == 1
     remote_too = both | {"stray": ([Column("x", "INT64")], (1, "0" * 32))}
     assert run(tmp_path / "b", monkeypatch, LOCAL, remote_too)[0] == 1
+
+
+def test_a_relation_in_a_routed_dataset_is_compared_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The build's datasets are the profile's and the routing's; a relation is read where it is."""
+    assert bigquery_parity.DATASETS == ("intermediate", "group_totals")
+    columns = [Column("k", "STRING"), Column("amt", "NUMERIC")]
+    remote = {"group_totals.r": (columns, remote_digest(ROWS, "k, amt"))}
+    status, stub = run(tmp_path, monkeypatch, LOCAL, remote)
+    assert status == 0
+    assert any("group_totals.r" in call for call in stub.calls if "show" in call)
+
+
+def test_a_relation_in_two_of_the_build_datasets_differs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A copy left in the profile's dataset beside the routed one, even with the same rows."""
+    columns = [Column("k", "STRING"), Column("amt", "NUMERIC")]
+    same = (columns, remote_digest(ROWS, "k, amt"))
+    status, _ = run(tmp_path, monkeypatch, LOCAL, {"group_totals.r": same, "r": same})
+    assert status == 1
 
 
 def test_nothing_compared_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -104,10 +104,11 @@ def test_an_explicit_bigquery_target_is_refused_in_another_labs_session(
 def test_the_bigquery_target_builds_in_the_declared_intermediate_dataset(
     env: dict[str, str],
 ) -> None:
-    """The one dataset, whatever the environment holds, and the one the parity check and the
-    warehouse contract run read."""
+    """The profile's one dataset, whatever the environment holds: the one the warehouse contract
+    run reads, and the first of those the parity check reads."""
     assert render("dataset", env) == "intermediate"
     assert bigquery_parity.DATASET == warehouse.DATASET == "intermediate"
+    assert bigquery_parity.DATASETS[0] == "intermediate"
 
 
 def test_the_bigquery_target_sends_the_environments_access_token() -> None:

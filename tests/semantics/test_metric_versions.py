@@ -16,10 +16,11 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+import jinja2
 import pytest
 import yaml
 
@@ -183,10 +184,24 @@ def still(*names: str, at: int = 1) -> list[str]:
     return [f"- metric {m}'s definition changed and its version is still {at}" for m in names]
 
 
+def all_still() -> list[str]:
+    """Every metric's line of `still`, each at its committed version."""
+    return [
+        line for m in ALL_METRICS for line in still(m, at=2 if m in GROUP_TOTALS_METRICS else 1)
+    ]
+
+
 FIXED_AWARD_EXPR = "expr: case when award_held_to > 0 then award_held_to end"
 NEW_EXPR = "expr: case when award_held_to > 1 then award_held_to end"
 PAID_AGAINST_EXPR = "expr: case when award_held_to > 0 then paid end"
 REPEATS = "{{ Dimension('payment__entity_id') }} = 'uk-transport'"
+GROUP_TOTALS_METRICS = [
+    "constant_currency_spend",
+    "spend_bases_in_periods",
+    "spend_bases_in_years",
+    "spend_in_periods",
+    "spend_in_years",
+]
 PAYMENT_METRICS = [
     "chicago_payment_amount",
     "chicago_payment_rows",
@@ -284,7 +299,7 @@ FAILS: dict[str, tuple[Edit, list[str]]] = {
         whole_file_dbtignored,
         still("fixed_award", "spend_against_award"),
     ),
-    "the time spine moved": (spine_moved, still(*ALL_METRICS)),
+    "the time spine moved": (spine_moved, all_still()),
 }
 
 
@@ -364,14 +379,15 @@ VAR_EDITS: dict[str, Edit] = {
 
 def every_version_bumped(files: dict[str, str]) -> None:
     for path in [p for p in files if p.startswith(FOLDER)]:
-        files[path] = files[path].replace("version: 1}", "version: 2}")
+        text = files[path].replace("version: 2}", "version: 3}")
+        files[path] = text.replace("version: 1}", "version: 2}")
 
 
 @pytest.mark.parametrize("name", list(VAR_EDITS))
 def test_a_project_var_is_part_of_every_definition(tmp_path: Path, name: str) -> None:
     ok, report = versions.check(working(tmp_path, VAR_EDITS[name]))
     assert not ok, report
-    assert lines(report) == still(*ALL_METRICS), report
+    assert lines(report) == all_still(), report
 
 
 def test_project_vars_changed_with_every_version_bumped_pass(tmp_path: Path) -> None:
@@ -656,6 +672,208 @@ def test_a_definition_dbt_reads_otherwise_or_cannot_read_fails_the_gate(
     for each in expected:
         assert each in report, report
     assert PROBE not in report
+
+
+SCHEMA_MACRO_FILE = "models/macros/generate_schema_name.sql"
+GROUP_TOTALS_DOCS = "models/models/marts/group_totals/group_totals.yml"
+ROUTED = "      group_totals:\n        +schema: group_totals\n"
+
+
+def schema_macro(old: str, new: str) -> Edit:
+    """The committed schema macro's text with `old` (which it holds once) replaced by `new`."""
+    return replaced(SCHEMA_MACRO_FILE, old, new)
+
+
+def node_config(path: str, name: str, config: str) -> Edit:
+    """A `config:` line of the test's own added to the model `name`'s entry in `path`."""
+    return replaced(path, f"  - name: {name}\n", f"  - name: {name}\n    config: {config}\n")
+
+
+def schema_refused(what: str) -> str:
+    return (
+        f"{what} sets a schema while the project has no generate_schema_name with the gate's own"
+        " text, so dbt would prefix it with the profile's dataset"
+    )
+
+
+GROUP_TOTALS_SQL = "models/models/marts/group_totals/group_totals.sql"
+LEFT_OUT = "models/models/marts/group_totals/group_totals_left_out.sql: model group_totals_left_out"
+PAYMENTS_NODE = "models/models/marts/payments/payments.sql: model payments"
+NOT_THE_GATES = (
+    f"{SCHEMA_MACRO_FILE}: macro generate_schema_name decides relation names, which the gate does"
+    " not compare, other than generate_schema_name with the gate's own text"
+    " (semantics/versions.py)"
+)
+NOT_LITERAL = (
+    "sets its schema other than as the literal dbt renders (dbt Jinja, or a setting it overrides),"
+    " which the gate does not compare"
+)
+ROUTING_REFUSED: dict[str, tuple[Edit, list[str]]] = {
+    "the schema macro with a space added": (
+        schema_macro("{{ target.schema }}", "{{  target.schema }}"),
+        [NOT_THE_GATES],
+    ),
+    "the schema macro with a Jinja comment in it": (
+        schema_macro("{%- else -%}\n", "{%- else -%}\n{# a comment #}\n"),
+        [NOT_THE_GATES],
+    ),
+    "the schema macro reading the environment": (
+        schema_macro(
+            "{{ custom_schema_name | trim }}",
+            "{{ env_var('ANY', '') ~ custom_schema_name | trim }}",
+        ),
+        [NOT_THE_GATES],
+    ),
+    "the schema macro reading a var": (
+        schema_macro("{{ custom_schema_name | trim }}", "{{ var('dataset', custom_schema_name) }}"),
+        [NOT_THE_GATES],
+    ),
+    "an adapter schema macro beside the allowed one": (
+        relation_macro("bigquery__generate_schema_name", "(custom_name or target.schema)"),
+        [
+            "models/macros/relation_probe.sql: macro bigquery__generate_schema_name decides"
+            " relation names, which the gate does not compare"
+        ],
+    ),
+    "a model's schema naming a dataset outside the routing": (
+        node_config(
+            "models/models/marts/payments/_payments__models.yml", "payments", "{schema: scratch}"
+        ),
+        [
+            f"{PAYMENTS_NODE} sets schema 'scratch', where the gate's routing"
+            " (semantics/versions.py ROUTES) builds it in the profile's dataset"
+        ],
+    ),
+    "the payments mart routed to its product's dataset": (
+        replaced(
+            PROJECT_FILE,
+            ROUTED,
+            ROUTED + "      payments:\n        +schema: payments\n",
+        ),
+        [
+            f"{PAYMENTS_NODE} sets schema 'payments', where the gate's routing"
+            " (semantics/versions.py ROUTES) builds it in the profile's dataset"
+        ],
+    ),
+    "a group-totals model's schema unset in its entry": (
+        node_config(GROUP_TOTALS_DOCS, "group_totals_left_out", "{schema: null}"),
+        [f"{LEFT_OUT} {NOT_LITERAL}"],
+    ),
+    "a schema read from the environment": (
+        node_config(
+            GROUP_TOTALS_DOCS,
+            "group_totals_left_out",
+            "{schema: \"{{ env_var('ANY', 'group_totals') }}\"}",
+        ),
+        [f"{LEFT_OUT} {NOT_LITERAL}"],
+    ),
+    "a schema set in a model's SQL": (
+        replaced(
+            GROUP_TOTALS_SQL,
+            "\nselect",
+            "\n{{ config(schema='group_totals') }}\nselect",
+        ),
+        [
+            "models/models/marts/group_totals/group_totals.sql: model group_totals sets its"
+            " schema in a SQL config() call, which the gate does not read"
+        ],
+    ),
+    "a database set for a folder": (
+        replaced(PROJECT_FILE, ROUTED, ROUTED + "        +database: elsewhere\n"),
+        [
+            f"{LEFT_OUT} sets database, which places it outside the gate's routing",
+            "models/models/marts/group_totals/group_totals.sql: model group_totals sets"
+            " database, which places it outside the gate's routing",
+        ],
+    ),
+    "a schema without the allowed macro": (
+        lambda files: files.pop(SCHEMA_MACRO_FILE),
+        [schema_refused(LEFT_OUT)],
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(ROUTING_REFUSED))
+def test_a_routing_the_gate_does_not_hold_fails_the_gate(tmp_path: Path, name: str) -> None:
+    edit, expected = ROUTING_REFUSED[name]
+    ok, report = versions.check(working(tmp_path, edit))
+    assert not ok, report
+    for each in expected:
+        assert each in report, report
+
+
+def test_a_main_with_a_routing_the_gate_cannot_read_fails_the_gate(tmp_path: Path) -> None:
+    """The rules that let the gate read a node's dataset from its parse hold on `origin/main`'s
+    tree too: there, a schema without the allowed macro is refused."""
+    main = changed_from(REAL, lambda files: files.pop(SCHEMA_MACRO_FILE))
+    with pytest.raises(versions.GateError, match="origin/main's metrics cannot be read") as caught:
+        versions.check(git_repo(tmp_path, main))
+    assert schema_refused(LEFT_OUT) in str(caught.value)
+
+
+def test_a_metric_models_dataset_moved_is_a_changed_definition(tmp_path: Path) -> None:
+    """The dataset a semantic model's node is built in on BigQuery (its `schema` config, which
+    the allowed macro takes verbatim) is part of the definition: against a main that builds the
+    group totals in the profile's dataset, the committed routing changes their metrics."""
+    main = changed_from(REAL, replaced(PROJECT_FILE, ROUTED, ""))
+    routed = REAL[PROJECT_FILE]
+    ok, report = versions.check(working(tmp_path, lambda f: f.update({PROJECT_FILE: routed}), main))
+    assert not ok, report
+    assert lines(report) == still(*GROUP_TOTALS_METRICS, at=2), report
+
+
+def test_an_alias_on_a_metric_model_is_a_changed_definition(tmp_path: Path) -> None:
+    """An alias renames the relation on every target, so the local parse the gate compares sees
+    it."""
+    edit = node_config(GROUP_TOTALS_DOCS, "group_totals", "{alias: group_totals_copy}")
+    ok, report = versions.check(working(tmp_path, edit))
+    assert not ok, report
+    assert lines(report) == still(*GROUP_TOTALS_METRICS, at=2), report
+
+
+def test_the_routing_names_declared_product_datasets_and_the_project_file_implements_it() -> None:
+    """Each routed dataset is one platform/gcp/warehouse.tf declares for a data product (its
+    `datasets` local: the products' ids with `_` for `-`), the committed macro is the gate's own
+    text, and the project file's `+schema` settings are exactly the routes."""
+    personas = yaml.safe_load((versions.REPO / "access" / "personas.yaml").read_text())
+    products = {p["id"].replace("-", "_") for p in personas["data_products"]}
+    assert set(versions.ROUTES.values()) <= products
+    assert "payments" not in versions.ROUTES.values()
+    macros = (versions.REPO / SCHEMA_MACRO_FILE).read_text()
+    assert macros.count(versions.SCHEMA_MACRO) == 1
+    project = yaml.safe_load((versions.REPO / PROJECT_FILE).read_text())
+
+    def schemas(block: Block, at: str) -> Iterator[tuple[str, str]]:
+        for key, value in block.items():
+            if key == "+schema":
+                yield at, value
+            elif isinstance(value, dict) and not key.startswith("+"):
+                yield from schemas(value, f"{at}/{key}")
+
+    found = dict(schemas(project["models"]["ledger_lab"], "models"))
+    assert found == versions.ROUTES
+    assert not any(key in project for key in ("seeds", "snapshots"))
+
+
+@pytest.mark.parametrize(
+    ("adapter", "custom", "built_in"),
+    [
+        ("bigquery", "group_totals", "group_totals"),
+        ("bigquery", None, "intermediate"),
+        ("duckdb", "group_totals", "main"),
+        ("duckdb", None, "main"),
+    ],
+)
+def test_the_allowed_macro_routes_only_on_bigquery(
+    adapter: str, custom: str | None, built_in: str
+) -> None:
+    """The gate's copy of the macro, rendered by Jinja with the target dbt would give it: on
+    BigQuery a node's schema verbatim, else the profile's dataset; on another target the
+    profile's schema."""
+    target = {"type": adapter, "schema": {"bigquery": "intermediate", "duckdb": "main"}[adapter]}
+    template = versions.SCHEMA_MACRO + "{{ generate_schema_name(custom, none) }}"
+    rendered = jinja2.Environment(autoescape=False).from_string(template)  # noqa: S701
+    assert rendered.render(target=target, custom=custom).strip() == built_in
 
 
 def test_a_metric_reading_a_dbt_var_fails_even_when_only_the_var_changes(tmp_path: Path) -> None:
