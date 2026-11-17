@@ -2,12 +2,7 @@
 # `local`: an in-process DuckDB file, the default; with no LEDGER_LAB_DUCKDB_PATH, it is
 # `models/target/ledger_lab.duckdb` under the folder dbt runs from (the README runs it from the
 # repository's root), inside the project's target folder, which dbt makes when it parses the
-# project (a build does; `dbt debug` does not). While `PWD` ends in `/models`, as a shell's
-# `cd models` leaves it, the default is instead
-# `run-dbt-from-the-repository-root/ledger_lab.duckdb`, a folder the project does not make, so
-# DuckDB's "Cannot open file" error names the fix. The signal is `PWD` only: a launcher that
-# leaves it unset or set to another folder gets the first path, and a clone whose own folder is
-# named `models` gets the second at its root.
+# project (a build does; `dbt debug` does not).
 # `bigquery`: chosen when LEDGER_LAB_GCP_PROJECT is set and the session carries no GCP_PROJECT,
 # whose credential is another lab's (`platform/gcp_project.py`); needs `uv sync --group bigquery`;
 # every job is capped by maximum_bytes_billed; every model and seed is built in one dataset,
@@ -26,7 +21,7 @@ ledger_lab:
   outputs:
     local:
       type: duckdb
-      path: "{{ env_var('LEDGER_LAB_DUCKDB_PATH', 'run-dbt-from-the-repository-root/ledger_lab.duckdb' if env_var('PWD', '').endswith('/models') else 'models/target/ledger_lab.duckdb') }}"
+      path: "{{ env_var('LEDGER_LAB_DUCKDB_PATH', 'models/target/ledger_lab.duckdb') }}"
       threads: 4
     bigquery:
       type: bigquery
