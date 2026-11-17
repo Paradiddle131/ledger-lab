@@ -32,7 +32,7 @@ Open owner questions are the `needs-owner` issues.
 Labels: `ready` is the skill's `agent:ready`; `blocked` stands for its `blocked: *` (the reason is the last comment); `research` with `ready` is its `agent:research`; `agent:claimed` is applied by the scripts as the skill says.
 Area labels: `data`, `access`, `semantics`, `agent`, `workflow`, `operations`, `platform`; kind labels: `epic`, `decision`, `research`, `question`, `control`.
 
-**An item that turns out to need GCP or the owner:** commit nothing half-done; swap `ready` and `agent:claimed` for `needs-gcp` (this lab's own project is missing, or the step is a live GCP step) or `needs-owner` (a decision packet as the last comment); say why on the issue; `git stash -u`; take the next.
+**An item that turns out to need GCP or the owner:** commit nothing half-done; swap `ready` and `agent:claimed` for `needs-gcp` (the step calls GCP while `LEDGER_LAB_GCP_PROJECT` is unset or empty or a `GCP_PROJECT` is set, or while the Digest says `Mode: offline`, or this lab's own project is missing) or `needs-owner` (a decision packet as the last comment); say why on the issue; `git stash -u`; take the next.
 
 ## Gates
 
@@ -43,7 +43,7 @@ No `local` gates: cloud is the only environment.
 
 ## Never
 
-- Call GCP outside this lab's own environment: while `LEDGER_LAB_GCP_PROJECT` is unset or a `GCP_PROJECT` is set, where the injected credential is another lab's (`AGENTS.md`, own project only; in a session that has a `GCP_PROJECT`, the session-start hook prints that `docs/agents/no-session-gcp` declines it); label the item `needs-gcp` instead.
+- Call GCP outside this lab's own environment: while `LEDGER_LAB_GCP_PROJECT` is unset or empty or a `GCP_PROJECT` is set, where the injected credential may be another lab's (`AGENTS.md`, own project only; in a session that has a `GCP_PROJECT`, the session-start hook prints that `docs/agents/no-session-gcp` declines it); label the item `needs-gcp` instead.
 - Commit a download, a sample whose licence is unconfirmed, or a person's name; commit the fetch script and its checksum.
 - Call a paid model; wait for the free quota or report the gap.
 - Edit a guardrail in `AGENTS.md`; post a conflict packet on the issue.
