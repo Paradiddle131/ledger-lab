@@ -696,6 +696,10 @@ def schema_refused(what: str) -> str:
     )
 
 
+def without_schema_macro(files: dict[str, str]) -> None:
+    del files[SCHEMA_MACRO_FILE]
+
+
 GROUP_TOTALS_SQL = "models/models/marts/group_totals/group_totals.sql"
 LEFT_OUT = "models/models/marts/group_totals/group_totals_left_out.sql: model group_totals_left_out"
 PAYMENTS_NODE = "models/models/marts/payments/payments.sql: model payments"
@@ -787,7 +791,7 @@ ROUTING_REFUSED: dict[str, tuple[Edit, list[str]]] = {
         ],
     ),
     "a schema without the allowed macro": (
-        lambda files: files.pop(SCHEMA_MACRO_FILE),
+        without_schema_macro,
         [schema_refused(LEFT_OUT)],
     ),
 }
@@ -805,7 +809,7 @@ def test_a_routing_the_gate_does_not_hold_fails_the_gate(tmp_path: Path, name: s
 def test_a_main_with_a_routing_the_gate_cannot_read_fails_the_gate(tmp_path: Path) -> None:
     """The rules that let the gate read a node's dataset from its parse hold on `origin/main`'s
     tree too: there, a schema without the allowed macro is refused."""
-    main = changed_from(REAL, lambda files: files.pop(SCHEMA_MACRO_FILE))
+    main = changed_from(REAL, without_schema_macro)
     with pytest.raises(versions.GateError, match="origin/main's metrics cannot be read") as caught:
         versions.check(git_repo(tmp_path, main))
     assert schema_refused(LEFT_OUT) in str(caught.value)
