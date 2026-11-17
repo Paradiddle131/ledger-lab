@@ -32,6 +32,8 @@ from ingest.load import (
     DATASET,
     LOCATION_VARIABLE,
     MAX_BYTES_BILLED,
+    SLICE,
+    SLICES,
     STORAGE_CAP,
     Digest,
     LoadError,
@@ -39,6 +41,7 @@ from ingest.load import (
     counts,
     digest,
     distinct_values,
+    duckdb_digest_sql,
     free_regions,
     lab,
     landed_names,
@@ -297,6 +300,24 @@ def test_the_landed_names_are_the_seven_files_the_landing_steps_write() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "name", ["ECB-rates", "ecb_rates", "x-", "-x", "a--b", "ecb rates", "ecb-rates\n", ""]
+)
+def test_a_name_off_the_landed_pattern_is_refused_though_the_landed_names_hold_it(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pattern's own refusal: each name here is put in the landed names, so only the pattern
+    refuses it."""
+    with pytest.raises(LoadError, match="not a landed file"):
+        table_name(name, frozenset({name}))
+    monkeypatch.setattr("ingest.load.landed_names", lambda: frozenset({name}))
+    bq, fs = Bq(), bucket_holding(*LANDED)
+    with pytest.raises(LoadError, match="not a landed file"):
+        load([name], ENV, bq, fs)
+    assert bq.calls == []
+    assert not locked(fs)
+
+
 def test_a_file_the_bucket_does_not_hold_is_refused_before_any_load() -> None:
     bq, fs = Bq(), bucket_holding("chicago-contracts")
     with pytest.raises(LoadError, match="holds no ecb-rates"):
@@ -364,6 +385,22 @@ def test_an_interrupted_load_releases_the_lock() -> None:
     with pytest.raises(KeyboardInterrupt):
         load(LANDED, ENV, bq, fs)
     assert not locked(fs)
+
+
+def test_a_lock_the_load_cannot_release_is_reported_with_how_to_delete_it() -> None:
+    bq, fs = Bq(), bucket_holding(*LANDED)
+    remove = fs.rm_file
+
+    def refuse_the_lock(path: str, *args: Any, **kwargs: Any) -> Any:
+        if path.endswith(f"/{LOCK}"):
+            raise PermissionError(path)
+        return remove(path, *args, **kwargs)
+
+    fs.rm_file = refuse_the_lock  # type: ignore[method-assign]
+    with pytest.raises(LoadError, match=f"delete {re.escape(LOCK)} by hand once nothing runs$"):
+        load(LANDED, ENV, bq, fs)
+    assert bq.verbs().count("load") == 2
+    assert locked(fs)
 
 
 def test_no_name_twice_and_at_least_one() -> None:
@@ -465,6 +502,34 @@ def test_a_run_that_starts_above_the_storage_cap_loads_nothing() -> None:
     assert not locked(fs)
 
 
+@pytest.mark.parametrize(
+    ("earlier", "loaded"),
+    [(STORAGE_CAP, 0), (0, STORAGE_CAP)],
+    ids=["an earlier table at the cap and an empty load", "one empty table at the cap"],
+)
+def test_a_zero_row_table_and_a_landed_dataset_at_exactly_the_cap_are_accepted(
+    earlier: int, loaded: int
+) -> None:
+    """The landed dataset holds exactly `STORAGE_CAP` bytes at each check, the one before the load
+    in the first case and the one after it in both, and the loaded table holds no row."""
+    bq, fs = Bq(rows=0), bucket_holding("chicago-contracts")
+    bq.listed = {"from_an_earlier_run"} if earlier else set()
+
+    def run(command: Sequence[str]) -> str:
+        out = bq(command)
+        if verb_of(command) == "show":
+            answer = json.loads(out)
+            mine = answer["tableReference"]["tableId"] == "chicago_contracts"
+            answer["numBytes"] = str(loaded if mine else earlier)
+            return json.dumps(answer)
+        return out
+
+    (table,) = load(["chicago-contracts"], ENV, run, fs)
+    assert (table.rows, table.bytes) == (0, loaded)
+    assert bq.verbs().count("load") == 1
+    assert not locked(fs)
+
+
 def test_a_negative_byte_count_cancels_no_other_tables_bytes() -> None:
     """An earlier table holds three quarters of the cap, and the table this run loads reports a
     negative size at each `bq show`: the load is refused at the first such answer, before a
@@ -562,6 +627,25 @@ def test_a_table_answer_of_another_shape_project_dataset_or_table_is_refused(ans
         load(["chicago-contracts"], ENV, lambda c: answer, bucket_holding("chicago-contracts"))
 
 
+def test_a_table_answer_with_no_project_is_taken_as_the_lab_projects() -> None:
+    """`bq show` is asked for `<lab project>:landed.<table>`; an answer that names no project is
+    read as that table, and one that names another project is refused (above)."""
+    answer = shown(datasetId=DATASET, tableId="chicago_contracts")
+    assert table_of("chicago-contracts", answer, PROJECT).table == "landed.chicago_contracts"
+    bq = Bq()
+
+    def run(command: Sequence[str]) -> str:
+        out = bq(command)
+        if verb_of(command) == "show":
+            answer = json.loads(out)
+            del answer["tableReference"]["projectId"]
+            return json.dumps(answer)
+        return out
+
+    tables = load(["chicago-contracts"], ENV, run, bucket_holding("chicago-contracts"))
+    assert [t.table for t in tables] == ["landed.chicago_contracts"]
+
+
 def counted(rows: Any, size: Any) -> str:
     """A `bq show` answer for `landed.chicago_contracts` with these JSON values as its counts."""
     return json.dumps(
@@ -642,6 +726,21 @@ def test_the_free_regions_are_the_ones_the_lab_projects_definitions_allow() -> N
     assert free_regions() == ("us-west1", "us-central1", "us-east1")
 
 
+def test_definitions_with_no_region_validation_refuse_every_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    variables = tmp_path / "variables.tf"
+    variables.write_text('variable "region" {\n  type    = string\n  default = "us-central1"\n}\n')
+    monkeypatch.setattr("ingest.load.VARIABLES_TF", variables)
+    with pytest.raises(LoadError, match="^no region validation in variables.tf$"):
+        free_regions()
+    bq, fs = Bq(), bucket_holding(*LANDED)
+    with pytest.raises(LoadError, match="^no region validation in variables.tf$"):
+        load(LANDED, ENV, bq, fs)
+    assert bq.calls == []
+    assert not locked(fs)
+
+
 # The queries.
 
 
@@ -683,6 +782,26 @@ def test_a_query_answer_of_unexpected_shape_is_refused(answer: str) -> None:
     bq.answer = answer
     with pytest.raises(LoadError, match="^the query answered unexpectedly$"):
         counts("chicago-contracts", ENV, bq)
+
+
+@pytest.mark.parametrize(
+    ("answer", "rows"),
+    [
+        ("", 0),
+        ("[]", 0),
+        (json.dumps([{"n": "1", "c0": "1"}] * 2), 2),
+        (json.dumps([{"n": "1", **{f"s{i}": "1" for i in range(8)}}] * 2), 2),
+    ],
+    ids=["an empty answer", "an empty list", "two rows of counts", "two rows of a digest"],
+)
+@pytest.mark.parametrize("ask", [counts, digest], ids=["counts", "digest"])
+def test_a_one_row_query_answered_with_another_number_of_rows_is_refused(
+    ask: Callable[[str, Mapping[str, str], Bq], Any], answer: str, rows: int
+) -> None:
+    bq = Bq()
+    bq.answer = answer
+    with pytest.raises(LoadError, match=f"^the query answered {rows} rows, not one$"):
+        ask("chicago-contracts", ENV, bq)
 
 
 @pytest.mark.parametrize(
@@ -792,11 +911,68 @@ def test_the_digest_holds_no_column_type_without_a_rule() -> None:
         bigquery_digest_sql("`t`", [("`x`", "FLOAT")])
 
 
+@pytest.mark.parametrize("kind", ["DOUBLE", "DATE", "DECIMAL(9,2)"])
+def test_the_local_digest_holds_no_column_type_without_a_rule(tmp_path: Path, kind: str) -> None:
+    with pytest.raises(LoadError, match=re.escape(f"no digest rule for a {kind} column")):
+        duckdb_digest_sql("t", [('"x"', kind)])
+    path = tmp_path / "typed"
+    con = duckdb.connect()
+    con.execute(f"CREATE TABLE t (vendor_name VARCHAR, x {kind})")
+    con.execute(f"COPY t TO '{path}' (FORMAT parquet)")
+    with pytest.raises(LoadError, match=re.escape(f"no digest rule for a {kind} column")):
+        local_digest(path)
+
+
+def test_the_digest_sums_eight_adjacent_slices_of_eight_hex_digits(tmp_path: Path) -> None:
+    """Each engine's digest SQL has eight sums, `s0` to `s7`, each the `SUM` of one slice of the
+    row hash's text cast from hex to an integer, the slices eight digits long and starting at digit
+    1, 9, ..., 57, so they are adjacent and together are digits 1 to 64; eight hex digits summed
+    over a million rows stay below 2**52; the local digest gives eight sums."""
+    assert (SLICES, SLICE) == (8, 8)
+    assert 1_000_000 * (16**SLICE - 1) < 2**52
+    assert len(local_digest(landed_table(tmp_path, ROWS)).sums) == 8
+    for sql in (bigquery_digest_sql("`t`", []), duckdb_digest_sql("t", [])):
+        assert re.findall(r"AS s(\d+)", sql) == [str(i) for i in range(8)]
+        summed = re.findall(
+            r"(?i)\bSUM\(CAST\((?:CONCAT\('0x', |'0x' \|\| )substr\(h, (\d+), (\d+)\)\)?"
+            r" AS (?:INT64|BIGINT)\)\) AS s(\d+)",
+            sql,
+        )
+        assert summed == [(str(8 * i + 1), "8", str(i)) for i in range(8)]
+
+
+LOCAL_SUMS = ", ".join(f"{i} AS s{i}" for i in range(8))
+
+
+@pytest.mark.parametrize(
+    ("sql", "rows"),
+    [
+        ("SELECT 1 AS n, {sums} FROM {source} LIMIT 0", 0),
+        ("SELECT n, {sums} FROM (SELECT DISTINCT unnest([1, 2]) AS n FROM {source})", 2),
+    ],
+    ids=["no row", "two rows"],
+)
+def test_a_local_digest_answered_with_other_than_one_row_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sql: str, rows: int
+) -> None:
+    """DuckDB answers the digest's aggregate with one row; a query that answers none or two is
+    refused as a `LoadError` naming the number of rows."""
+    path = landed_table(tmp_path, ROWS)
+    monkeypatch.setattr(
+        "ingest.load.duckdb_digest_sql",
+        lambda source, columns: sql.format(sums=LOCAL_SUMS, source=source),
+    )
+    with pytest.raises(LoadError, match=f"^the local digest answered {rows} rows, not one$"):
+        local_digest(path)
+
+
 def guarded[T](what: str, env: Mapping[str, str], call: Callable[[], T]) -> T | str:
     """`call()`'s answer, or on an `Exception` fixed text: `what`, the exception's type and, for a
     `LoadError`, its message with each value of `env` but the location, stripped of surrounding
-    whitespace, replaced by `<hidden>`; one pattern holds the values, longest first, so a value
-    that holds another (a session project that holds the lab's) is replaced whole. An
+    whitespace, hidden: each place in the message where a value occurs, overlapping places
+    included, is found, and each run of places that overlap or touch is replaced by one
+    `<hidden>`, so a value that holds another (a session project that holds the lab's) or that
+    starts inside another is hidden whole. An
     interrupt (a `BaseException` that is no `Exception`) is raised again as a new exception of its
     type with no arguments, after the `except` block, so its traceback starts in this frame and
     holds no frame of `call` and no exception context; this frame's locals are then `what`, `env`,
@@ -807,9 +983,19 @@ def guarded[T](what: str, env: Mapping[str, str], call: Callable[[], T]) -> T | 
     except Exception as error:
         message = str(error) if isinstance(error, LoadError) else ""
         values = {v.strip() for k, v in env.items() if k != LOCATION_VARIABLE} - {""}
-        if values:
-            longest = sorted(values, key=len, reverse=True)
-            message = re.sub("|".join(map(re.escape, longest)), "<hidden>", message)
+        spans = sorted(
+            (found.start(), found.start() + len(value))
+            for value in values
+            for found in re.finditer(f"(?={re.escape(value)})", message)
+        )
+        merged: list[list[int]] = []
+        for start, end in spans:
+            if merged and start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        for start, end in reversed(merged):
+            message = message[:start] + "<hidden>" + message[end:]
         return f"{what}: {type(error).__name__}" + (f": {message}" if message else "")
     except BaseException as error:
         interrupted = type(error)
@@ -1130,6 +1316,57 @@ def test_a_padded_or_nested_value_is_hidden_whole(
     assert guarded("it", env, refuse) == f"it: LoadError: {seen or message}"
 
 
+@pytest.mark.parametrize(
+    ("env", "message", "seen"),
+    [
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "ab-cd", "GCP_PROJECT": "cd-ef"},
+            "x ab-cd-ef y",
+            "x <hidden> y",
+        ),
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "cd-ef", "GCP_PROJECT": "ab-cd"},
+            "x ab-cd-ef y",
+            "x <hidden> y",
+        ),
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "ab-cd", KEY_VARIABLE: "cd-ef-gh"},
+            "x ab-cd-ef-gh y cd-ef-gh",
+            "x <hidden> y <hidden>",
+        ),
+        ({"LEDGER_LAB_GCP_PROJECT": "ab-ab"}, "x ab-ab-ab y", "x <hidden> y"),
+        ({"LEDGER_LAB_GCP_PROJECT": "ab", "GCP_PROJECT": "cd"}, "x abcd y", "x <hidden> y"),
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "cd", "GCP_PROJECT": "ab-cd-ef"},
+            "x ab-cd-ef y",
+            "x <hidden> y",
+        ),
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "ef", "GCP_PROJECT": "ab-cd-ef"},
+            "x ab-cd-ef y",
+            "x <hidden> y",
+        ),
+    ],
+    ids=[
+        "the end of one value starts another",
+        "the same, the other value first",
+        "the key starts at the end of the project",
+        "a value overlapping itself",
+        "two values side by side",
+        "a value held in the middle of another",
+        "a value that ends another",
+    ],
+)
+def test_overlapping_or_touching_values_are_hidden_as_one(
+    env: dict[str, str], message: str, seen: str
+) -> None:
+    def refuse() -> None:
+        raise LoadError(message)
+
+    assert guarded("it", LabEnv(env), refuse) == f"it: LoadError: {seen}"
+    assert guarded("it", env, refuse) == f"it: LoadError: {seen}"
+
+
 # A probe of the live tests' path, run by pytest in a subprocess. The bq stand-in is `Bq` over the
 # probe's landed file, so each call answers as a loaded table that holds the file's rows would, but
 # one: the `show`, the counts query, the digest query or the distinct-values query (each the run,
@@ -1203,7 +1440,8 @@ ALL = ["--tb=long", "-l", "--full-trace"]
 
 
 # An interrupt runs only under `ALL`: without `--full-trace` pytest prints a `KeyboardInterrupt` as
-# one line with no frame and no local, so the other flag sets would show the hiding nothing.
+# one line, where it was raised and its type, so the other flag sets would show the hiding nothing;
+# with it, pytest prints each frame with its arguments, never its locals.
 @pytest.mark.parametrize(
     ("interrupt", "flags"),
     [(False, []), (False, ALL), (False, ["-vv", "-l"]), (True, ALL)],
