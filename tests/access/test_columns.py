@@ -1,9 +1,10 @@
 """The policy tags on sensitive columns, cross-checked against the persona catalogue, and the column
 list, cross-checked against the data contracts.
 
-Every persona that reads the warehouse reads every tag either in clear or masked, never both, so no
-query it may run is refused on a tagged column; a persona that reads nothing there is neither; and
-only the people who need the value itself read it in clear.
+Every persona that reads by rows a product carrying a tagged column reads every tag either in
+clear or masked, never both, so no query of that product it may run is refused on a tagged column;
+every other persona, an aggregate reader of such a product included, is neither; and only the
+people who need the value itself read it in clear.
 
 The tagged columns of a product are exactly the columns its contract classifies personal, so the
 contract stays the one place that says a column is personal; a product with no contract only
@@ -96,8 +97,12 @@ def column_list_breaks(columns: Doc, access: Doc, by_id: dict[str, Doc]) -> list
     return found
 
 
-def warehouse_readers(access: dict[str, Any]) -> set[str]:
-    return {g["persona"] for g in access["grants"] if g["access"] in READS}
+def tagged_readers(access: Doc, columns: Doc) -> set[str]:
+    """The personas that read by rows a product carrying a tagged column: the tags' readers."""
+    tagged = tagged_products(columns)
+    return {
+        g["persona"] for g in access["grants"] if g["access"] in READS and g["product"] in tagged
+    }
 
 
 def test_tag_ids_are_unique(columns: dict[str, Any]) -> None:
@@ -118,23 +123,26 @@ def test_every_reader_is_a_known_persona(columns: dict[str, Any], access: dict[s
         assert set(tag["clear"]) | set(tag["masked"]) <= personas, tag["id"]
 
 
-def test_each_warehouse_reader_reads_each_tag_in_clear_or_masked_never_both(
+def test_each_reader_of_a_tagged_product_reads_each_tag_in_clear_or_masked_never_both(
     columns: dict[str, Any], access: dict[str, Any]
 ) -> None:
-    readers = warehouse_readers(access)
+    readers = tagged_readers(access, columns)
     for tag in columns["tags"]:
         clear, masked = set(tag["clear"]), set(tag["masked"])
         assert clear & masked == set(), tag["id"]
         assert clear | masked == readers, tag["id"]
 
 
-def test_a_persona_reading_nothing_in_the_warehouse_reads_no_tag(
+def test_a_persona_reading_no_tagged_product_by_rows_reads_no_tag(
     columns: dict[str, Any], access: dict[str, Any]
 ) -> None:
-    rowless = {p["id"] for p in access["personas"]} - warehouse_readers(access)
-    assert rowless, "the proposer reads nothing in the warehouse"
+    others = {p["id"] for p in access["personas"]} - tagged_readers(access, columns)
+    # Pinned apart from the grants: the metric owner reads payments only in aggregate and the
+    # agent operator reads only the metric definitions and the audit log, which carry no tagged
+    # column, and the proposer reads nothing.
+    assert others == {"metric-owner", "agent-operator", "proposer"}
     for tag in columns["tags"]:
-        assert rowless.isdisjoint(tag["clear"] + tag["masked"]), tag["id"]
+        assert others.isdisjoint(tag["clear"] + tag["masked"]), tag["id"]
 
 
 def test_no_agent_persona_reads_a_tag_in_clear(

@@ -95,26 +95,9 @@ purposes:
         - payees
         - currency
         - amount
-  # Defining and versioning the governed metrics over the group totals. Its group totals table
-  # holds the nine columns the metrics' semantic model reads (semantics/metricflow/group_totals.yml,
-  # held equal by a test); it has no table of the left-out figures.
-  - id: metric-definition
-    for: Defining and versioning the governed metrics on the group totals.
-    personas: [metric-owner]
-    tables:
-      group_totals:
-        - group_total_key
-        - entity_id
-        - fiscal_year
-        - fiscal_period
-        - period_start
-        - basis
-        - reporting_currency
-        - amount_at_constant_rates
-        - constant_rates_on
   # Reading every record and changing nothing. Its payments, group totals and left-out figures
   # tables hold every column of theirs, the tagged ones clear or masked as access/columns.yaml says
-  # for the auditor, which is open with the owner there.
+  # for the auditor.
   - id: audit
     for: Reading every record as it is, changing nothing.
     personas: [auditor]

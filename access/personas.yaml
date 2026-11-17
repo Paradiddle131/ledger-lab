@@ -114,7 +114,7 @@ grants:
   - {persona: metric-owner, entity: chicago, product: payments, access: aggregate}
   - {persona: metric-owner, entity: uk-transport, product: payments, access: aggregate}
   - {persona: metric-owner, entity: nl-government, product: payments, access: aggregate}
-  - {persona: metric-owner, product: group-totals, access: read}
+  - {persona: metric-owner, product: group-totals, access: aggregate}
   - {persona: metric-owner, product: metric-definitions, access: edit}
   - {persona: agent-operator, product: metric-definitions, access: read}
   - {persona: agent-operator, product: audit-log, access: read}

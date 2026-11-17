@@ -37,8 +37,8 @@ Its limits:
 The same check is run on databases a broken compiler would build, at least one for each item
 flagged above and one for each catalogue function above, and `current_database()`, shadowed by
 a stored macro of its name, and goes red on each. The absent columns are worked out here from
-the source's columns, and the metric definition's columns from the metrics' semantic model, apart
-from the catalogue.
+the source's columns, and the columns the metric owner's aggregate of the group totals must hold,
+from the metrics' semantic model, apart from the catalogue.
 """
 
 import copy
@@ -645,6 +645,19 @@ ALTERED: dict[str, tuple[str, Statements, tuple[str, ...]]] = {
         as_view("group_close", "group_totals_left_out"),
         ("holds group_close.group_totals_left_out as a view",),
     ),
+    "store-an-aggregate-table-with-other-columns": (
+        # The metric owner's payments in aggregate, stored as the product's rows of untagged
+        # columns by that name. The group totals by entity show every column of their source
+        # table, so their rows stored whole are caught by their types and groups instead
+        # (`store-an-aggregate-table-ungrouped`).
+        "metric-owner",
+        [
+            "drop table main.payments_by_period",
+            "create table main.payments_by_period as select entity_id, currency, payment_date,"  # noqa: S608
+            f" amount, is_repeat from {SOURCE}.main.payments",
+        ],
+        ("main.payments_by_period as no aggregate: other columns",),
+    ),
     "store-an-aggregate-table-as-a-view": (
         "metric-owner",
         as_view("main", "payments_by_period"),
@@ -770,10 +783,13 @@ def broken_plan(
         shown = ("audit.payments, which no", "holds the schema audit")
         return plan.persona, Plan(plan.persona, (*plan.tables, other)), shown
     if name == "give-a-table-its-purpose-does-not-list":
-        plan = plans("metric-owner")
-        (totals,) = [t for t in plan.tables if isinstance(t, Rows)]
+        # A table of a product the accountant reads in aggregate, under its own purpose's schema.
+        plan = plans("accountant-chicago")
         extra = Rows(
-            "group_totals_left_out", None, (Column("figures", "BIGINT", "clear"),), totals.purpose
+            "group_totals_left_out",
+            None,
+            (Column("figures", "BIGINT", "clear"),),
+            payments_of(plan).purpose,
         )
         return (
             plan.persona,
@@ -793,26 +809,14 @@ def broken_plan(
         )
         tables = tuple(wider if t is rows else t for t in plan.tables)
         return plan.persona, Plan(plan.persona, tables), "reads contract_number in"
-    if name == "store-an-aggregate-table-with-other-columns":
-        # The accountant's group totals in aggregate, stored as the product's rows by that name.
-        totals = kinds["group_totals"]
-        columns = tuple(Column(c, k, "clear") for c, k in totals.items())
-        plan = swap_aggregate(plans("accountant-chicago"), "group_totals", columns)
-        return plan.persona, plan, "main.group_totals as no aggregate: other columns"
     if name == "store-an-aggregate-table-ungrouped":
-        # The aggregate's own columns, but the source's rows, one payment span each.
+        # The aggregate's own columns, but the source's rows, one group-totals row each.
         totals = kinds["group_totals"]
-        shown = (
-            "period_start",
-            "period_end",
-            "reporting_currency",
-            "constant_rates_on",
-            "figures",
-            "amount_at_constant_rates",
-            "payees",
-        )
+        plan = plans("accountant-chicago")
+        (agg,) = [t for t in plan.tables if isinstance(t, Aggregate) and t.name == "group_totals"]
+        shown = (*agg.group_by, *agg.sums, agg.units)
         columns = tuple(Column(c, totals[c], "clear") for c in shown)
-        plan = swap_aggregate(plans("accountant-chicago"), "group_totals", columns)
+        plan = swap_aggregate(plan, "group_totals", columns)
         return plan.persona, plan, "a group under the minimum"
     assert name == "drop-a-listed-column"
     plan = plans("accountant-chicago")
@@ -835,7 +839,6 @@ def broken_plan(
         "store-under-a-schema-that-is-no-purpose",
         "add-an-omitted-column",
         "drop-a-listed-column",
-        "store-an-aggregate-table-with-other-columns",
         "store-an-aggregate-table-ungrouped",
         *ALTERED,
     ],
@@ -888,26 +891,6 @@ ABSENT_COLUMNS = {
             "award_after_revisions",
             "vendor_person_key",
             "document_reference",
-        ],
-    },
-    "metric-owner": {
-        "group_totals": [
-            "period_end",
-            "figures",
-            "payees",
-            "currency",
-            "amount",
-            "amount_at_actual_rates",
-        ],
-        "group_totals_left_out": [
-            "entity_id",
-            "fiscal_year",
-            "basis",
-            "left_out_by",
-            "figures",
-            "payees",
-            "currency",
-            "amount",
         ],
     },
 }
@@ -991,13 +974,20 @@ def semantic_columns(table: str, columns: list[str]) -> set[str]:
     return words & set(columns)
 
 
-def test_the_metric_definition_reads_exactly_what_the_metrics_read(
-    access: Doc, purposes: Doc, warehouse: Path
+def test_the_metric_owner_defines_the_metrics_on_its_aggregate_of_the_group_totals(
+    access: Doc, columns: Doc, aggregates: Doc, purposes: Doc, warehouse: Path
 ) -> None:
-    (definition,) = [p for p in purposes["purposes"] if p["id"] == "metric-definition"]
-    base = product_columns(access, warehouse)
-    for table, listed in definition["tables"].items():
-        assert set(listed) == semantic_columns(table, base[table]), table
+    """The metric owner reads the group totals only in aggregate, through no purpose, and its
+    aggregate table of them holds every column the metrics' semantic model reads."""
+    assert [p["id"] for p in purposes["purposes"] if "metric-owner" in p["personas"]] == []
+    schema = source_schema(warehouse)
+    plan = compile_persona(access, columns, aggregates, purposes, "metric-owner", schema)
+    assert [t for t in plan.tables if isinstance(t, Rows)] == []
+    (totals,) = [t for t in plan.tables if isinstance(t, Aggregate) and t.name == "group_totals"]
+    base = product_columns(access, warehouse)["group_totals"]
+    read = semantic_columns("group_totals", base)
+    assert len(read) == 9, read
+    assert read <= {*totals.group_by, *totals.sums}
 
 
 # The schema refuses a document the compiler could be handed wrong.
@@ -1067,7 +1057,6 @@ LANDED_READ = {
         "audit.group_totals": (15, SPANS),
         "audit.group_totals_left_out": (8, LEFT_OUT),
     },
-    "metric-owner": {"metric_definition.group_totals": (9, SPANS)},
 }
 
 

@@ -47,6 +47,11 @@ KINDS = ("clear", "masked")
 # The cells that reach rows, those that only aggregate them, and those that change something.
 ROWS = {"clear", "edit"}
 WRITES = {"edit", "draft", "post"}
+# Each group product of figures summed from an entity-scoped product's rows, stated here: a
+# group-totals row sums one entity's figures of a span and basis, so read in clear it can cover
+# fewer payees than the minimum group, and a persona that reads payments in aggregate reads it in
+# aggregate too, or not at all.
+SUMMED_FROM = {"group-totals": "payments"}
 
 
 def ids(items: list[Doc]) -> list[str]:
@@ -77,12 +82,10 @@ def row_cells(row: Doc, products: list[str] | None = None) -> set[str]:
     }
 
 
-def reader_role(row: Doc, cell: str) -> str | None:
-    """The tag role a column cell needs: its own kind, or for a denied cell a masked role when the
-    persona reads the warehouse at all (so no query of it fails on a tagged column), else none."""
-    if cell != "denied":
-        return cell
-    return "masked" if row_cells(row) & ROWS else None
+def reader_role(cell: str) -> str | None:
+    """The tag role a column cell needs: its own kind, and none for a denied cell, which a persona
+    states exactly when it reads no rows of a product carrying a tagged column."""
+    return None if cell == "denied" else cell
 
 
 def gaps(matrix: Doc, access: Doc, columns: Doc) -> list[str]:
@@ -118,8 +121,7 @@ def contradictions(matrix: Doc, access: Doc, columns: Doc) -> list[str]:
     """Every cell the grants or the tag readers do not give, and every grant with no cell.
 
     A column cell is what the persona observes: denied exactly when it reads no rows of a product
-    with a tagged column in the column list, and then its masked-reader role, if any, reaches no
-    column.
+    with a tagged column in the column list, and then the persona holds no reader role on the tag.
     """
     granted: dict[Key, str] = {
         (g["persona"], g["product"], g.get("entity")): CELL[g["access"]] for g in access["grants"]
@@ -143,15 +145,17 @@ def contradictions(matrix: Doc, access: Doc, columns: Doc) -> list[str]:
                 found.append(f"{place} a tagged product")
             elif not reaches and cell != "denied":
                 found.append(f"{place} no tagged product")
-            elif role != reader_role(row, cell):
+            elif role != reader_role(cell):
                 found.append(
                     f"{persona} {tag['id']}: the matrix needs "
-                    f"{reader_role(row, cell) or 'no'} role, the readers give {role or 'none'}"
+                    f"{reader_role(cell) or 'no'} role, the readers give {role or 'none'}"
                 )
     return found
 
 
-def duty_breaches(matrix: Doc, access: Doc) -> list[str]:
+def duty_breaches(
+    matrix: Doc, access: Doc, summed_from: Mapping[str, str] = SUMMED_FROM
+) -> list[str]:
     """Every cell that breaks a persona's duty in access/personas.yaml, whatever the grants say."""
     agents = {p["id"] for p in access["personas"] if p["kind"] == "agent"}
     cells = list(product_cells(matrix))
@@ -198,6 +202,11 @@ def duty_breaches(matrix: Doc, access: Doc) -> list[str]:
         for product in row["products"]:
             if {"aggregate"} <= row_cells(row, [product]) and row_cells(row, [product]) & ROWS:
                 found.append(f"{persona} {product}: an aggregate cell beside a path to its rows")
+        for product, source in summed_from.items():
+            if "aggregate" in row_cells(row, [source]) and row_cells(row, [product]) & ROWS:
+                found.append(
+                    f"{persona} {product}: rows summed from {source}, which it reads in aggregate"
+                )
     return found
 
 
@@ -210,7 +219,7 @@ def bigquery_contradictions(
 
     A product cell of clear or edit on any entity needs its dataset role (the row rule within the
     dataset is the table's row access policies), every other cell no role; a column cell needs the
-    reader role `reader_role` names.
+    reader role `reader_role` names, and a denied one none.
     """
     needed = {
         (persona, dataset_id(product), DATASET_ROLE[cell])
@@ -230,7 +239,7 @@ def bigquery_contradictions(
             (tag, persona)
             for persona, row in matrix["personas"].items()
             for tag, cell in row["columns"].items()
-            if reader_role(row, cell) == kind
+            if reader_role(cell) == kind
         }
         found += [
             f"{t} {p} {kind}: the matrix needs it, BigQuery lacks it"
@@ -275,6 +284,10 @@ def test_the_matrix_agrees_with_the_grants_and_the_tag_readers(
 
 
 def test_the_matrix_keeps_the_personas_duties(visibility: Doc, access: Doc) -> None:
+    products = set(ids(access["data_products"]))
+    assert {*SUMMED_FROM, *SUMMED_FROM.values()} <= products
+    # Pinned, so emptying the map cannot pass the duty on nothing.
+    assert SUMMED_FROM == {"group-totals": "payments"}
     assert duty_breaches(visibility, access) == []
 
 
@@ -333,7 +346,7 @@ grants:
   - {persona: approver, product: totals, access: aggregate}
   - {persona: metric-owner, entity: east, product: payments, access: aggregate}
   - {persona: metric-owner, entity: west, product: payments, access: aggregate}
-  - {persona: metric-owner, product: totals, access: read}
+  - {persona: metric-owner, product: totals, access: aggregate}
   - {persona: metric-owner, product: metric-definitions, access: edit}
   - {persona: agent-operator, product: metric-definitions, access: read}
   - {persona: agent-operator, product: audit-log, access: read}
@@ -343,7 +356,7 @@ FIXTURE_COLUMNS = """
 tags:
   - id: account
     clear: [payables-clerk, auditor]
-    masked: [group-controller, approver, metric-owner, agent-operator]
+    masked: [group-controller, approver]
 products:
   payments: {columns: {payments.payee: account}}
   ledger: {columns: {ledger.payee: account}}
@@ -386,7 +399,7 @@ personas:
     products:
       payments: {east: aggregate, west: aggregate}
       ledger: {east: denied, west: denied}
-      totals: clear
+      totals: aggregate
       metric-definitions: edit
       audit-log: denied
     columns: {account: denied}
@@ -407,6 +420,8 @@ personas:
       audit-log: denied
     columns: {account: denied}
 """
+# The invented catalogue's group product summed from its payments.
+FIXTURE_SUMMED = {"totals": "payments"}
 VIEWER, EDITOR = DATASET_ROLES["read"], DATASET_ROLES["edit"]
 # The BigQuery grants the generated configuration would give the invented catalogue.
 FIXTURE_DATASET_GRANTS = {
@@ -418,16 +433,13 @@ FIXTURE_DATASET_GRANTS = {
     ("group-controller", "payments", VIEWER),
     ("group-controller", "totals", VIEWER),
     ("approver", "payments", VIEWER),
-    ("metric-owner", "totals", VIEWER),
     ("metric-owner", "metric_definitions", EDITOR),
     ("agent-operator", "metric_definitions", VIEWER),
     ("agent-operator", "audit_log", VIEWER),
 }
 FIXTURE_READERS = {
     "clear": {("account", "payables-clerk"), ("account", "auditor")},
-    "masked": {
-        ("account", p) for p in ("group-controller", "approver", "metric-owner", "agent-operator")
-    },
+    "masked": {("account", "group-controller"), ("account", "approver")},
 }
 
 
@@ -448,7 +460,7 @@ def test_the_invented_fixture_is_complete_consistent_and_dutiful() -> None:
     matrix, access, columns = fixture()
     assert gaps(matrix, access, columns) == []
     assert contradictions(matrix, access, columns) == []
-    assert duty_breaches(matrix, access) == []
+    assert duty_breaches(matrix, access, FIXTURE_SUMMED) == []
     assert bigquery_contradictions(matrix, set(FIXTURE_DATASET_GRANTS), fixture_readers()) == []
 
 
@@ -572,13 +584,17 @@ CONTRADICTIONS: dict[str, tuple[Mutation, list[str]]] = {
         lambda m, a, c: set_column(m, "metric-owner", "masked"),
         ["metric-owner account: the matrix says masked, but it reads no tagged product"],
     ),
-    "a warehouse reader reaching no tagged column without its masked role": (
-        lambda m, a, c: move_reader(c, "metric-owner", None),
-        ["metric-owner account: the matrix needs masked role, the readers give none"],
+    "a masked role for an aggregate reader of the tagged product": (
+        lambda m, a, c: move_reader(c, "metric-owner", "masked"),
+        ["metric-owner account: the matrix needs no role, the readers give masked"],
+    ),
+    "a masked role for a persona that reads only untagged products": (
+        lambda m, a, c: move_reader(c, "agent-operator", "masked"),
+        ["agent-operator account: the matrix needs no role, the readers give masked"],
     ),
     "a clear role that reaches no tagged column": (
         lambda m, a, c: move_reader(c, "agent-operator", "clear"),
-        ["agent-operator account: the matrix needs masked role, the readers give clear"],
+        ["agent-operator account: the matrix needs no role, the readers give clear"],
     ),
     "a reader role for a persona that reads nothing": (
         lambda m, a, c: move_reader(c, "proposer", "masked"),
@@ -612,6 +628,7 @@ BREACHES: dict[str, tuple[Mutation, list[str]]] = {
         lambda m, a, c: (
             give(m, a, "agent-operator", "payments", "east", "clear"),
             set_column(m, "agent-operator", "masked"),
+            move_reader(c, "agent-operator", "masked"),
         ),
         ["agent-operator payments east: the agent operator reads only the audit log and metrics"],
     ),
@@ -643,8 +660,13 @@ BREACHES: dict[str, tuple[Mutation, list[str]]] = {
         lambda m, a, c: (
             give(m, a, "metric-owner", "payments", "east", "clear"),
             set_column(m, "metric-owner", "masked"),
+            move_reader(c, "metric-owner", "masked"),
         ),
         ["metric-owner payments: an aggregate cell beside a path to its rows"],
+    ),
+    "the metric owner given clear totals beside its aggregate payments": (
+        lambda m, a, c: give(m, a, "metric-owner", "totals", None, "clear"),
+        ["metric-owner totals: rows summed from payments, which it reads in aggregate"],
     ),
     "the proposer given aggregate totals": (
         lambda m, a, c: give(m, a, "proposer", "totals", None, "aggregate"),
@@ -670,7 +692,7 @@ def test_a_duty_broken_in_the_grants_and_the_matrix_together_is_reported(planted
     matrix, access, columns = fixture()
     mutate(matrix, access, columns)
     assert contradictions(matrix, access, columns) == []
-    assert duty_breaches(matrix, access) == reported
+    assert duty_breaches(matrix, access, FIXTURE_SUMMED) == reported
 
 
 @pytest.mark.parametrize(
@@ -722,14 +744,16 @@ def test_a_bigquery_grant_the_matrix_needs_and_lacks_or_does_not_need_is_reporte
     grants, readers = set(FIXTURE_DATASET_GRANTS), fixture_readers()
     grants.discard(("auditor", "audit_log", VIEWER))
     grants.add(("proposer", "ledger", VIEWER))
-    readers["masked"].discard(("account", "agent-operator"))
+    readers["masked"].discard(("account", "approver"))
     readers["clear"].add(("account", "agent-operator"))
+    readers["masked"].add(("account", "metric-owner"))
     readers["masked"].add(("account", "proposer"))
     assert bigquery_contradictions(matrix, grants, readers) == [
         f"auditor audit_log {VIEWER}: the matrix needs it, BigQuery lacks it",
         f"proposer ledger {VIEWER}: BigQuery grants it, no matrix cell needs it",
         "account agent-operator clear: BigQuery grants it, no matrix cell needs it",
-        "account agent-operator masked: the matrix needs it, BigQuery lacks it",
+        "account approver masked: the matrix needs it, BigQuery lacks it",
+        "account metric-owner masked: BigQuery grants it, no matrix cell needs it",
         "account proposer masked: BigQuery grants it, no matrix cell needs it",
     ]
     set_cell(matrix, "metric-owner", "metric-definitions", None, "clear")
