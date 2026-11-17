@@ -9,6 +9,7 @@ these tests never reach BigQuery whatever the session's environment holds.
 import csv
 import json
 import os
+import re
 import shutil
 import subprocess
 from datetime import date
@@ -20,6 +21,7 @@ import jinja2
 import pytest
 import yaml
 
+from ingest.load import free_regions
 from models.contracts import engine, warehouse
 from tests.models import bigquery_parity
 from tests.models.dbt_build import DBT, PROJECT, Build, dbt, query
@@ -72,12 +74,17 @@ def render(field: str, env: dict[str, str]) -> str:
     return template.render(env_var=lambda name, default="": env.get(name, default))
 
 
+# A free-tier region the lab's own environment may name.
+IN_REGION = {"LEDGER_LAB_BQ_LOCATION": "us-central1"}
+
+
 @pytest.mark.parametrize(
     ("env", "method"),
     [
-        ({"LEDGER_LAB_GCP_PROJECT": "the-lab"}, "oauth"),
+        ({"LEDGER_LAB_GCP_PROJECT": "the-lab"} | IN_REGION, "oauth"),
         (
-            {"LEDGER_LAB_GCP_PROJECT": "the-lab", "CLOUDSDK_AUTH_ACCESS_TOKEN": "stand-in"},
+            {"LEDGER_LAB_GCP_PROJECT": "the-lab", "CLOUDSDK_AUTH_ACCESS_TOKEN": "stand-in"}
+            | IN_REGION,
             FROM_GCLOUD,
         ),
         ({"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": "another-lab"}, REFUSED),
@@ -98,6 +105,72 @@ def test_an_explicit_bigquery_target_is_refused_in_another_labs_session(
     """dbt checks the method against its own list when it reads the profile, so a method outside
     it stops `--target bigquery` before any connection."""
     assert render("method", env) == method
+
+
+# Not one of dbt-bigquery's methods either: the method while the location is not a free-tier region.
+OUT_OF_REGION = "refused-outside-the-free-tier-regions"
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        None,
+        "",
+        " ",
+        "US",
+        "us",
+        "EU",
+        "US-CENTRAL1",
+        "Us-Central1",
+        "us-east4",
+        "europe-west2",
+        "us-central1,us-east1",
+        "us central1",
+    ],
+)
+@pytest.mark.parametrize("token", [{}, {"CLOUDSDK_AUTH_ACCESS_TOKEN": "stand-in"}])
+def test_the_bigquery_method_is_a_refused_one_outside_the_free_tier_regions(
+    where: str | None, token: dict[str, str]
+) -> None:
+    """Unset, empty, a multi-region, another case or a region outside the list: the method is one
+    dbt refuses when it reads the profile, while the default target is still `bigquery`."""
+    env = {"LEDGER_LAB_GCP_PROJECT": "the-lab"} | token
+    if where is not None:
+        env["LEDGER_LAB_BQ_LOCATION"] = where
+    assert target_for(env) == "bigquery"
+    assert render("method", env) == OUT_OF_REGION
+
+
+@pytest.mark.parametrize("where", ["us-central1", " us-central1 ", "\tus-east1\n", "us-west1"])
+def test_the_bigquery_method_is_kept_for_a_free_tier_region_trimmed(where: str) -> None:
+    env = {"LEDGER_LAB_GCP_PROJECT": "the-lab", "LEDGER_LAB_BQ_LOCATION": where}
+    assert render("method", env) == "oauth"
+    assert render("location", env) == where.strip()
+
+
+def test_the_bigquery_location_defaults_to_nothing() -> None:
+    assert render("location", {"LEDGER_LAB_GCP_PROJECT": "the-lab"}) == ""
+
+
+@pytest.mark.parametrize("where", [None, "US", "us-central1"])
+def test_another_labs_refused_method_comes_first_at_each_location(where: str | None) -> None:
+    env = {"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": "another-lab"}
+    if where is not None:
+        env["LEDGER_LAB_BQ_LOCATION"] = where
+    assert render("method", env) == REFUSED
+
+
+def test_the_profiles_regions_are_the_ones_the_region_validation_allows() -> None:
+    """The profile lists the regions itself; the list must equal `platform/gcp/variables.tf`'s,
+    as `ingest.load.free_regions` reads it, and each listed region must be taken."""
+    output = yaml.safe_load((PROJECT / "profiles.yml").read_text())["ledger_lab"]["outputs"]
+    listed = re.findall(r"not in \[([^\]]*)\]", output["bigquery"]["method"])
+    assert len(listed) == 1, output["bigquery"]["method"]
+    regions = tuple(re.findall(r"'([^']*)'", listed[0]))
+    assert regions == free_regions()
+    for region in regions:
+        env = {"LEDGER_LAB_GCP_PROJECT": "the-lab", "LEDGER_LAB_BQ_LOCATION": region}
+        assert render("method", env) == "oauth"
 
 
 @pytest.mark.parametrize("env", [{}, {"LEDGER_LAB_BQ_DATASET": "scratch"}])
