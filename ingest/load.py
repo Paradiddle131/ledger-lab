@@ -499,10 +499,10 @@ def local_digest(path: Path) -> Digest:
     columns = [('"' + str(c).replace('"', '""') + '"', str(k)) for c, k, *_ in kinds]
     cursor = con.execute(duckdb_digest_sql("read_parquet(?)", columns), [str(path)])
     names = [d[0] for d in cursor.description or ()]
-    values = cursor.fetchone()
-    if values is None:
-        raise LoadError("the digest answered unexpectedly")
-    return digest_of(dict(zip(names, values, strict=True)))
+    rows = cursor.fetchall()
+    if len(rows) != 1:
+        raise LoadError(f"the local digest answered {len(rows)} rows, not one")
+    return digest_of(dict(zip(names, rows[0], strict=True)))
 
 
 def main(

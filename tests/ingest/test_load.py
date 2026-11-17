@@ -923,28 +923,43 @@ def test_the_local_digest_holds_no_column_type_without_a_rule(tmp_path: Path, ki
         local_digest(path)
 
 
-def test_the_digest_cuts_a_row_hash_into_eight_slices_of_eight_hex_digits(tmp_path: Path) -> None:
-    """The 64 hex digits of a SHA-256 cut whole into eight 32-bit slices, each a sum over a million
-    rows below 2**52, and each engine's digest gives eight sums."""
+def test_the_digest_sums_eight_adjacent_slices_of_eight_hex_digits(tmp_path: Path) -> None:
+    """Each engine's digest SQL takes eight slices of the row hash's text, `s0` to `s7`, each eight
+    digits long and starting at digit 1, 9, ..., 57, so the slices are adjacent and together are
+    digits 1 to 64; eight hex digits summed over a million rows stay below 2**52; the local digest
+    gives eight sums."""
     assert (SLICES, SLICE) == (8, 8)
-    assert SLICES * SLICE == 64
     assert 1_000_000 * (16**SLICE - 1) < 2**52
     assert len(local_digest(landed_table(tmp_path, ROWS)).sums) == 8
     for sql in (bigquery_digest_sql("`t`", []), duckdb_digest_sql("t", [])):
         assert re.findall(r"AS s(\d+)", sql) == [str(i) for i in range(8)]
+        assert re.findall(r"(?i)substr\(h, (\d+), (\d+)\)", sql) == [
+            (str(8 * i + 1), "8") for i in range(8)
+        ]
 
 
-def test_a_local_digest_answered_with_no_row_is_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+LOCAL_SUMS = ", ".join(f"{i} AS s{i}" for i in range(8))
+
+
+@pytest.mark.parametrize(
+    ("sql", "rows"),
+    [
+        ("SELECT 1 AS n, {sums} FROM {source} LIMIT 0", 0),
+        ("SELECT n, {sums} FROM (SELECT DISTINCT unnest([1, 2]) AS n FROM {source})", 2),
+    ],
+    ids=["no row", "two rows"],
+)
+def test_a_local_digest_answered_with_other_than_one_row_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sql: str, rows: int
 ) -> None:
-    """DuckDB answers an aggregate with one row; a query that answers none is refused as a
-    `LoadError`, not an unpacking error."""
+    """DuckDB answers the digest's aggregate with one row; a query that answers none or two is
+    refused as a `LoadError` naming the number of rows."""
     path = landed_table(tmp_path, ROWS)
     monkeypatch.setattr(
         "ingest.load.duckdb_digest_sql",
-        lambda source, columns: f"SELECT 1 AS n FROM {source} LIMIT 0",  # noqa: S608
+        lambda source, columns: sql.format(sums=LOCAL_SUMS, source=source),
     )
-    with pytest.raises(LoadError, match="^the digest answered unexpectedly$"):
+    with pytest.raises(LoadError, match=f"^the local digest answered {rows} rows, not one$"):
         local_digest(path)
 
 
@@ -1318,6 +1333,16 @@ def test_a_padded_or_nested_value_is_hidden_whole(
         ),
         ({"LEDGER_LAB_GCP_PROJECT": "ab-ab"}, "x ab-ab-ab y", "x <hidden> y"),
         ({"LEDGER_LAB_GCP_PROJECT": "ab", "GCP_PROJECT": "cd"}, "x abcd y", "x <hidden> y"),
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "cd", "GCP_PROJECT": "ab-cd-ef"},
+            "x ab-cd-ef y",
+            "x <hidden> y",
+        ),
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "ef", "GCP_PROJECT": "ab-cd-ef"},
+            "x ab-cd-ef y",
+            "x <hidden> y",
+        ),
     ],
     ids=[
         "the end of one value starts another",
@@ -1325,6 +1350,8 @@ def test_a_padded_or_nested_value_is_hidden_whole(
         "the key starts at the end of the project",
         "a value overlapping itself",
         "two values side by side",
+        "a value held in the middle of another",
+        "a value that ends another",
     ],
 )
 def test_overlapping_or_touching_values_are_hidden_as_one(
