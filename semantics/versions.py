@@ -49,8 +49,8 @@ The ways a project's macros can decide relation names that the gate refuses:
   `duckdb__generate_schema_name`, which dbt's own versions of the three dispatch to, except one
   `generate_schema_name` whose macro block is the gate's own text (`SCHEMA_MACRO`) character for
   character: on BigQuery it returns a node's `schema` config trimmed of surrounding whitespace,
-  else the profile's dataset, and on any other target the profile's schema, reading nothing but `target.type`,
-  `target.schema` and that config, and calling no macro;
+  else the profile's dataset, and on any other target the profile's schema, reading nothing but
+  `target.type`, `target.schema` and that config, and calling no macro;
 - a project file `dispatch` entry for the `dbt` macro namespace, which those three dispatch in, or
   a `dispatch` setting the gate cannot read as entries for other namespaces.
 
@@ -70,15 +70,15 @@ seed and snapshot of the project is held to:
   outside those folders; a routed folder's relation names (an alias, else the node's name) are
   its route's tables, each built once.
 
-Stated limits of the routing: config keys are read as dbt's local parse records them, so a
-placement key dbt-bigquery adds after the locked version is not refused until it is listed (a
-test compares the listed names with the locked adapter's `_ALIASES` when uv's cache holds that
-adapter, and skips otherwise); data tests are not checked (their `schema` is where
-stored failures go, which no semantic model reads); an alias is not routed, and is compared only
-as the local parse names it, for what a semantic model reads; the macro's text is compared, its
-behaviour rests on dbt's `target` (a project macro named `target` makes the pinned dbt's parse
-fail); and since both trees are read with the working tree's gate, a change to `SCHEMA_MACRO`
-makes an `origin/main` holding the old text unreadable.
+Stated limits of the routing: config keys are read as dbt's local parse records them, so a placement
+key dbt-bigquery adds after the locked version is not refused until it is listed (a test compares
+the listed names with the locked adapter's `_ALIASES` when uv's cache holds that adapter, and skips
+otherwise); data tests are not checked (their `schema` is where stored failures go, which no
+semantic model reads); outside the routed folders an alias is compared only as the local parse names
+it, for what a semantic model reads; the macro's text is compared, its behaviour rests on dbt's
+`target` (a project macro named `target` makes the pinned dbt's parse fail); and since both trees
+are read with the working tree's gate, a change to `SCHEMA_MACRO` makes an `origin/main` holding the
+old text unreadable.
 
 Stated limits of that refusal: it rests on dbt's default implementations of the three, in the dbt
 the lock pins, calling no other macro (the database one asks the adapter for a model's catalog
