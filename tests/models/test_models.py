@@ -16,11 +16,13 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import cost_check
 import duckdb
 import jinja2
 import pytest
 import yaml
 
+from ingest import load
 from ingest.load import free_regions
 from models.contracts import engine, warehouse
 from tests.models import bigquery_parity
@@ -193,6 +195,53 @@ def test_the_bigquery_target_caps_every_job() -> None:
     assert isinstance(cap, int) and not isinstance(cap, bool)
     assert 0 < cap <= 1_000_000_000
     assert "LEDGER_LAB_GCP_PROJECT" in outputs["bigquery"]["project"]
+
+
+def profile_cap() -> int:
+    outputs = yaml.safe_load((PROJECT / "profiles.yml").read_text())["ledger_lab"]["outputs"]
+    return outputs["bigquery"]["maximum_bytes_billed"]
+
+
+def test_the_scripts_cap_equals_the_profiles_cap() -> None:
+    """The cap the contract test and the parity check give their BigQuery jobs (`CAP`) equals the
+    profile's `maximum_bytes_billed`."""
+    assert profile_cap() == warehouse.CAP
+    assert profile_cap() == bigquery_parity.CAP
+
+
+def test_the_cost_check_and_the_loads_caps_equal_the_profiles_cap() -> None:
+    assert profile_cap() == cost_check.MAX_BYTES_BILLED
+    assert profile_cap() == load.MAX_BYTES_BILLED
+
+
+def compile_inline(tmp_path: Path, sql: str) -> subprocess.CompletedProcess[str]:
+    """`dbt compile --inline` on the local target: `dbt` passes `--target local`, which is what
+    keeps the compile off BigQuery; the environment is this process's with the four below added."""
+    env = dict(os.environ) | {
+        "LEDGER_LAB_DUCKDB_PATH": str(tmp_path / "ledger_lab.duckdb"),
+        "DBT_TARGET_PATH": str(tmp_path / "target"),
+        "DBT_LOG_PATH": str(tmp_path / "logs"),
+        "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
+    }
+    return dbt(env, tmp_path, "compile", "--inline", sql)
+
+
+@pytest.mark.parametrize(
+    ("text", "compiled"), [("0.05", "select 0.05 as d"), ("-12", "select -12 as d"), ("1e5", None)]
+)
+def test_exact_decimal_takes_only_a_decimals_digits(
+    tmp_path: Path, text: str, compiled: str | None
+) -> None:
+    """On the local engine the macro writes a decimal's digits as given, and stops the compile
+    with its own message for text that is not one, such as an exponent."""
+    result = compile_inline(tmp_path, f"select {{{{ exact_decimal('{text}') }}}} as d")
+    out = result.stdout + result.stderr
+    if compiled is None:
+        assert result.returncode != 0, out
+        assert f"exact_decimal takes a decimal's digits, not {text}" in out, out
+    else:
+        assert result.returncode == 0, out
+        assert compiled in out, out
 
 
 @pytest.mark.parametrize(

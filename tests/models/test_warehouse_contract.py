@@ -7,6 +7,7 @@ stubs of the engine's command and of the CLI. The run itself needs the lab proje
 
 import copy
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -81,8 +82,10 @@ class Engine:
         self.copies: list[str] = []
         self.folders: list[Path] = []
         self.envs: list[dict[str, str]] = []
+        self.commands: list[list[str]] = []
 
     def __call__(self, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        self.commands.append(command)
         self.copies.append(Path(command[-1]).read_text())
         self.folders.append(Path(command[-1]).parent)
         self.envs.append(kwargs.get("env", dict(os.environ)))
@@ -120,7 +123,133 @@ def test_the_clis_own_settings_do_not_reach_the_engine(
     engine = start(monkeypatch, ENV | {name: "elsewhere"})
     assert warehouse.main() == 0
     assert name not in engine.envs[0]
-    assert engine.envs[0]["LEDGER_LAB_BQ_LOCATION"] == "us-central1"
+    assert engine.envs[0]["LEDGER_LAB_GCP_PROJECT"] == "example-project"
+
+
+# Names the engine must not be handed: the individuals' hash key, the region variable (the region
+# reaches the engine inside the copy), one of the CLI's settings from each family of names it reads,
+# uv's dotenv, publish and index-credential settings, and an unknown name.
+DROPPED = [
+    "LEDGER_LAB_HASH_KEY",
+    "LEDGER_LAB_BQ_LOCATION",
+    "DATACONTRACT_BIGQUERY_PROJECT",
+    "DATACONTRACT_MANAGER_API_KEY",
+    "ENTROPY_DATA_API_KEY",
+    "DATAMESH_MANAGER_API_KEY",
+    "UV_ENV_FILE",
+    "UV_PUBLISH_TOKEN",
+    "UV_INDEX_EXAMPLE_PASSWORD",
+    "LEDGER_LAB_BILLING_EXPORT",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "SOME_UNKNOWN_NAME",
+]
+# The names the engine is started with, written out here, not read from `warehouse.ENGINE_NAMES`,
+# and compared with it both ways.
+ALLOWED = {
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "UV",
+    "UV_CACHE_DIR",
+    "UV_SYSTEM_CERTS",
+    "UV_NATIVE_TLS",
+    "UV_PYTHON_INSTALL_DIR",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "GCP_PROJECT",
+    "LEDGER_LAB_GCP_PROJECT",
+    "CLOUDSDK_AUTH_ACCESS_TOKEN",
+}
+
+
+def test_the_engine_names_are_the_allowlist() -> None:
+    assert set(warehouse.ENGINE_NAMES) == ALLOWED
+
+
+def test_the_engine_environment_is_the_allowed_names_of_its_input() -> None:
+    """Every allowed name passes with its value; the dropped ones, which share prefixes with
+    allowed names (`UV_`, `LEDGER_LAB_`), and each allowed name with a suffix, do not."""
+    suffixed = [f"{name}_EXTRA" for name in ALLOWED]
+    given = {name: f"value-of-{name}" for name in [*ALLOWED, *DROPPED, *suffixed]}
+    assert warehouse.engine_environment(given) == {name: f"value-of-{name}" for name in ALLOWED}
+
+
+@pytest.mark.parametrize("name", DROPPED)
+def test_the_engine_environment_drops_a_name_outside_the_allowlist(name: str) -> None:
+    assert name not in warehouse.engine_environment({name: "stand-in", "PATH": "/bin"})
+
+
+def test_the_engine_is_started_reading_no_dotenv_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = start(monkeypatch, ENV)
+    assert warehouse.main() == 0
+    assert "--no-env-file" in engine.commands[0][: engine.commands[0].index("python")]
+
+
+def offline(command: list[str], *, env_file: bool) -> list[str]:
+    """The engine's `uv run` with no CLI and no network, so it starts only Python; with
+    `env_file`, less its `--no-env-file`."""
+    cli = command.index("--with")
+    command = [*command[:cli], *command[cli + 2 :]]
+    command.insert(2, "--offline")
+    return [c for c in command if not (env_file and c == "--no-env-file")]
+
+
+@pytest.mark.parametrize(
+    ("layer", "env_file", "env_file_passed"),
+    [("both", False, False), ("the command", False, True), ("the allowlist", True, False)],
+)
+def test_a_planted_dotenv_does_not_hand_the_engine_the_hash_key(
+    tmp_path: Path, layer: str, env_file: bool, env_file_passed: bool
+) -> None:
+    """A dotenv named by `UV_ENV_FILE` and holding a hash key stays out of the engine's Python,
+    by each layer alone (the allowlist dropping `UV_ENV_FILE`, the command's `--no-env-file`) and
+    by both; uv runs offline here and starts only Python, no CLI."""
+    planted = tmp_path / "planted.env"
+    planted.write_text("LEDGER_LAB_HASH_KEY=invented-dotenv-key\n")
+    parent = {
+        "PATH": os.environ["PATH"],
+        "HOME": os.environ["HOME"],
+        "LEDGER_LAB_HASH_KEY": "invented-parent-key",
+        "UV_ENV_FILE": str(planted),
+        "UV_PUBLISH_TOKEN": "invented-publish-token",
+    }
+    env = warehouse.engine_environment(parent)
+    if env_file_passed:
+        env["UV_ENV_FILE"] = str(planted)
+    uv = shutil.which("uv")
+    assert uv, "uv is not on PATH"
+    code = "import os; print(os.environ.get('LEDGER_LAB_HASH_KEY'))"
+    run = subprocess.run(  # noqa: S603
+        [*offline(warehouse.engine_command(uv), env_file=env_file), "-I", "-c", code],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == "None", layer
+
+
+def test_the_hash_key_does_not_reach_the_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = start(monkeypatch, ENV | {"LEDGER_LAB_HASH_KEY": "an-invented-key"})
+    assert warehouse.main() == 0
+    assert "LEDGER_LAB_HASH_KEY" not in engine.envs[0]
+    assert "an-invented-key" not in engine.envs[0].values()
+    assert engine.envs[0]["LEDGER_LAB_GCP_PROJECT"] == "example-project"
 
 
 def test_the_project_id_in_the_engines_output_is_masked(
@@ -159,22 +288,46 @@ class Connection:
         self.storage_client = object()
 
 
-class Settings:
-    """The CLI's settings: `get_bigquery_*` getters, each answering its value or None."""
+# The CLI's BigQuery settings, written out here from datacontract-cli 1.2.9's source
+# (`datacontract/config/settings.py`), not read from the CLI nor from `warehouse.GETTERS`.
+BIGQUERY_SETTINGS = [
+    "location",
+    "dataset",
+    "billing_project",
+    "project",
+    "account_info_json_path",
+    "impersonation_account",
+    "kms_key_name",
+]
 
-    def __init__(self, **values: str) -> None:
-        for name in ("location", "dataset", "billing_project", "project", "kms_key_name"):
-            setattr(self, f"get_bigquery_{name}", lambda name=name: values.get(name))
-        for name in ("account_info_json_path", "impersonation_account"):
-            setattr(self, f"get_bigquery_{name}", lambda name=name: values.get(name))
+
+class Settings:
+    """The CLI's settings: `get_bigquery_*` getters, each answering its value in `values` or None,
+    less any named in `without`, plus any named in `extra`."""
+
+    def __init__(
+        self,
+        values: dict[str, str] | None = None,
+        without: tuple[str, ...] = (),
+        extra: tuple[str, ...] = (),
+    ) -> None:
+        values = values or {}
+        for name in [*BIGQUERY_SETTINGS, *extra]:
+            if name not in without:
+                setattr(self, f"get_bigquery_{name}", lambda name=name: values.get(name))
 
 
 def run_engine(
-    monkeypatch: pytest.MonkeyPatch, project: str, settings: Settings
+    monkeypatch: pytest.MonkeyPatch,
+    project: str,
+    settings: Settings,
+    opened: list[tuple[Any, Any]] | None = None,
+    foreign: str | None = None,
 ) -> tuple[int, list[tuple[Any, Any]]]:
     """`engine()` with the CLI stood in for: its connect module records the server each
-    connection is opened on, and its DataContract opens one connection, as a test run does."""
-    opened: list[tuple[Any, Any]] = []
+    connection is opened on, in `opened`, and its DataContract opens one connection, as a test run
+    does; `foreign` is another lab's `GCP_PROJECT` in the engine's environment."""
+    opened = [] if opened is None else opened
     connect = ModuleType("connect")
 
     def open_bigquery(ibis: Any, server: Any, config: Any) -> Connection:
@@ -205,6 +358,10 @@ def run_engine(
     for name in ("GCP_PROJECT", "CLOUDSDK_AUTH_ACCESS_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("LEDGER_LAB_GCP_PROJECT", "the-lab")
+    if foreign is not None:
+        # What the parent would hand the engine of another lab's session, through the allowlist.
+        for name, value in warehouse.engine_environment({"GCP_PROJECT": foreign}).items():
+            monkeypatch.setenv(name, value)
     return warehouse.engine("copy.odcs.yaml"), opened
 
 
@@ -220,28 +377,63 @@ def test_the_engine_opens_the_lab_project_with_every_job_capped(
     assert con.client._ensure_bqstorage_client() is None
 
 
+def test_the_engine_refuses_in_another_labs_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With `GCP_PROJECT` in its environment the engine raises before it opens any connection."""
+    opened: list[tuple[Any, Any]] = []
+    with pytest.raises(RuntimeError, match="GCP_PROJECT is set"):
+        run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, Settings(), opened, "other-lab")
+    assert opened == []
+
+
 def test_the_engine_refuses_a_copy_that_names_a_project(monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[tuple[Any, Any]] = []
     with pytest.raises(RuntimeError, match="names a project"):
-        run_engine(monkeypatch, "another-lab", Settings())
+        run_engine(monkeypatch, "another-lab", Settings(), opened)
+    assert opened == []
 
 
-@pytest.mark.parametrize(
-    "setting",
-    [
-        "location",
-        "dataset",
-        "billing_project",
-        "project",
-        "account_info_json_path",
-        "impersonation_account",
-        "kms_key_name",
-    ],
-)
+def test_the_engine_checks_the_seven_getters_written_out_here() -> None:
+    assert sorted(warehouse.GETTERS) == sorted(f"get_bigquery_{s}" for s in BIGQUERY_SETTINGS)
+
+
+@pytest.mark.parametrize("setting", BIGQUERY_SETTINGS)
+def test_the_engine_refuses_settings_that_lack_a_getter(
+    monkeypatch: pytest.MonkeyPatch, setting: str
+) -> None:
+    """A CLI that renamed or dropped one of the getters stops the run before any connection."""
+    opened: list[tuple[Any, Any]] = []
+    with pytest.raises(RuntimeError, match=f"lack the getters.*get_bigquery_{setting}"):
+        run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, Settings(without=(setting,)), opened)
+    assert opened == []
+
+
+def test_the_engine_refuses_settings_with_no_getters(monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[tuple[Any, Any]] = []
+    settings = Settings(without=tuple(BIGQUERY_SETTINGS))
+    with pytest.raises(RuntimeError, match="lack the getters"):
+        run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, settings, opened)
+    assert opened == []
+
+
+def test_the_engine_refuses_a_getter_it_does_not_name_that_holds_a_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings({"region": "elsewhere"}, extra=("region",))
+    opened: list[tuple[Any, Any]] = []
+    with pytest.raises(RuntimeError, match="get_bigquery_region"):
+        run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, settings, opened)
+    assert opened == []
+
+
+@pytest.mark.parametrize("setting", BIGQUERY_SETTINGS)
 def test_the_engine_refuses_a_cli_setting_that_overrides_the_copy(
     monkeypatch: pytest.MonkeyPatch, setting: str
 ) -> None:
+    opened: list[tuple[Any, Any]] = []
+    settings = Settings({setting: "elsewhere"})
     with pytest.raises(RuntimeError, match=f"get_bigquery_{setting}"):
-        run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, Settings(**{setting: "elsewhere"}))
+        run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, settings, opened)
+    assert opened == []
 
 
 def test_the_copy_on_disk_holds_no_project_id(monkeypatch: pytest.MonkeyPatch) -> None:
