@@ -7,6 +7,7 @@ stubs of the engine's command and of the CLI. The run itself needs the lab proje
 
 import copy
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -81,8 +82,10 @@ class Engine:
         self.copies: list[str] = []
         self.folders: list[Path] = []
         self.envs: list[dict[str, str]] = []
+        self.commands: list[list[str]] = []
 
     def __call__(self, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        self.commands.append(command)
         self.copies.append(Path(command[-1]).read_text())
         self.folders.append(Path(command[-1]).parent)
         self.envs.append(kwargs.get("env", dict(os.environ)))
@@ -123,39 +126,63 @@ def test_the_clis_own_settings_do_not_reach_the_engine(
     assert engine.envs[0]["LEDGER_LAB_BQ_LOCATION"] == "us-central1"
 
 
-# Names the engine must not be handed: the individuals' hash key, another lab's project, the CLI's
-# settings under each prefix it reads, and a name the allowlist has never heard of.
+# Names the engine must not be handed: the individuals' hash key, the CLI's settings under each
+# prefix it reads, uv's dotenv, publish and index-credential settings, and an unknown name.
 DROPPED = [
     "LEDGER_LAB_HASH_KEY",
-    "GCP_PROJECT",
     "DATACONTRACT_BIGQUERY_PROJECT",
     "ENTROPY_DATA_API_KEY",
     "DATAMESH_MANAGER_API_KEY",
+    "UV_ENV_FILE",
+    "UV_PUBLISH_TOKEN",
+    "UV_INDEX_EXAMPLE_PASSWORD",
+    "LEDGER_LAB_BILLING_EXPORT",
+    "GOOGLE_APPLICATION_CREDENTIALS",
     "SOME_UNKNOWN_NAME",
 ]
-# Names the engine needs to fetch the CLI through a proxy and open the lab's connection, written
-# out here, not read from `warehouse.ENGINE_NAMES`, so a change to that list shows.
-KEPT = [
+# The names the engine is started with, written out here, not read from `warehouse.ENGINE_NAMES`,
+# and compared with it both ways.
+ALLOWED = {
     "PATH",
     "HOME",
     "TMPDIR",
     "UV",
     "UV_CACHE_DIR",
     "UV_SYSTEM_CERTS",
+    "UV_NATIVE_TLS",
+    "UV_PYTHON_INSTALL_DIR",
     "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
     "HTTPS_PROXY",
     "https_proxy",
     "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
     "NO_PROXY",
     "no_proxy",
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
     "REQUESTS_CA_BUNDLE",
     "CURL_CA_BUNDLE",
+    "GCP_PROJECT",
     "LEDGER_LAB_GCP_PROJECT",
     "LEDGER_LAB_BQ_LOCATION",
     "CLOUDSDK_AUTH_ACCESS_TOKEN",
-]
+}
+
+
+def test_the_engine_names_are_the_allowlist() -> None:
+    assert set(warehouse.ENGINE_NAMES) == ALLOWED
+
+
+def test_the_engine_environment_is_the_allowed_names_of_its_input() -> None:
+    """Every allowed name passes with its value; the dropped ones, which share prefixes with
+    allowed names (`UV_`, `LEDGER_LAB_`), and each allowed name with a suffix, do not."""
+    suffixed = [f"{name}_EXTRA" for name in ALLOWED]
+    given = {name: f"value-of-{name}" for name in [*ALLOWED, *DROPPED, *suffixed]}
+    assert warehouse.engine_environment(given) == {name: f"value-of-{name}" for name in ALLOWED}
 
 
 @pytest.mark.parametrize("name", DROPPED)
@@ -163,9 +190,56 @@ def test_the_engine_environment_drops_a_name_outside_the_allowlist(name: str) ->
     assert name not in warehouse.engine_environment({name: "stand-in", "PATH": "/bin"})
 
 
-@pytest.mark.parametrize("name", KEPT)
-def test_the_engine_environment_keeps_what_uv_and_the_connection_need(name: str) -> None:
-    assert warehouse.engine_environment({name: "stand-in"}) == {name: "stand-in"}
+def test_the_engine_is_started_reading_no_dotenv_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = start(monkeypatch, ENV)
+    assert warehouse.main() == 0
+    assert "--no-env-file" in engine.commands[0][: engine.commands[0].index("python")]
+
+
+def offline(command: list[str], *, env_file: bool) -> list[str]:
+    """The engine's `uv run` with no CLI and no network, so it starts only Python; with
+    `env_file`, less its `--no-env-file`."""
+    cli = command.index("--with")
+    command = [*command[:cli], *command[cli + 2 :]]
+    command.insert(2, "--offline")
+    return [c for c in command if not (env_file and c == "--no-env-file")]
+
+
+@pytest.mark.parametrize(
+    ("layer", "env_file", "env_file_passed"),
+    [("both", False, False), ("the command", False, True), ("the allowlist", True, False)],
+)
+def test_a_planted_dotenv_does_not_hand_the_engine_the_hash_key(
+    tmp_path: Path, layer: str, env_file: bool, env_file_passed: bool
+) -> None:
+    """A dotenv named by `UV_ENV_FILE` and holding a hash key stays out of the engine's Python,
+    by each layer alone (the allowlist dropping `UV_ENV_FILE`, the command's `--no-env-file`) and
+    by both; uv runs offline here and starts only Python, no CLI."""
+    planted = tmp_path / "planted.env"
+    planted.write_text("LEDGER_LAB_HASH_KEY=invented-dotenv-key\n")
+    parent = {
+        "PATH": os.environ["PATH"],
+        "HOME": os.environ["HOME"],
+        "LEDGER_LAB_HASH_KEY": "invented-parent-key",
+        "UV_ENV_FILE": str(planted),
+        "UV_PUBLISH_TOKEN": "invented-publish-token",
+    }
+    env = warehouse.engine_environment(parent)
+    if env_file_passed:
+        env["UV_ENV_FILE"] = str(planted)
+    uv = shutil.which("uv")
+    assert uv, "uv is not on PATH"
+    code = "import os; print(os.environ.get('LEDGER_LAB_HASH_KEY'))"
+    run = subprocess.run(  # noqa: S603
+        [*offline(warehouse.engine_command(uv), env_file=env_file), "-I", "-c", code],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == "None", layer
 
 
 def test_the_hash_key_does_not_reach_the_engine(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -242,11 +316,16 @@ class Settings:
 
 
 def run_engine(
-    monkeypatch: pytest.MonkeyPatch, project: str, settings: Settings
+    monkeypatch: pytest.MonkeyPatch,
+    project: str,
+    settings: Settings,
+    opened: list[tuple[Any, Any]] | None = None,
+    foreign: str | None = None,
 ) -> tuple[int, list[tuple[Any, Any]]]:
     """`engine()` with the CLI stood in for: its connect module records the server each
-    connection is opened on, and its DataContract opens one connection, as a test run does."""
-    opened: list[tuple[Any, Any]] = []
+    connection is opened on, in `opened`, and its DataContract opens one connection, as a test run
+    does; `foreign` is another lab's `GCP_PROJECT` in the engine's environment."""
+    opened = [] if opened is None else opened
     connect = ModuleType("connect")
 
     def open_bigquery(ibis: Any, server: Any, config: Any) -> Connection:
@@ -277,6 +356,10 @@ def run_engine(
     for name in ("GCP_PROJECT", "CLOUDSDK_AUTH_ACCESS_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("LEDGER_LAB_GCP_PROJECT", "the-lab")
+    if foreign is not None:
+        # What the parent would hand the engine of another lab's session, through the allowlist.
+        for name, value in warehouse.engine_environment({"GCP_PROJECT": foreign}).items():
+            monkeypatch.setenv(name, value)
     return warehouse.engine("copy.odcs.yaml"), opened
 
 
@@ -290,6 +373,14 @@ def test_the_engine_opens_the_lab_project_with_every_job_capped(
     assert con.client.default_query_job_config.maximum_bytes_billed == 1_000_000_000
     assert con.storage_client is None
     assert con.client._ensure_bqstorage_client() is None
+
+
+def test_the_engine_refuses_in_another_labs_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With `GCP_PROJECT` in its environment the engine raises before it opens any connection."""
+    opened: list[tuple[Any, Any]] = []
+    with pytest.raises(RuntimeError, match="GCP_PROJECT is set"):
+        run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, Settings(), opened, "other-lab")
+    assert opened == []
 
 
 def test_the_engine_refuses_a_copy_that_names_a_project(monkeypatch: pytest.MonkeyPatch) -> None:

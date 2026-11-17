@@ -202,21 +202,22 @@ def profile_cap() -> int:
     return outputs["bigquery"]["maximum_bytes_billed"]
 
 
-def test_the_scripts_cap_each_job_at_the_profiles_cap() -> None:
+def test_the_scripts_cap_equals_the_profiles_cap() -> None:
     """The cap the contract test and the parity check give their BigQuery jobs (`CAP`) equals the
     profile's `maximum_bytes_billed`."""
     assert profile_cap() == warehouse.CAP
     assert profile_cap() == bigquery_parity.CAP
 
 
-def test_the_cost_check_and_the_load_cap_each_job_at_the_profiles_cap() -> None:
+def test_the_cost_check_and_the_loads_caps_equal_the_profiles_cap() -> None:
     assert profile_cap() == cost_check.MAX_BYTES_BILLED
     assert profile_cap() == load.MAX_BYTES_BILLED
 
 
 def compile_inline(tmp_path: Path, sql: str) -> subprocess.CompletedProcess[str]:
-    """`dbt compile --inline` on the local engine, with no GCP project in its environment."""
-    env = {k: v for k, v in os.environ.items() if k != "LEDGER_LAB_GCP_PROJECT"} | {
+    """`dbt compile --inline` on the local target: `dbt` passes `--target local`, which is what
+    keeps the compile off BigQuery; the environment is this process's with the four below added."""
+    env = dict(os.environ) | {
         "LEDGER_LAB_DUCKDB_PATH": str(tmp_path / "ledger_lab.duckdb"),
         "DBT_TARGET_PATH": str(tmp_path / "target"),
         "DBT_LOG_PATH": str(tmp_path / "logs"),

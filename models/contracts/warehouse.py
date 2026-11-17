@@ -13,19 +13,21 @@ against BigQuery's INFORMATION_SCHEMA, so a DuckDB `DECIMAL(28,6)` is held to Bi
 (38 digits, 9 after the point), not to its own precision and scale.
 
 The CLI runs in a throwaway environment with its BigQuery engine (`uv run --isolated --no-project
---with datacontract-cli[bigquery]==1.2.9`), which the lock does not pin, so its dependencies
-resolve when it runs. It is started with only the variables `engine_environment` lets through:
-`PATH`, `HOME`, `TMPDIR`, uv's own (`UV`, `UV_*`) and its folders (`XDG_CACHE_HOME`,
+--no-env-file --with datacontract-cli[bigquery]==1.2.9`), which the lock does not pin, so its
+dependencies resolve when it runs; `--no-env-file` keeps uv from loading a dotenv file into it. It
+is started with only the variables named in `ENGINE_NAMES`: `PATH`, `HOME`, `TMPDIR`, uv's path
+(`UV`), its cache, certificate and Python-location settings (`UV_CACHE_DIR`, `UV_SYSTEM_CERTS`,
+`UV_NATIVE_TLS`, `UV_PYTHON_INSTALL_DIR`) and the folders it reads (`XDG_CACHE_HOME`,
 `XDG_CONFIG_HOME`, `XDG_DATA_HOME`), the proxy variables (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`,
 `NO_PROXY`, each in upper or lower case), the CA variables (`SSL_CERT_FILE`, `SSL_CERT_DIR`,
-`REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`), `LEDGER_LAB_GCP_PROJECT`, `LEDGER_LAB_BQ_LOCATION` and
-`CLOUDSDK_AUTH_ACCESS_TOKEN`. Any other name is dropped, among them the individuals' hash key, the
-`DATACONTRACT_` variables the CLI reads its settings from (which would otherwise replace the copy's
-region, dataset or billing project, or the credentials) and the other variables the CLI reads, such
-as `ENTROPY_DATA_*` and `DATAMESH_MANAGER_*`. The engine is a child of this process and can still
-read this process's environment by other means (on Linux, from `/proc`), so the list narrows what
-the engine is handed, not what it can reach. In that environment, before the test, two of the CLI's
-own functions are wrapped (`engine`): the connection's credentials are the access token in
+`REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`), `GCP_PROJECT` (so the engine's own read of the lab's
+project still refuses in another lab's session), `LEDGER_LAB_GCP_PROJECT`, `LEDGER_LAB_BQ_LOCATION`
+and `CLOUDSDK_AUTH_ACCESS_TOKEN`. Other names are not passed, among them the individuals' hash key,
+uv's other settings (its env-file, index and publish variables) and the `DATACONTRACT_` variables
+the CLI reads its settings from. The engine is a child of this process and can still read this
+process's environment by other means (on Linux, from `/proc`), so the list narrows what the engine
+is handed, not what it can reach. In that environment, before the test, two of the CLI's own
+functions are wrapped (`engine`): the connection's credentials are the access token in
 `CLOUDSDK_AUTH_ACCESS_TOKEN` when the environment holds one (the one gcloud and bq send), else
 Application Default Credentials as the CLI resolves them in that environment; and the connection is
 opened (`opened`) only while the copy's server holds the placeholder, the CLI's settings object has
@@ -63,13 +65,18 @@ CAP = 1_000_000_000
 PROJECT_PLACEHOLDER = "lab-project-from-the-environment"
 SEAM = REPO / "platform/gcp_project.py"
 # The variables the engine is started with: what uv needs to fetch the CLI through a proxy, the
-# CA files Python's HTTP clients read, and the lab's project, region and access token.
+# CA files Python's HTTP clients read, and the lab's project, region and access token, with
+# `GCP_PROJECT` so the engine's own `lab_project()` still refuses in another lab's session.
 ENGINE_NAMES = frozenset(
     {
         "PATH",
         "HOME",
         "TMPDIR",
         "UV",
+        "UV_CACHE_DIR",
+        "UV_SYSTEM_CERTS",
+        "UV_NATIVE_TLS",
+        "UV_PYTHON_INSTALL_DIR",
         "XDG_CACHE_HOME",
         "XDG_CONFIG_HOME",
         "XDG_DATA_HOME",
@@ -85,13 +92,12 @@ ENGINE_NAMES = frozenset(
         "SSL_CERT_DIR",
         "REQUESTS_CA_BUNDLE",
         "CURL_CA_BUNDLE",
+        "GCP_PROJECT",
         "LEDGER_LAB_GCP_PROJECT",
         "LEDGER_LAB_BQ_LOCATION",
         "CLOUDSDK_AUTH_ACCESS_TOKEN",
     }
 )
-# The prefixes the engine's variables may also start with: uv's own settings.
-ENGINE_PREFIXES = ("UV_",)
 # The CLI's BigQuery settings, as datacontract-cli 1.2.9 names their getters
 # (`datacontract/config/settings.py`); each must be found on its settings object and hold nothing.
 GETTERS = (
@@ -159,9 +165,13 @@ def restrict(con: Any) -> Any:
 
 
 def engine_environment(env: Mapping[str, str]) -> dict[str, str]:
-    """The environment the engine runs in: the variables of `env` named in `ENGINE_NAMES` or
-    starting with one of `ENGINE_PREFIXES`, and no other."""
-    return {k: v for k, v in env.items() if k in ENGINE_NAMES or k.startswith(ENGINE_PREFIXES)}
+    """The environment the engine runs in: the variables of `env` named in `ENGINE_NAMES`."""
+    return {k: v for k, v in env.items() if k in ENGINE_NAMES}
+
+
+def engine_command(uv: str) -> list[str]:
+    """`uv run` of Python in a throwaway environment with the CLI, reading no dotenv file."""
+    return [uv, "run", "--isolated", "--no-project", "--no-env-file", "--with", CLI, "python"]
 
 
 def missing(config: Any) -> list[str]:
@@ -228,9 +238,8 @@ def main() -> int:
         copy = Path(folder) / "payments.odcs.yaml"
         copy.write_text(yaml.safe_dump(for_bigquery(contract, where), sort_keys=False))
         uv = os.environ.get("UV") or shutil.which("uv") or "uv"
-        command = [uv, "run", "--isolated", "--no-project", "--with", CLI, "python"]
         run = subprocess.run(  # noqa: S603
-            [*command, str(Path(__file__)), "--engine", str(copy)],
+            [*engine_command(uv), str(Path(__file__)), "--engine", str(copy)],
             capture_output=True,
             text=True,
             check=False,
