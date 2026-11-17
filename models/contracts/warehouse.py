@@ -21,25 +21,27 @@ is started with only the variables named in `ENGINE_NAMES`: `PATH`, `HOME`, `TMP
 `XDG_CONFIG_HOME`, `XDG_DATA_HOME`), the proxy variables (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`,
 `NO_PROXY`, each in upper or lower case), the CA variables (`SSL_CERT_FILE`, `SSL_CERT_DIR`,
 `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`), `GCP_PROJECT` (so the engine's own read of the lab's
-project still refuses in another lab's session), `LEDGER_LAB_GCP_PROJECT`, `LEDGER_LAB_BQ_LOCATION`
-and `CLOUDSDK_AUTH_ACCESS_TOKEN`. Other names are not passed, among them the individuals' hash key,
-uv's other settings (its env-file, index and publish variables) and the `DATACONTRACT_` variables
-the CLI reads its settings from. The engine is a child of this process and can still read this
-process's environment by other means (on Linux, from `/proc`), so the list narrows what the engine
-is handed, not what it can reach. In that environment, before the test, two of the CLI's own
-functions are wrapped (`engine`): the connection's credentials are the access token in
-`CLOUDSDK_AUTH_ACCESS_TOKEN` when the environment holds one (the one gcloud and bq send), else
-Application Default Credentials as the CLI resolves them in that environment; and the connection is
-opened (`opened`) only while the copy's server holds the placeholder, the CLI's settings object has
-each of the seven `get_bigquery_*` getters this file names (`GETTERS`, those of the pinned CLI),
-and none of them nor any other `get_bigquery_*` getter it has holds a value, on the lab's project,
-read there from `platform/gcp_project.py`, in place of the placeholder, and then restricted
-(`restrict`): its client carries `maximum_bytes_billed` of 1,000,000,000 bytes in its default job
-configuration, which the client merges into each query job it starts, and reads results over the
-REST API: the Storage Read API client that ibis creates when it connects is dropped before any read
-and never re-created (gRPC, which this session's proxy does not carry). Only each check's name and
-result are printed, never a reason, since a reason can name the project or hold a value, and the
-project id is replaced by `<project>` in what is printed.
+project still refuses in another lab's session), `LEDGER_LAB_GCP_PROJECT` and
+`CLOUDSDK_AUTH_ACCESS_TOKEN`; the region reaches the engine inside the copy, not through
+`LEDGER_LAB_BQ_LOCATION`. Other names are not passed, including the individuals' hash key, uv's
+other settings (its env-file, index and publish variables) and the variables the CLI reads its
+settings from, among them `DATACONTRACT_*`, `ENTROPY_DATA_*` and `DATAMESH_MANAGER_*`. The engine
+is a child of this process and can still read this process's environment by other means (on Linux,
+from `/proc`), so the list narrows what the engine is handed, not what it can reach. In that
+environment, before the test, two of the CLI's own functions are wrapped (`engine`): the
+connection's credentials are the access token in `CLOUDSDK_AUTH_ACCESS_TOKEN` when the environment
+holds one (the one gcloud and bq send), else Application Default Credentials as the CLI resolves
+them in that environment; and the connection is opened (`opened`) only while the copy's server
+holds the placeholder, the CLI's settings object has each of the seven `get_bigquery_*` getters
+this file names (`GETTERS`, those of the pinned CLI), and none of them nor any other
+`get_bigquery_*` getter it has holds a value, on the lab's project, read there from
+`platform/gcp_project.py`, in place of the placeholder, and then restricted (`restrict`): its
+client carries `maximum_bytes_billed` of 1,000,000,000 bytes in its default job configuration,
+which the client merges into each query job it starts, and reads results over the REST API: the
+Storage Read API client that ibis creates when it connects is dropped before any read and never
+re-created (gRPC, which this session's proxy does not carry). Only each check's name and result are
+printed, never a reason, since a reason can name the project or hold a value, and the project id is
+replaced by `<project>` in what is printed.
 
 `uv run python models/contracts/warehouse.py`; exits 1 when the contract fails or cannot run.
 """
@@ -65,7 +67,7 @@ CAP = 1_000_000_000
 PROJECT_PLACEHOLDER = "lab-project-from-the-environment"
 SEAM = REPO / "platform/gcp_project.py"
 # The variables the engine is started with: what uv needs to fetch the CLI through a proxy, the
-# CA files Python's HTTP clients read, and the lab's project, region and access token, with
+# CA files Python's HTTP clients read, and the lab's project and access token, with
 # `GCP_PROJECT` so the engine's own `lab_project()` still refuses in another lab's session.
 ENGINE_NAMES = frozenset(
     {
@@ -94,7 +96,6 @@ ENGINE_NAMES = frozenset(
         "CURL_CA_BUNDLE",
         "GCP_PROJECT",
         "LEDGER_LAB_GCP_PROJECT",
-        "LEDGER_LAB_BQ_LOCATION",
         "CLOUDSDK_AUTH_ACCESS_TOKEN",
     }
 )

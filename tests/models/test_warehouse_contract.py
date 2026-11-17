@@ -123,14 +123,17 @@ def test_the_clis_own_settings_do_not_reach_the_engine(
     engine = start(monkeypatch, ENV | {name: "elsewhere"})
     assert warehouse.main() == 0
     assert name not in engine.envs[0]
-    assert engine.envs[0]["LEDGER_LAB_BQ_LOCATION"] == "us-central1"
+    assert engine.envs[0]["LEDGER_LAB_GCP_PROJECT"] == "example-project"
 
 
-# Names the engine must not be handed: the individuals' hash key, the CLI's settings under each
-# prefix it reads, uv's dotenv, publish and index-credential settings, and an unknown name.
+# Names the engine must not be handed: the individuals' hash key, the region variable (the region
+# reaches the engine inside the copy), one of the CLI's settings from each family of names it reads,
+# uv's dotenv, publish and index-credential settings, and an unknown name.
 DROPPED = [
     "LEDGER_LAB_HASH_KEY",
+    "LEDGER_LAB_BQ_LOCATION",
     "DATACONTRACT_BIGQUERY_PROJECT",
+    "DATACONTRACT_MANAGER_API_KEY",
     "ENTROPY_DATA_API_KEY",
     "DATAMESH_MANAGER_API_KEY",
     "UV_ENV_FILE",
@@ -168,7 +171,6 @@ ALLOWED = {
     "CURL_CA_BUNDLE",
     "GCP_PROJECT",
     "LEDGER_LAB_GCP_PROJECT",
-    "LEDGER_LAB_BQ_LOCATION",
     "CLOUDSDK_AUTH_ACCESS_TOKEN",
 }
 
@@ -286,8 +288,8 @@ class Connection:
         self.storage_client = object()
 
 
-# The CLI's BigQuery settings as datacontract-cli 1.2.9 names them, written out here, not read
-# from `warehouse.GETTERS`, so a change to that list shows.
+# The CLI's BigQuery settings, written out here from datacontract-cli 1.2.9's source
+# (`datacontract/config/settings.py`), not read from the CLI nor from `warehouse.GETTERS`.
 BIGQUERY_SETTINGS = [
     "location",
     "dataset",
@@ -384,11 +386,13 @@ def test_the_engine_refuses_in_another_labs_session(monkeypatch: pytest.MonkeyPa
 
 
 def test_the_engine_refuses_a_copy_that_names_a_project(monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[tuple[Any, Any]] = []
     with pytest.raises(RuntimeError, match="names a project"):
-        run_engine(monkeypatch, "another-lab", Settings())
+        run_engine(monkeypatch, "another-lab", Settings(), opened)
+    assert opened == []
 
 
-def test_the_engine_checks_the_seven_getters_of_the_pinned_cli() -> None:
+def test_the_engine_checks_the_seven_getters_written_out_here() -> None:
     assert sorted(warehouse.GETTERS) == sorted(f"get_bigquery_{s}" for s in BIGQUERY_SETTINGS)
 
 
@@ -397,31 +401,39 @@ def test_the_engine_refuses_settings_that_lack_a_getter(
     monkeypatch: pytest.MonkeyPatch, setting: str
 ) -> None:
     """A CLI that renamed or dropped one of the getters stops the run before any connection."""
+    opened: list[tuple[Any, Any]] = []
     with pytest.raises(RuntimeError, match=f"lack the getters.*get_bigquery_{setting}"):
-        run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, Settings(without=(setting,)))
+        run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, Settings(without=(setting,)), opened)
+    assert opened == []
 
 
 def test_the_engine_refuses_settings_with_no_getters(monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[tuple[Any, Any]] = []
+    settings = Settings(without=tuple(BIGQUERY_SETTINGS))
     with pytest.raises(RuntimeError, match="lack the getters"):
-        run_engine(
-            monkeypatch, warehouse.PROJECT_PLACEHOLDER, Settings(without=tuple(BIGQUERY_SETTINGS))
-        )
+        run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, settings, opened)
+    assert opened == []
 
 
 def test_the_engine_refuses_a_getter_it_does_not_name_that_holds_a_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = Settings({"region": "elsewhere"}, extra=("region",))
+    opened: list[tuple[Any, Any]] = []
     with pytest.raises(RuntimeError, match="get_bigquery_region"):
-        run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, settings)
+        run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, settings, opened)
+    assert opened == []
 
 
 @pytest.mark.parametrize("setting", BIGQUERY_SETTINGS)
 def test_the_engine_refuses_a_cli_setting_that_overrides_the_copy(
     monkeypatch: pytest.MonkeyPatch, setting: str
 ) -> None:
+    opened: list[tuple[Any, Any]] = []
+    settings = Settings({setting: "elsewhere"})
     with pytest.raises(RuntimeError, match=f"get_bigquery_{setting}"):
-        run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, Settings({setting: "elsewhere"}))
+        run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, settings, opened)
+    assert opened == []
 
 
 def test_the_copy_on_disk_holds_no_project_id(monkeypatch: pytest.MonkeyPatch) -> None:
