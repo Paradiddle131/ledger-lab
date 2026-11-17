@@ -7,8 +7,11 @@ differs from the committed file in two things only: its one server is BigQuery, 
 `intermediate` dataset where the profile builds the mart and the region `ingest.load.location`
 gives (a region outside the free tier's stops the run before any call), with a placeholder
 (`PROJECT_PLACEHOLDER`) where the project goes, so the copy on disk holds no project id; and each
-column's `physicalType` is BigQuery's type for the DuckDB type the contract declares (`TYPES`), a
-type not in that map stopping the run before any call. The CLI then checks the column types
+column's `physicalType` is BigQuery's type for the DuckDB type the contract declares (`TYPES`).
+`for_bigquery` stops the run before any call on a contract with no `schema` list or an empty one, a
+schema entry with no `properties` list or an empty one, a column with no `physicalType`, a
+`physicalType` that is no string or not in `TYPES`, and a column holding nested `properties` or
+`items` (their types would be copied untranslated). The CLI then checks the column types
 against BigQuery's INFORMATION_SCHEMA, so a DuckDB `DECIMAL(28,6)` is held to BigQuery's `NUMERIC`
 (38 digits, 9 after the point), not to its own precision and scale.
 
@@ -131,9 +134,27 @@ def lab_project() -> str:
     return seam.lab_project(os.environ)
 
 
+def bigquery_type(prop: Any) -> str:
+    """BigQuery's type for a contract column, refused with a `ValueError` for a column that is no
+    mapping, holds nested `properties` or `items`, or has a `physicalType` that is missing, no
+    string or not in `TYPES`."""
+    if not isinstance(prop, dict):
+        raise ValueError("a column that is no mapping")
+    name = prop.get("name", "a column")
+    if "properties" in prop or "items" in prop:
+        raise ValueError(f"{name}: nested columns, which the copy does not translate")
+    declared = prop.get("physicalType")
+    if declared is None:
+        raise ValueError(f"{name}: no physicalType")
+    if not isinstance(declared, str) or declared not in TYPES:
+        raise ValueError(f"{name}: no BigQuery type for {declared!r}")
+    return TYPES[declared]
+
+
 def for_bigquery(contract: dict[str, Any], location: str) -> dict[str, Any]:
     """The contract with BigQuery as its one server, the project a placeholder, and BigQuery's
-    physical types."""
+    physical types; refused with a `ValueError` for no `schema` list or an empty one, a schema
+    entry with no `properties` list or an empty one, and a column `bigquery_type` refuses."""
     copy = dict(contract)
     copy["servers"] = [
         {
@@ -144,14 +165,15 @@ def for_bigquery(contract: dict[str, Any], location: str) -> dict[str, Any]:
             "customProperties": [{"property": "location", "value": location}],
         }
     ]
+    declared = contract.get("schema")
+    if not isinstance(declared, list) or not declared:
+        raise ValueError("the contract has no schema to copy")
     schemas = []
-    for schema in contract["schema"]:
-        properties = []
-        for prop in schema.get("properties", []):
-            declared = prop.get("physicalType")
-            if declared is not None and declared not in TYPES:
-                raise ValueError(f"{prop['name']}: no BigQuery type for {declared}")
-            properties.append(prop | ({"physicalType": TYPES[declared]} if declared else {}))
+    for schema in declared:
+        columns = schema.get("properties") if isinstance(schema, dict) else None
+        if not isinstance(columns, list) or not columns:
+            raise ValueError("a schema entry has no columns to copy")
+        properties = [prop | {"physicalType": bigquery_type(prop)} for prop in columns]
         schemas.append(schema | {"properties": properties})
     copy["schema"] = schemas
     return copy
