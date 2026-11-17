@@ -32,13 +32,17 @@ from ingest.load import (
     DATASET,
     LOCATION_VARIABLE,
     MAX_BYTES_BILLED,
+    SLICE,
+    SLICES,
     STORAGE_CAP,
     Digest,
     LoadError,
     bigquery_digest_sql,
+    count,
     counts,
     digest,
     distinct_values,
+    duckdb_digest_sql,
     free_regions,
     lab,
     landed_names,
@@ -297,6 +301,24 @@ def test_the_landed_names_are_the_seven_files_the_landing_steps_write() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "name", ["ECB-rates", "ecb_rates", "x-", "-x", "a--b", "ecb rates", "ecb-rates\n", ""]
+)
+def test_a_name_off_the_landed_pattern_is_refused_though_the_landed_names_hold_it(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pattern's own refusal: each name here is put in the landed names, so only the pattern
+    refuses it."""
+    with pytest.raises(LoadError, match="not a landed file"):
+        table_name(name, frozenset({name}))
+    monkeypatch.setattr("ingest.load.landed_names", lambda: frozenset({name}))
+    bq, fs = Bq(), bucket_holding(*LANDED)
+    with pytest.raises(LoadError, match="not a landed file"):
+        load([name], ENV, bq, fs)
+    assert bq.calls == []
+    assert not locked(fs)
+
+
 def test_a_file_the_bucket_does_not_hold_is_refused_before_any_load() -> None:
     bq, fs = Bq(), bucket_holding("chicago-contracts")
     with pytest.raises(LoadError, match="holds no ecb-rates"):
@@ -364,6 +386,22 @@ def test_an_interrupted_load_releases_the_lock() -> None:
     with pytest.raises(KeyboardInterrupt):
         load(LANDED, ENV, bq, fs)
     assert not locked(fs)
+
+
+def test_a_lock_the_load_cannot_release_is_reported_with_how_to_delete_it() -> None:
+    bq, fs = Bq(), bucket_holding(*LANDED)
+    remove = fs.rm_file
+
+    def refuse_the_lock(path: str, *args: Any, **kwargs: Any) -> Any:
+        if path.endswith(f"/{LOCK}"):
+            raise PermissionError(path)
+        return remove(path, *args, **kwargs)
+
+    fs.rm_file = refuse_the_lock  # type: ignore[method-assign]
+    with pytest.raises(LoadError, match=f"delete {re.escape(LOCK)} by hand once nothing runs$"):
+        load(LANDED, ENV, bq, fs)
+    assert bq.verbs().count("load") == 2
+    assert locked(fs)
 
 
 def test_no_name_twice_and_at_least_one() -> None:
@@ -465,6 +503,34 @@ def test_a_run_that_starts_above_the_storage_cap_loads_nothing() -> None:
     assert not locked(fs)
 
 
+@pytest.mark.parametrize(
+    ("earlier", "loaded"),
+    [(STORAGE_CAP, 0), (0, STORAGE_CAP)],
+    ids=["an earlier table at the cap and an empty load", "one empty table at the cap"],
+)
+def test_a_zero_row_table_and_a_landed_dataset_at_exactly_the_cap_are_accepted(
+    earlier: int, loaded: int
+) -> None:
+    """The landed dataset holds exactly `STORAGE_CAP` bytes at each check, the one before the load
+    in the first case and the one after it in both, and the loaded table holds no row."""
+    bq, fs = Bq(rows=0), bucket_holding("chicago-contracts")
+    bq.listed = {"from_an_earlier_run"} if earlier else set()
+
+    def run(command: Sequence[str]) -> str:
+        out = bq(command)
+        if verb_of(command) == "show":
+            answer = json.loads(out)
+            mine = answer["tableReference"]["tableId"] == "chicago_contracts"
+            answer["numBytes"] = str(loaded if mine else earlier)
+            return json.dumps(answer)
+        return out
+
+    (table,) = load(["chicago-contracts"], ENV, run, fs)
+    assert (table.rows, table.bytes) == (0, loaded)
+    assert bq.verbs().count("load") == 1
+    assert not locked(fs)
+
+
 def test_a_negative_byte_count_cancels_no_other_tables_bytes() -> None:
     """An earlier table holds three quarters of the cap, and the table this run loads reports a
     negative size at each `bq show`: the load is refused at the first such answer, before a
@@ -562,6 +628,25 @@ def test_a_table_answer_of_another_shape_project_dataset_or_table_is_refused(ans
         load(["chicago-contracts"], ENV, lambda c: answer, bucket_holding("chicago-contracts"))
 
 
+def test_a_table_answer_with_no_project_is_taken_as_the_lab_projects() -> None:
+    """`bq show` is asked for `<lab project>:landed.<table>`; an answer that names no project is
+    read as that table, and one that names another project is refused (above)."""
+    answer = shown(datasetId=DATASET, tableId="chicago_contracts")
+    assert table_of("chicago-contracts", answer, PROJECT).table == "landed.chicago_contracts"
+    bq = Bq()
+
+    def run(command: Sequence[str]) -> str:
+        out = bq(command)
+        if verb_of(command) == "show":
+            answer = json.loads(out)
+            del answer["tableReference"]["projectId"]
+            return json.dumps(answer)
+        return out
+
+    tables = load(["chicago-contracts"], ENV, run, bucket_holding("chicago-contracts"))
+    assert [t.table for t in tables] == ["landed.chicago_contracts"]
+
+
 def counted(rows: Any, size: Any) -> str:
     """A `bq show` answer for `landed.chicago_contracts` with these JSON values as its counts."""
     return json.dumps(
@@ -574,9 +659,8 @@ def counted(rows: Any, size: Any) -> str:
     )
 
 
-# Counts `int()` takes or truncates that are no JSON string of ASCII digits, each tried as the row
-# count and as the byte count. `float("inf")` goes out as JSON's `Infinity`, which `json.loads`
-# reads back.
+# Values that are no JSON string of 1 to 19 ASCII digits, each tried at every count the loader
+# reads. `float("inf")` goes out as JSON's `Infinity`, which `json.loads` reads back.
 NOT_A_COUNT = [
     True,
     False,
@@ -587,6 +671,8 @@ NOT_A_COUNT = [
     -0.5,
     -0.9,
     float("inf"),
+    float("-inf"),
+    float("nan"),
     "１２",
     "١",
     "-1",
@@ -597,6 +683,8 @@ NOT_A_COUNT = [
     "1_000",
     "1.0",
     "",
+    "1" * 20,
+    "1" * 5000,
     ["1"],
 ]
 
@@ -609,6 +697,24 @@ def test_a_count_that_is_no_ascii_digit_string_is_an_answer_of_unexpected_shape(
     answer = counted(value, "1") if field == "numRows" else counted("1", value)
     with pytest.raises(LoadError, match="unexpected shape"):
         table_of("chicago-contracts", answer, PROJECT)
+
+
+@pytest.mark.parametrize("value", NOT_A_COUNT, ids=[repr(v)[:20] for v in NOT_A_COUNT])
+def test_count_refuses_with_a_value_error(value: Any) -> None:
+    with pytest.raises(ValueError, match="no string of ASCII digits"):
+        count(value)
+
+
+def test_count_bounds_the_digits_without_pythons_integer_string_limit() -> None:
+    limit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(0)
+    try:
+        for value in ("1" * 20, "1" * 5000):
+            with pytest.raises(ValueError, match="no string of ASCII digits"):
+                count(value)
+        assert count("9223372036854775807") == 2**63 - 1
+    finally:
+        sys.set_int_max_str_digits(limit)
 
 
 def test_an_ascii_digit_string_is_a_count() -> None:
@@ -640,6 +746,21 @@ def test_the_free_regions_are_the_ones_the_lab_projects_definitions_allow() -> N
     condition = str(region["validation"][0]["condition"])
     assert set(free_regions()) == set(re.findall(r"us-[a-z]+[0-9]", condition))
     assert free_regions() == ("us-west1", "us-central1", "us-east1")
+
+
+def test_definitions_with_no_region_validation_refuse_every_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    variables = tmp_path / "variables.tf"
+    variables.write_text('variable "region" {\n  type    = string\n  default = "us-central1"\n}\n')
+    monkeypatch.setattr("ingest.load.VARIABLES_TF", variables)
+    with pytest.raises(LoadError, match="^no region validation in variables.tf$"):
+        free_regions()
+    bq, fs = Bq(), bucket_holding(*LANDED)
+    with pytest.raises(LoadError, match="^no region validation in variables.tf$"):
+        load(LANDED, ENV, bq, fs)
+    assert bq.calls == []
+    assert not locked(fs)
 
 
 # The queries.
@@ -677,12 +798,73 @@ def test_a_dry_run_answer_of_unexpected_shape_is_refused_and_nothing_runs(dry: s
     assert bq.verbs() == ["show", "query"]
 
 
+@pytest.mark.parametrize("value", NOT_A_COUNT, ids=[repr(v)[:20] for v in NOT_A_COUNT])
+def test_a_dry_run_byte_count_that_is_no_ascii_digit_string_is_refused_and_nothing_runs(
+    value: Any,
+) -> None:
+    bq = Bq()
+    bq.dry_answer = json.dumps({"statistics": {"totalBytesProcessed": value}})
+    with pytest.raises(LoadError, match="dry run answered unexpectedly"):
+        counts("chicago-contracts", ENV, bq)
+    assert bq.verbs() == ["show", "query"]
+
+
+@pytest.mark.parametrize("value", NOT_A_COUNT, ids=[repr(v)[:20] for v in NOT_A_COUNT])
+@pytest.mark.parametrize("cell", ["n", "c0"])
+def test_a_count_cell_that_is_no_ascii_digit_string_is_refused(cell: str, value: Any) -> None:
+    bq = Bq()
+    bq.answer = json.dumps([{"n": "3", "c0": "2", cell: value}])
+    with pytest.raises(LoadError, match="^the counts answered unexpectedly$"):
+        counts("chicago-contracts", ENV, bq)
+
+
+NOT_A_SUM = [v for v in NOT_A_COUNT if v is not None]
+
+
+@pytest.mark.parametrize("value", NOT_A_SUM, ids=[repr(v)[:20] for v in NOT_A_SUM])
+@pytest.mark.parametrize("cell", ["n", "s0", "s7"])
+def test_a_digest_cell_that_is_no_ascii_digit_string_is_refused(cell: str, value: Any) -> None:
+    bq = Bq()
+    bq.answer = json.dumps([{"n": "3", **{f"s{i}": "2" for i in range(8)}, cell: value}])
+    with pytest.raises(LoadError, match="^the digest answered unexpectedly$"):
+        digest("chicago-contracts", ENV, bq)
+
+
+def test_a_digest_reads_a_null_sum_as_zero_and_refuses_a_null_row_count() -> None:
+    bq = Bq()
+    bq.answer = json.dumps([{"n": "0", **{f"s{i}": None for i in range(8)}}])
+    assert digest("chicago-contracts", ENV, bq) == Digest(0, (0,) * 8)
+    bq.answer = json.dumps([{"n": None, **{f"s{i}": "1" for i in range(8)}}])
+    with pytest.raises(LoadError, match="^the digest answered unexpectedly$"):
+        digest("chicago-contracts", ENV, bq)
+
+
 @pytest.mark.parametrize("answer", ["not json", json.dumps({"n": "1"}), json.dumps(["1"])])
 def test_a_query_answer_of_unexpected_shape_is_refused(answer: str) -> None:
     bq = Bq()
     bq.answer = answer
     with pytest.raises(LoadError, match="^the query answered unexpectedly$"):
         counts("chicago-contracts", ENV, bq)
+
+
+@pytest.mark.parametrize(
+    ("answer", "rows"),
+    [
+        ("", 0),
+        ("[]", 0),
+        (json.dumps([{"n": "1", "c0": "1"}] * 2), 2),
+        (json.dumps([{"n": "1", **{f"s{i}": "1" for i in range(8)}}] * 2), 2),
+    ],
+    ids=["an empty answer", "an empty list", "two rows of counts", "two rows of a digest"],
+)
+@pytest.mark.parametrize("ask", [counts, digest], ids=["counts", "digest"])
+def test_a_one_row_query_answered_with_another_number_of_rows_is_refused(
+    ask: Callable[[str, Mapping[str, str], Bq], Any], answer: str, rows: int
+) -> None:
+    bq = Bq()
+    bq.answer = answer
+    with pytest.raises(LoadError, match=f"^the query answered {rows} rows, not one$"):
+        ask("chicago-contracts", ENV, bq)
 
 
 @pytest.mark.parametrize(
@@ -792,11 +974,68 @@ def test_the_digest_holds_no_column_type_without_a_rule() -> None:
         bigquery_digest_sql("`t`", [("`x`", "FLOAT")])
 
 
+@pytest.mark.parametrize("kind", ["DOUBLE", "DATE", "DECIMAL(9,2)"])
+def test_the_local_digest_holds_no_column_type_without_a_rule(tmp_path: Path, kind: str) -> None:
+    with pytest.raises(LoadError, match=re.escape(f"no digest rule for a {kind} column")):
+        duckdb_digest_sql("t", [('"x"', kind)])
+    path = tmp_path / "typed"
+    con = duckdb.connect()
+    con.execute(f"CREATE TABLE t (vendor_name VARCHAR, x {kind})")
+    con.execute(f"COPY t TO '{path}' (FORMAT parquet)")
+    with pytest.raises(LoadError, match=re.escape(f"no digest rule for a {kind} column")):
+        local_digest(path)
+
+
+def test_the_digest_sums_eight_adjacent_slices_of_eight_hex_digits(tmp_path: Path) -> None:
+    """Each engine's digest SQL has eight sums, `s0` to `s7`, each the `SUM` of one slice of the
+    row hash's text cast from hex to an integer, the slices eight digits long and starting at digit
+    1, 9, ..., 57, so they are adjacent and together are digits 1 to 64; eight hex digits summed
+    over a million rows stay below 2**52; the local digest gives eight sums."""
+    assert (SLICES, SLICE) == (8, 8)
+    assert 1_000_000 * (16**SLICE - 1) < 2**52
+    assert len(local_digest(landed_table(tmp_path, ROWS)).sums) == 8
+    for sql in (bigquery_digest_sql("`t`", []), duckdb_digest_sql("t", [])):
+        assert re.findall(r"AS s(\d+)", sql) == [str(i) for i in range(8)]
+        summed = re.findall(
+            r"(?i)\bSUM\(CAST\((?:CONCAT\('0x', |'0x' \|\| )substr\(h, (\d+), (\d+)\)\)?"
+            r" AS (?:INT64|BIGINT)\)\) AS s(\d+)",
+            sql,
+        )
+        assert summed == [(str(8 * i + 1), "8", str(i)) for i in range(8)]
+
+
+LOCAL_SUMS = ", ".join(f"{i} AS s{i}" for i in range(8))
+
+
+@pytest.mark.parametrize(
+    ("sql", "rows"),
+    [
+        ("SELECT 1 AS n, {sums} FROM {source} LIMIT 0", 0),
+        ("SELECT n, {sums} FROM (SELECT DISTINCT unnest([1, 2]) AS n FROM {source})", 2),
+    ],
+    ids=["no row", "two rows"],
+)
+def test_a_local_digest_answered_with_other_than_one_row_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sql: str, rows: int
+) -> None:
+    """DuckDB answers the digest's aggregate with one row; a query that answers none or two is
+    refused as a `LoadError` naming the number of rows."""
+    path = landed_table(tmp_path, ROWS)
+    monkeypatch.setattr(
+        "ingest.load.duckdb_digest_sql",
+        lambda source, columns: sql.format(sums=LOCAL_SUMS, source=source),
+    )
+    with pytest.raises(LoadError, match=f"^the local digest answered {rows} rows, not one$"):
+        local_digest(path)
+
+
 def guarded[T](what: str, env: Mapping[str, str], call: Callable[[], T]) -> T | str:
     """`call()`'s answer, or on an `Exception` fixed text: `what`, the exception's type and, for a
     `LoadError`, its message with each value of `env` but the location, stripped of surrounding
-    whitespace, replaced by `<hidden>`; one pattern holds the values, longest first, so a value
-    that holds another (a session project that holds the lab's) is replaced whole. An
+    whitespace, hidden: each place in the message where a value occurs, overlapping places
+    included, is found, and each run of places that overlap or touch is replaced by one
+    `<hidden>`, so a value that holds another (a session project that holds the lab's) or that
+    starts inside another is hidden whole. An
     interrupt (a `BaseException` that is no `Exception`) is raised again as a new exception of its
     type with no arguments, after the `except` block, so its traceback starts in this frame and
     holds no frame of `call` and no exception context; this frame's locals are then `what`, `env`,
@@ -807,9 +1046,19 @@ def guarded[T](what: str, env: Mapping[str, str], call: Callable[[], T]) -> T | 
     except Exception as error:
         message = str(error) if isinstance(error, LoadError) else ""
         values = {v.strip() for k, v in env.items() if k != LOCATION_VARIABLE} - {""}
-        if values:
-            longest = sorted(values, key=len, reverse=True)
-            message = re.sub("|".join(map(re.escape, longest)), "<hidden>", message)
+        spans = sorted(
+            (found.start(), found.start() + len(value))
+            for value in values
+            for found in re.finditer(f"(?={re.escape(value)})", message)
+        )
+        merged: list[list[int]] = []
+        for start, end in spans:
+            if merged and start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        for start, end in reversed(merged):
+            message = message[:start] + "<hidden>" + message[end:]
         return f"{what}: {type(error).__name__}" + (f": {message}" if message else "")
     except BaseException as error:
         interrupted = type(error)
@@ -985,6 +1234,326 @@ def test_the_lab_env_holds_only_the_variables_read_and_shows_no_value() -> None:
     assert all(value not in shown for value in source.values())
 
 
+# The check of `lab_env()` itself runs in a child Python that imports this module, plants an
+# invented value on each of the hash key, the location and `SOME_TOKEN` that its inherited
+# environment leaves unset or blank, calls `lab_env()` and compares what it gives against its own
+# `os.environ`. It prints one fixed token per check to stdout and writes what `lab_env()` gave to
+# stderr when a check fails, for a person running it by hand; the parent discards that stderr.
+# `LAB_ENV_REGRESSION`, set only by the probe below, names a regression the child applies to
+# `lab_env` or `LabEnv` before the call; a name it does not know stops it before it prints a token.
+LAB_ENV_CHILD = """
+import os
+import secrets
+import sys
+
+sys.path[:0] = sys.argv[1:]
+
+import test_load as T
+
+PLANTED = (T.KEY_VARIABLE, T.LOCATION_VARIABLE, "SOME_TOKEN")
+for name in PLANTED:
+    if not os.environ.get(name, "").strip():
+        os.environ[name] = f"invented-{secrets.token_hex(16)}"
+
+
+class Leaky(T.LabEnv):
+    def __repr__(self):
+        return repr(self._values)
+
+    def __contains__(self, key):
+        raise RuntimeError("broken")
+
+
+class Subclass(T.LabEnv):
+    pass
+
+
+def reads_an_unset_variable(self, source):
+    self._values = {key: source[key] for key in (*self.KEYS, "LAB_ENV_UNSET")}
+
+
+def drops_the_hash_key(self, source):
+    self._values = {k: source[k] for k in self.KEYS if k in source and k != T.KEY_VARIABLE}
+
+
+def raw_print():
+    sys.stdout.buffer.write(os.environ[T.KEY_VARIABLE].encode() + bytes([255, 10]))
+    sys.stdout.flush()
+    return T.LabEnv(os.environ)
+
+
+REGRESSIONS = {
+    "": lambda: None,
+    "none": lambda: setattr(T, "lab_env", lambda: None),
+    "a copy": lambda: setattr(T, "lab_env", lambda: dict(os.environ)),
+    "the environment": lambda: setattr(T, "lab_env", lambda: os.environ),
+    "a string": lambda: setattr(T, "lab_env", lambda: T.LabEnv(str(os.environ))),
+    "an unset variable read": lambda: setattr(T.LabEnv, "__init__", reads_an_unset_variable),
+    "a leaky subclass": lambda: setattr(T, "lab_env", lambda: Leaky(os.environ)),
+    "a raw print": lambda: setattr(T, "lab_env", raw_print),
+    "a plain subclass": lambda: setattr(T, "lab_env", lambda: Subclass(os.environ)),
+    "the hash key dropped": lambda: setattr(T.LabEnv, "__init__", drops_the_hash_key),
+    "a repr of the values": lambda: setattr(
+        T.LabEnv, "__repr__", lambda self: f"LabEnv({self._values!r})"
+    ),
+    "the token claimed": lambda: setattr(
+        T.LabEnv, "__contains__", lambda self, key: key == "SOME_TOKEN" or key in self._values
+    ),
+}
+REGRESSIONS[os.environ.get("LAB_ENV_REGRESSION", "")]()
+
+
+def shows_a_value(text):
+    return any(
+        os.environ.get(k, "").strip() and os.environ[k] in text
+        for k in (*T.LabEnv.KEYS, "SOME_TOKEN")
+    )
+
+
+CHECKS = {
+    "type": lambda env: type(env) is T.LabEnv,
+    "values": lambda env: dict(env)
+    == {k: os.environ[k] for k in T.LabEnv.KEYS if k in os.environ},
+    "shown": lambda env: not shows_a_value(repr(env) + str(env)),
+    "token": lambda env: "SOME_TOKEN" not in env,
+}
+
+try:
+    env = T.lab_env()
+except Exception:
+    print("call:bad")
+    raise
+print("call:ok")
+failed = False
+for name, check in CHECKS.items():
+    try:
+        ok = check(env) is True
+    except Exception:
+        ok = False
+    failed = failed or not ok
+    print(f"{name}:{'ok' if ok else 'bad'}")
+if failed:
+    print(f"lab_env() gave {env!r}", file=sys.stderr)
+"""
+LAB_ENV_CHECKS = ("call", "type", "values", "shown", "token")
+LAB_ENV_OK = tuple(f"{check}:ok" for check in LAB_ENV_CHECKS)
+LAB_ENV_BAD = tuple(f"{check}:bad" for check in LAB_ENV_CHECKS)
+
+
+def lab_env_checks() -> tuple[str, ...]:
+    """The child's verdict on `lab_env()`, as fixed tokens only: each line of its stdout, read as
+    bytes and decoded as ASCII with replacement, that is one of `LAB_ENV_OK` or `LAB_ENV_BAD`; any
+    other line as "unexpected"; "timeout" when the child does not finish in 120 seconds; and "not
+    run" for any other exception out of the run or the decode, which is caught here, so no frame
+    of the run reaches pytest. The child inherits this process's environment (no mapping of it is
+    built here) and its stderr is discarded. Limits: an interrupt (`KeyboardInterrupt`) is not
+    caught."""
+    try:
+        return tuple(
+            [
+                line if line in LAB_ENV_OK + LAB_ENV_BAD else "unexpected"
+                for line in subprocess.run(  # noqa: S603
+                    [
+                        sys.executable,
+                        "-c",
+                        LAB_ENV_CHILD,
+                        *(str(p) for p in (REPO, REPO / "tests", REPO / "tests" / "ingest")),
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    cwd=REPO,
+                    timeout=120,
+                    check=False,
+                )
+                .stdout.decode("ascii", errors="replace")
+                .splitlines()
+            ]
+        )
+    except subprocess.TimeoutExpired:
+        return ("timeout",)
+    except Exception:  # noqa: BLE001
+        return ("not run",)
+
+
+def test_the_live_tests_env_is_a_lab_env_of_the_process_environment() -> None:
+    """`lab_env()` itself, which the live tests call, checked in a child process against the
+    child's environment, with invented values on those of the hash key, the location and
+    `SOME_TOKEN` that the environment leaves unset or blank: the call returns; its answer's type
+    is `LabEnv` exactly; it holds the child's values of `LabEnv.KEYS` that the child's environment
+    carries and no other variable; its `repr` and `str` show none of those values and not the
+    value of `SOME_TOKEN`; it does not hold `SOME_TOKEN`; the child prints nothing else to stdout.
+    This frame holds the fixed tokens only. Limits: the live `warehouse` tests bind
+    `env = lab_env()` themselves and are not covered here; `LEDGER_LAB_GCP_PROJECT` and
+    `GCP_PROJECT` keep the environment's own values, so the `repr` check sees them only when the
+    environment sets them."""
+    assert lab_env_checks() == LAB_ENV_OK
+
+
+# Prints, for the file `argv[1]`, the checks whose bad token the file holds as pytest shows one,
+# and "unexpected" if it holds that token, comma-separated or "-" for none; then how many times it
+# holds the strings `argv[3:]`, and how many times it holds this process's non-blank values of the
+# comma-separated names in `argv[2]`: a word and two integers, nothing else.
+LAB_ENV_COUNT = """
+import os
+import sys
+
+text = open(sys.argv[1], errors="replace").read()
+real = [os.environ[k] for k in sys.argv[2].split(",") if os.environ.get(k, "").strip()]
+checks = ("call", "type", "values", "shown", "token")
+shown = [c for c in checks if f"'{c}:bad'" in text] + ["unexpected"] * ("'unexpected'" in text)
+print(
+    ",".join(shown) or "-",
+    sum(text.count(v) for v in sys.argv[3:]),
+    sum(text.count(v) for v in real),
+)
+"""
+LAB_ENV_CONTRACT = (
+    "tests/ingest/test_load.py::test_the_live_tests_env_is_a_lab_env_of_the_process_environment"
+)
+
+
+def lab_env_probe(regression: str, out: Path, *target: str) -> tuple[int, str, int, int]:
+    """Runs `target` (pytest arguments; by default the check of `lab_env()`) under pytest `-l
+    -vvv` in a subprocess whose environment is this process's with `LAB_ENV_REGRESSION` set to
+    `regression` and invented values on the hash key, the location and `SOME_TOKEN`, which the
+    check's child keeps; the output goes to `out`. Returns pytest's exit code; the checks whose bad
+    token the output holds, and "unexpected" when it holds that token, comma-separated, or "-";
+    how many times the output holds the invented values, which stand in for the hash key, the
+    location and `SOME_TOKEN`; and how many times it holds this process's non-blank values of
+    `LabEnv.KEYS`, which past the invented ones are those of `LEDGER_LAB_GCP_PROJECT` and
+    `GCP_PROJECT` when they are set. The counting runs in a further child, so no frame of this
+    process holds the output, and `out` is deleted before this returns. Any exception out of
+    either run comes back as -1, "-" and two zeros."""
+    planted = [f"invented-{secrets.token_hex(16)}" for _ in range(3)]
+    try:
+        with out.open("w") as sink:
+            code = subprocess.run(  # noqa: S603
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "-p",
+                    "no:cacheprovider",
+                    "-l",
+                    "-vvv",
+                    *(target or (LAB_ENV_CONTRACT,)),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=sink,
+                stderr=subprocess.STDOUT,
+                cwd=REPO,
+                env={
+                    **os.environ,
+                    KEY_VARIABLE: planted[0],
+                    LOCATION_VARIABLE: planted[1],
+                    "SOME_TOKEN": planted[2],
+                    "LAB_ENV_REGRESSION": regression,
+                },
+                timeout=300,
+                check=False,
+            ).returncode
+        bad, planted_hits, real_hits = (
+            subprocess.run(  # noqa: S603
+                [sys.executable, "-c", LAB_ENV_COUNT, str(out), ",".join(LabEnv.KEYS), *planted],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=True,
+            )
+            .stdout.strip()
+            .split(" ")
+        )
+        return (code, bad, int(planted_hits), int(real_hits))
+    except Exception:  # noqa: BLE001
+        return (-1, "-", 0, 0)
+    finally:
+        out.unlink(missing_ok=True)
+
+
+def test_the_lab_env_check_passes_and_its_output_shows_no_value(tmp_path: Path) -> None:
+    """The probe's baseline: with no regression, the check of `lab_env()` passes under `-l -vvv`,
+    and its output holds no bad token, none of the invented values (which stand in for the hash
+    key, the location and `SOME_TOKEN`) and no non-blank value of this process's
+    `LEDGER_LAB_GCP_PROJECT` or `GCP_PROJECT`."""
+    assert lab_env_probe("", tmp_path / "out") == (0, "-", 0, 0)
+
+
+@pytest.mark.parametrize(
+    ("regression", "bad"),
+    [
+        ("none", "type,values,token"),
+        ("a copy", "type,values,shown,token"),
+        ("the environment", "type,values,shown,token"),
+        ("a string", "call"),
+        ("an unset variable read", "call"),
+        ("a leaky subclass", "type,shown,token"),
+        ("a raw print", "unexpected"),
+        ("a plain subclass", "type"),
+        ("the hash key dropped", "values"),
+        ("a repr of the values", "shown"),
+        ("the token claimed", "token"),
+    ],
+)
+def test_a_lab_env_regression_fails_the_check_and_its_output_shows_no_value(
+    tmp_path: Path, regression: str, bad: str
+) -> None:
+    """Eleven regressions, each applied in the check's child only. `lab_env()` returns: `None`; a
+    `dict` of the environment; `os.environ` itself; a `LabEnv` of the environment's `str` (which
+    raises inside `LabEnv.__init__`, its `source` local bound to that text); a `LabEnv` subclass
+    whose `repr` shows its values and whose `__contains__` raises; a `LabEnv` after writing the
+    hash key's value and a byte that is not ASCII to stdout; or a `LabEnv` subclass that changes
+    nothing. Or `LabEnv` itself is changed: its `__init__` reads, past `LabEnv.KEYS`, a variable
+    the environment does not hold (which raises with its `source` local bound to the environment);
+    its `__init__` leaves out the hash key; its `repr` shows its values; or its `__contains__`
+    answers yes for `SOME_TOKEN`. Under each, pytest `-l -vvv` fails the check (exit code 1), its
+    output holds the bad tokens of exactly the checks `bad` names (the last four each fail one
+    check alone), and it holds none of the invented values (which stand in for the hash key, the
+    location and `SOME_TOKEN`) and no non-blank value of this process's `LEDGER_LAB_GCP_PROJECT`
+    or `GCP_PROJECT`. Limits: these eleven regressions only; the rest of the environment is not
+    counted; a value short enough to occur in pytest's own text fails this test without a leak."""
+    assert lab_env_probe(regression, tmp_path / "out") == (1, bad, 0, 0)
+
+
+# A copy of the check that binds the environment to a local, which `-l` prints when it fails: the
+# probe's positive control.
+LAB_ENV_LEAKY_CHECK = """
+import os
+import sys
+
+sys.path[:0] = [{paths}]
+
+import test_load as T
+
+
+def test_leaky_check():
+    env = dict(os.environ)
+    assert T.lab_env_checks() == T.LAB_ENV_OK
+"""
+
+
+def test_the_probe_counts_a_leak_when_the_check_shows_one(tmp_path: Path) -> None:
+    """The probe's positive control: a copy of the check whose frame holds a `dict` of the
+    environment, run by the probe under the "a copy" regression, fails with the checks' bad
+    tokens, and the probe counts the invented values in its output at least three times, so a
+    counter that stops counting them fails this test."""
+    paths = ", ".join(repr(str(p)) for p in (REPO, REPO / "tests", REPO / "tests" / "ingest"))
+    leaky = tmp_path / "leaky_check.py"
+    leaky.write_text(LAB_ENV_LEAKY_CHECK.format(paths=paths))
+    (tmp_path / "pytest.ini").write_text("[pytest]\n")
+    code, bad, planted_hits, _ = lab_env_probe(
+        "a copy",
+        tmp_path / "out",
+        "-c",
+        str(tmp_path / "pytest.ini"),
+        "--rootdir",
+        str(tmp_path),
+        f"{leaky}::test_leaky_check",
+    )
+    assert (code, bad, planted_hits >= 3) == (1, "type,values,shown,token", True)
+
+
 def local_files() -> list[str]:
     names = sorted(p.name for p in landing_path().iterdir() if p.is_file())
     assert names, "the local landing is empty"
@@ -1130,6 +1699,57 @@ def test_a_padded_or_nested_value_is_hidden_whole(
     assert guarded("it", env, refuse) == f"it: LoadError: {seen or message}"
 
 
+@pytest.mark.parametrize(
+    ("env", "message", "seen"),
+    [
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "ab-cd", "GCP_PROJECT": "cd-ef"},
+            "x ab-cd-ef y",
+            "x <hidden> y",
+        ),
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "cd-ef", "GCP_PROJECT": "ab-cd"},
+            "x ab-cd-ef y",
+            "x <hidden> y",
+        ),
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "ab-cd", KEY_VARIABLE: "cd-ef-gh"},
+            "x ab-cd-ef-gh y cd-ef-gh",
+            "x <hidden> y <hidden>",
+        ),
+        ({"LEDGER_LAB_GCP_PROJECT": "ab-ab"}, "x ab-ab-ab y", "x <hidden> y"),
+        ({"LEDGER_LAB_GCP_PROJECT": "ab", "GCP_PROJECT": "cd"}, "x abcd y", "x <hidden> y"),
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "cd", "GCP_PROJECT": "ab-cd-ef"},
+            "x ab-cd-ef y",
+            "x <hidden> y",
+        ),
+        (
+            {"LEDGER_LAB_GCP_PROJECT": "ef", "GCP_PROJECT": "ab-cd-ef"},
+            "x ab-cd-ef y",
+            "x <hidden> y",
+        ),
+    ],
+    ids=[
+        "the end of one value starts another",
+        "the same, the other value first",
+        "the key starts at the end of the project",
+        "a value overlapping itself",
+        "two values side by side",
+        "a value held in the middle of another",
+        "a value that ends another",
+    ],
+)
+def test_overlapping_or_touching_values_are_hidden_as_one(
+    env: dict[str, str], message: str, seen: str
+) -> None:
+    def refuse() -> None:
+        raise LoadError(message)
+
+    assert guarded("it", LabEnv(env), refuse) == f"it: LoadError: {seen}"
+    assert guarded("it", env, refuse) == f"it: LoadError: {seen}"
+
+
 # A probe of the live tests' path, run by pytest in a subprocess. The bq stand-in is `Bq` over the
 # probe's landed file, so each call answers as a loaded table that holds the file's rows would, but
 # one: the `show`, the counts query, the digest query or the distinct-values query (each the run,
@@ -1203,7 +1823,8 @@ ALL = ["--tb=long", "-l", "--full-trace"]
 
 
 # An interrupt runs only under `ALL`: without `--full-trace` pytest prints a `KeyboardInterrupt` as
-# one line with no frame and no local, so the other flag sets would show the hiding nothing.
+# one line, where it was raised and its type, so the other flag sets would show the hiding nothing;
+# with it, pytest prints each frame with its arguments, never its locals.
 @pytest.mark.parametrize(
     ("interrupt", "flags"),
     [(False, []), (False, ALL), (False, ["-vv", "-l"]), (True, ALL)],

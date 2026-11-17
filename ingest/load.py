@@ -137,7 +137,7 @@ def landed_names() -> frozenset[str]:
 
 def table_name(name: str, landed: frozenset[str] | None = None) -> str:
     """The `landed` table a landed file loads into."""
-    if not LANDED_NAME.match(name) or name not in (landed or landed_names()):
+    if not LANDED_NAME.fullmatch(name) or name not in (landed or landed_names()):
         raise LoadError(f"{name!r} is not a landed file's name")
     return name.replace("-", "_")
 
@@ -180,17 +180,27 @@ class Table:
     columns: tuple[tuple[str, str], ...]
 
 
-# A count as `bq show` gives one: a JSON string of ASCII digits.
-COUNT = re.compile(r"[0-9]+")
+# A count as `bq --format=json` gives one: a JSON string of ASCII digits, at most 19 of them, the
+# width of BigQuery's INT64 maximum (9223372036854775807).
+COUNT = re.compile(r"[0-9]{1,19}")
 
 
 def count(value: object) -> int:
-    """A `bq show` count, refused unless it is a JSON string that `COUNT` matches whole, so a JSON
-    number or boolean, a sign, a fraction, whitespace, an underscore and a digit outside ASCII
-    are refused."""
+    """A count from a `bq` answer, refused with a `ValueError` unless it is a JSON string that
+    `COUNT` matches whole. Refused: a JSON number (`Infinity` and `NaN` among them), a boolean,
+    null, a sign, a fraction, whitespace, an underscore, a digit outside ASCII, an empty string
+    and a string of more than 19 digits. Read through it: `numRows` and `numBytes` of
+    `bq show`, `totalBytesProcessed` of a dry run, and the cells of the counts and digest
+    queries."""
     if not isinstance(value, str) or not COUNT.fullmatch(value):
         raise ValueError("a count that is no string of ASCII digits")
     return int(value)
+
+
+def summed(value: object) -> int:
+    """A `SUM` cell of a `bq` answer: null, as a sum over no rows answers, is 0; anything else is
+    read by `count`."""
+    return 0 if value is None else count(value)
 
 
 def described(
@@ -339,7 +349,7 @@ def _query(project: str, where: str, sql: str, run: Runner) -> list[dict[str, An
         bq(project, where, "--format=json", "query", "--dry_run", *flags, sql),
     )
     try:
-        scanned = int(json.loads(dry)["statistics"]["totalBytesProcessed"])
+        scanned = count(json.loads(dry)["statistics"]["totalBytesProcessed"])
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         raise LoadError("the dry run answered unexpectedly") from None
     if scanned > MAX_BYTES_BILLED:
@@ -356,6 +366,14 @@ def _query(project: str, where: str, sql: str, run: Runner) -> list[dict[str, An
     if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
         raise LoadError("the query answered unexpectedly")
     return rows
+
+
+def _one_row(project: str, where: str, sql: str, run: Runner) -> dict[str, Any]:
+    """The one row of a query that answers one, refused when the answer holds another number."""
+    rows = _query(project, where, sql, run)
+    if len(rows) != 1:
+        raise LoadError(f"the query answered {len(rows)} rows, not one")
+    return rows[0]
 
 
 @dataclass(frozen=True)
@@ -389,9 +407,9 @@ def counts(name: str, env: Mapping[str, str], run: Runner = run_tool) -> tuple[i
     """The loaded table's rows and each column's non-null cells, in column order."""
     t = asked(name, env, run)
     cells = ", ".join(f"COUNT({t.column(c)}) AS c{i}" for i, (c, _) in enumerate(t.columns))
-    (row,) = _query(t.project, t.where, f"SELECT COUNT(*) AS n, {cells} FROM {t.reference}", run)  # noqa: S608
+    row = _one_row(t.project, t.where, f"SELECT COUNT(*) AS n, {cells} FROM {t.reference}", run)  # noqa: S608
     try:
-        return int(row["n"]), [int(row[f"c{i}"]) for i in range(len(t.columns))]
+        return count(row["n"]), [count(row[f"c{i}"]) for i in range(len(t.columns))]
     except (KeyError, TypeError, ValueError):
         raise LoadError("the counts answered unexpectedly") from None
 
@@ -469,8 +487,10 @@ def duckdb_digest_sql(source: str, columns: Sequence[tuple[str, str]]) -> str:
 
 
 def digest_of(row: Mapping[str, Any]) -> Digest:
+    """A digest from its query's row, as `bq --format=json` gives one: `n` read by `count`, each
+    slice's sum by `summed`."""
     try:
-        return Digest(int(row["n"] or 0), tuple(int(row[f"s{i}"] or 0) for i in range(SLICES)))
+        return Digest(count(row["n"]), tuple(summed(row[f"s{i}"]) for i in range(SLICES)))
     except (KeyError, TypeError, ValueError):
         raise LoadError("the digest answered unexpectedly") from None
 
@@ -479,8 +499,7 @@ def digest(name: str, env: Mapping[str, str], run: Runner = run_tool) -> Digest:
     """The loaded table's digest, in BigQuery."""
     t = asked(name, env, run)
     sql = bigquery_digest_sql(t.reference, [(t.column(c), kind) for c, kind in t.columns])
-    (row,) = _query(t.project, t.where, sql, run)
-    return digest_of(row)
+    return digest_of(_one_row(t.project, t.where, sql, run))
 
 
 def local_digest(path: Path) -> Digest:
@@ -492,8 +511,11 @@ def local_digest(path: Path) -> Digest:
     columns = [('"' + str(c).replace('"', '""') + '"', str(k)) for c, k, *_ in kinds]
     cursor = con.execute(duckdb_digest_sql("read_parquet(?)", columns), [str(path)])
     names = [d[0] for d in cursor.description or ()]
-    values = cursor.fetchone()
-    return digest_of(dict(zip(names, values or (), strict=True)))
+    rows = cursor.fetchall()
+    if len(rows) != 1:
+        raise LoadError(f"the local digest answered {len(rows)} rows, not one")
+    cells = (None if v is None else str(v) for v in rows[0])
+    return digest_of(dict(zip(names, cells, strict=True)))
 
 
 def main(
