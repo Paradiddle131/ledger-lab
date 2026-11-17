@@ -1051,11 +1051,10 @@ def test_the_lab_env_holds_only_the_variables_read_and_shows_no_value() -> None:
 # The check of `lab_env()` itself runs in a child Python that imports this module, plants an
 # invented value on each of the hash key, the location and `SOME_TOKEN` that its inherited
 # environment leaves unset or blank, calls `lab_env()` and compares what it gives against its own
-# `os.environ`. It prints one fixed token per check to
-# stdout and writes what `lab_env()` gave to stderr when a check fails, for a person running it by
-# hand; the parent discards that stderr. `LAB_ENV_REGRESSION`, set only by the probe below, names a
-# regression the child applies to `lab_env` or `LabEnv` before the call; a name it does not know
-# stops it before it prints a token.
+# `os.environ`. It prints one fixed token per check to stdout and writes what `lab_env()` gave to
+# stderr when a check fails, for a person running it by hand; the parent discards that stderr.
+# `LAB_ENV_REGRESSION`, set only by the probe below, names a regression the child applies to
+# `lab_env` or `LabEnv` before the call; a name it does not know stops it before it prints a token.
 LAB_ENV_CHILD = """
 import os
 import secrets
@@ -1065,7 +1064,8 @@ sys.path[:0] = sys.argv[1:]
 
 import test_load as T
 
-for name in (T.KEY_VARIABLE, T.LOCATION_VARIABLE, "SOME_TOKEN"):
+PLANTED = (T.KEY_VARIABLE, T.LOCATION_VARIABLE, "SOME_TOKEN")
+for name in PLANTED:
     if not os.environ.get(name, "").strip():
         os.environ[name] = f"invented-{secrets.token_hex(16)}"
 
@@ -1078,8 +1078,22 @@ class Leaky(T.LabEnv):
         raise RuntimeError("broken")
 
 
+class Subclass(T.LabEnv):
+    pass
+
+
 def reads_an_unset_variable(self, source):
     self._values = {key: source[key] for key in (*self.KEYS, "LAB_ENV_UNSET")}
+
+
+def drops_the_hash_key(self, source):
+    self._values = {k: source[k] for k in self.KEYS if k in source and k != T.KEY_VARIABLE}
+
+
+def raw_print():
+    sys.stdout.buffer.write(os.environ[T.KEY_VARIABLE].encode() + bytes([255, 10]))
+    sys.stdout.flush()
+    return T.LabEnv(os.environ)
 
 
 REGRESSIONS = {
@@ -1090,13 +1104,23 @@ REGRESSIONS = {
     "a string": lambda: setattr(T, "lab_env", lambda: T.LabEnv(str(os.environ))),
     "an unset variable read": lambda: setattr(T.LabEnv, "__init__", reads_an_unset_variable),
     "a leaky subclass": lambda: setattr(T, "lab_env", lambda: Leaky(os.environ)),
+    "a raw print": lambda: setattr(T, "lab_env", raw_print),
+    "a plain subclass": lambda: setattr(T, "lab_env", lambda: Subclass(os.environ)),
+    "the hash key dropped": lambda: setattr(T.LabEnv, "__init__", drops_the_hash_key),
+    "a repr of the values": lambda: setattr(
+        T.LabEnv, "__repr__", lambda self: f"LabEnv({self._values!r})"
+    ),
+    "the token claimed": lambda: setattr(
+        T.LabEnv, "__contains__", lambda self, key: key == "SOME_TOKEN" or key in self._values
+    ),
 }
 REGRESSIONS[os.environ.get("LAB_ENV_REGRESSION", "")]()
 
 
 def shows_a_value(text):
     return any(
-        os.environ.get(k, "").strip() and os.environ[k] in text for k in T.LabEnv.KEYS
+        os.environ.get(k, "").strip() and os.environ[k] in text
+        for k in (*T.LabEnv.KEYS, "SOME_TOKEN")
     )
 
 
@@ -1131,11 +1155,13 @@ LAB_ENV_BAD = tuple(f"{check}:bad" for check in LAB_ENV_CHECKS)
 
 
 def lab_env_checks() -> tuple[str, ...]:
-    """The child's verdict on `lab_env()`, as fixed tokens only: each line of its stdout that is
-    one of `LAB_ENV_OK` or `LAB_ENV_BAD`, any other line as "unexpected", and "timeout" or "not
-    run" when the child does not finish in 120 seconds or cannot start. The child inherits this
-    process's environment (no mapping of it is built here) and its stderr is discarded, so this
-    function binds no environment value and returns none."""
+    """The child's verdict on `lab_env()`, as fixed tokens only: each line of its stdout, read as
+    bytes and decoded as ASCII with replacement, that is one of `LAB_ENV_OK` or `LAB_ENV_BAD`; any
+    other line as "unexpected"; "timeout" when the child does not finish in 120 seconds; and "not
+    run" for any other exception out of the run or the decode, which is caught here, so no frame
+    of the run reaches pytest. The child inherits this process's environment (no mapping of it is
+    built here) and its stderr is discarded. Limits: an interrupt (`KeyboardInterrupt`) is not
+    caught."""
     try:
         return tuple(
             [
@@ -1150,16 +1176,17 @@ def lab_env_checks() -> tuple[str, ...]:
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
-                    text=True,
                     cwd=REPO,
                     timeout=120,
                     check=False,
-                ).stdout.splitlines()
+                )
+                .stdout.decode("ascii", errors="replace")
+                .splitlines()
             ]
         )
     except subprocess.TimeoutExpired:
         return ("timeout",)
-    except OSError:
+    except Exception:  # noqa: BLE001
         return ("not run",)
 
 
@@ -1168,37 +1195,50 @@ def test_the_live_tests_env_is_a_lab_env_of_the_process_environment() -> None:
     child's environment, with invented values on those of the hash key, the location and
     `SOME_TOKEN` that the environment leaves unset or blank: the call returns; its answer's type
     is `LabEnv` exactly; it holds the child's values of `LabEnv.KEYS` that the child's environment
-    carries and no other variable; its `repr` and `str` show none of those values; it does not hold
-    `SOME_TOKEN`. This frame holds the fixed tokens only. Limits: the live `warehouse` tests bind
+    carries and no other variable; its `repr` and `str` show none of those values and not the
+    value of `SOME_TOKEN`; it does not hold `SOME_TOKEN`; the child prints nothing else to stdout.
+    This frame holds the fixed tokens only. Limits: the live `warehouse` tests bind
     `env = lab_env()` themselves and are not covered here; `LEDGER_LAB_GCP_PROJECT` and
     `GCP_PROJECT` keep the environment's own values, so the `repr` check sees them only when the
     environment sets them."""
     assert lab_env_checks() == LAB_ENV_OK
 
 
-# Prints, for the file `argv[1]`, whether it holds a bad token as pytest shows one, how many times
-# it holds the strings `argv[3:]`, and how many times it holds this process's non-blank values of
-# the comma-separated names in `argv[2]`: three integers and nothing else.
+# Prints, for the file `argv[1]`, the checks whose bad token the file holds as pytest shows one,
+# and "unexpected" if it holds that token, comma-separated or "-" for none; then how many times it
+# holds the strings `argv[3:]`, and how many times it holds this process's non-blank values of the
+# comma-separated names in `argv[2]`: a word and two integers, nothing else.
 LAB_ENV_COUNT = """
 import os
 import sys
 
 text = open(sys.argv[1], errors="replace").read()
 real = [os.environ[k] for k in sys.argv[2].split(",") if os.environ.get(k, "").strip()]
-bad = any(f"'{check}:bad'" in text for check in ("call", "type", "values", "shown", "token"))
-print(int(bad), sum(text.count(v) for v in sys.argv[3:]), sum(text.count(v) for v in real))
+checks = ("call", "type", "values", "shown", "token")
+shown = [c for c in checks if f"'{c}:bad'" in text] + ["unexpected"] * ("'unexpected'" in text)
+print(
+    ",".join(shown) or "-",
+    sum(text.count(v) for v in sys.argv[3:]),
+    sum(text.count(v) for v in real),
+)
 """
+LAB_ENV_CONTRACT = (
+    "tests/ingest/test_load.py::test_the_live_tests_env_is_a_lab_env_of_the_process_environment"
+)
 
 
-def lab_env_probe(regression: str, out: Path) -> tuple[int, int, int, int]:
-    """Runs the check of `lab_env()` under pytest `-l -vvv` in a subprocess whose environment is
-    this process's with `LAB_ENV_REGRESSION` set to `regression` and invented values on the hash
-    key, the location and `SOME_TOKEN`, which the check's child keeps; the output goes to `out`.
-    Returns pytest's exit code, whether the output holds a bad token (1 or 0), how many times it
-    holds the invented values, and how many times it holds this process's non-blank values of
-    `LabEnv.KEYS`. The counting runs in a further child, so no frame of this process holds the
-    output, and `out` is deleted before this returns. A run that does not finish in time, or
-    cannot start, comes back as -1 and three zeros."""
+def lab_env_probe(regression: str, out: Path, *target: str) -> tuple[int, str, int, int]:
+    """Runs `target` (pytest arguments; by default the check of `lab_env()`) under pytest `-l
+    -vvv` in a subprocess whose environment is this process's with `LAB_ENV_REGRESSION` set to
+    `regression` and invented values on the hash key, the location and `SOME_TOKEN`, which the
+    check's child keeps; the output goes to `out`. Returns pytest's exit code; the checks whose bad
+    token the output holds, and "unexpected" when it holds that token, comma-separated, or "-";
+    how many times the output holds the invented values, which stand in for the hash key, the
+    location and `SOME_TOKEN`; and how many times it holds this process's non-blank values of
+    `LabEnv.KEYS`, which past the invented ones are those of `LEDGER_LAB_GCP_PROJECT` and
+    `GCP_PROJECT` when they are set. The counting runs in a further child, so no frame of this
+    process holds the output, and `out` is deleted before this returns. Any exception out of
+    either run comes back as -1, "-" and two zeros."""
     planted = [f"invented-{secrets.token_hex(16)}" for _ in range(3)]
     try:
         with out.open("w") as sink:
@@ -1211,8 +1251,7 @@ def lab_env_probe(regression: str, out: Path) -> tuple[int, int, int, int]:
                     "no:cacheprovider",
                     "-l",
                     "-vvv",
-                    "tests/ingest/test_load.py::"
-                    "test_the_live_tests_env_is_a_lab_env_of_the_process_environment",
+                    *(target or (LAB_ENV_CONTRACT,)),
                 ],
                 stdin=subprocess.DEVNULL,
                 stdout=sink,
@@ -1228,8 +1267,7 @@ def lab_env_probe(regression: str, out: Path) -> tuple[int, int, int, int]:
                 timeout=300,
                 check=False,
             ).returncode
-        bad, planted_hits, real_hits = map(
-            int,
+        bad, planted_hits, real_hits = (
             subprocess.run(  # noqa: S603
                 [sys.executable, "-c", LAB_ENV_COUNT, str(out), ",".join(LabEnv.KEYS), *planted],
                 stdin=subprocess.DEVNULL,
@@ -1237,47 +1275,97 @@ def lab_env_probe(regression: str, out: Path) -> tuple[int, int, int, int]:
                 text=True,
                 timeout=60,
                 check=True,
-            ).stdout.split(),
+            )
+            .stdout.strip()
+            .split(" ")
         )
-    except (subprocess.SubprocessError, OSError):
-        return (-1, 0, 0, 0)
+        return (code, bad, int(planted_hits), int(real_hits))
+    except Exception:  # noqa: BLE001
+        return (-1, "-", 0, 0)
     finally:
         out.unlink(missing_ok=True)
-    return (code, bad, planted_hits, real_hits)
 
 
 def test_the_lab_env_check_passes_and_its_output_shows_no_value(tmp_path: Path) -> None:
-    """The probe's baseline: with no regression, the check of `lab_env()` passes under `-l -vvv`
-    and its output holds no bad token, no invented value and no non-blank value of this process's
-    `LabEnv.KEYS`."""
-    assert lab_env_probe("", tmp_path / "out") == (0, 0, 0, 0)
+    """The probe's baseline: with no regression, the check of `lab_env()` passes under `-l -vvv`,
+    and its output holds no bad token, none of the invented values (which stand in for the hash
+    key, the location and `SOME_TOKEN`) and no non-blank value of this process's
+    `LEDGER_LAB_GCP_PROJECT` or `GCP_PROJECT`."""
+    assert lab_env_probe("", tmp_path / "out") == (0, "-", 0, 0)
 
 
 @pytest.mark.parametrize(
-    "regression",
+    ("regression", "bad"),
     [
-        "none",
-        "a copy",
-        "the environment",
-        "a string",
-        "an unset variable read",
-        "a leaky subclass",
+        ("none", "type,values,token"),
+        ("a copy", "type,values,shown,token"),
+        ("the environment", "type,values,shown,token"),
+        ("a string", "call"),
+        ("an unset variable read", "call"),
+        ("a leaky subclass", "type,shown,token"),
+        ("a raw print", "unexpected"),
+        ("a plain subclass", "type"),
+        ("the hash key dropped", "values"),
+        ("a repr of the values", "shown"),
+        ("the token claimed", "token"),
     ],
 )
 def test_a_lab_env_regression_fails_the_check_and_its_output_shows_no_value(
-    tmp_path: Path, regression: str
+    tmp_path: Path, regression: str, bad: str
 ) -> None:
-    """Six regressions, each applied in the check's child only: `lab_env()` returns `None`, a
-    `dict` of the environment, `os.environ` itself, a `LabEnv` of the environment's `str` (which
-    raises inside `LabEnv.__init__`, its `source` local bound to that text), or a `LabEnv` subclass
-    whose `repr` shows its values and whose `__contains__` raises; or `LabEnv.__init__` reads, past
-    `LabEnv.KEYS`, a variable the environment does not hold (which raises with its `source` local
-    bound to the environment). Under each, pytest `-l -vvv` fails the check (exit code 1), its
-    output holds a bad token, and it holds none of the invented values and no non-blank value of
-    this process's `LabEnv.KEYS`. Limits: these six regressions only; the values counted are those
-    of `LabEnv.KEYS` and the invented `SOME_TOKEN`, not the rest of the environment; a value short
-    enough to occur in pytest's own text fails this test without a leak."""
-    assert lab_env_probe(regression, tmp_path / "out") == (1, 1, 0, 0)
+    """Eleven regressions, each applied in the check's child only. `lab_env()` returns: `None`; a
+    `dict` of the environment; `os.environ` itself; a `LabEnv` of the environment's `str` (which
+    raises inside `LabEnv.__init__`, its `source` local bound to that text); a `LabEnv` subclass
+    whose `repr` shows its values and whose `__contains__` raises; a `LabEnv` after writing the
+    hash key's value and a byte that is not ASCII to stdout; or a `LabEnv` subclass that changes
+    nothing. Or `LabEnv` itself is changed: its `__init__` reads, past `LabEnv.KEYS`, a variable
+    the environment does not hold (which raises with its `source` local bound to the environment);
+    its `__init__` leaves out the hash key; its `repr` shows its values; or its `__contains__`
+    answers yes for `SOME_TOKEN`. Under each, pytest `-l -vvv` fails the check (exit code 1), its
+    output holds the bad tokens of exactly the checks `bad` names (the last four each fail one
+    check alone), and it holds none of the invented values (which stand in for the hash key, the
+    location and `SOME_TOKEN`) and no non-blank value of this process's `LEDGER_LAB_GCP_PROJECT`
+    or `GCP_PROJECT`. Limits: these eleven regressions only; the rest of the environment is not
+    counted; a value short enough to occur in pytest's own text fails this test without a leak."""
+    assert lab_env_probe(regression, tmp_path / "out") == (1, bad, 0, 0)
+
+
+# A copy of the check that binds the environment to a local, which `-l` prints when it fails: the
+# probe's positive control.
+LAB_ENV_LEAKY_CHECK = """
+import os
+import sys
+
+sys.path[:0] = [{paths}]
+
+import test_load as T
+
+
+def test_leaky_check():
+    env = dict(os.environ)
+    assert T.lab_env_checks() == T.LAB_ENV_OK
+"""
+
+
+def test_the_probe_counts_a_leak_when_the_check_shows_one(tmp_path: Path) -> None:
+    """The probe's positive control: a copy of the check whose frame holds a `dict` of the
+    environment, run by the probe under the "a copy" regression, fails with the checks' bad
+    tokens, and the probe counts the invented values in its output at least three times, so a
+    counter that stops counting them fails this test."""
+    paths = ", ".join(repr(str(p)) for p in (REPO, REPO / "tests", REPO / "tests" / "ingest"))
+    leaky = tmp_path / "leaky_check.py"
+    leaky.write_text(LAB_ENV_LEAKY_CHECK.format(paths=paths))
+    (tmp_path / "pytest.ini").write_text("[pytest]\n")
+    code, bad, planted_hits, _ = lab_env_probe(
+        "a copy",
+        tmp_path / "out",
+        "-c",
+        str(tmp_path / "pytest.ini"),
+        "--rootdir",
+        str(tmp_path),
+        f"{leaky}::test_leaky_check",
+    )
+    assert (code, bad, planted_hits >= 3) == (1, "type,values,shown,token", True)
 
 
 def local_files() -> list[str]:
