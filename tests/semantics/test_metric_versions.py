@@ -31,7 +31,15 @@ from tests.semantics.metric_cli import manifest
 
 FOLDER = "semantics/metricflow"
 PROJECT_FILE = "models/dbt_project.yml"
-GATE_FILES = ["semantics/versions.py", "semantics/offline/refusal.py"]
+# The gate and what it runs from a clone of its own: the network refusal, and the lock its
+# offline BigQuery parse reads the `bigquery` group from.
+GATE_FILES = [
+    "semantics/versions.py",
+    "semantics/offline/refusal.py",
+    "semantics/offline/sitecustomize.py",
+    "pyproject.toml",
+    "uv.lock",
+]
 
 
 def tracked(*paths: str) -> dict[str, str]:
