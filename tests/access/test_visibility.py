@@ -64,7 +64,7 @@ from access.compile import (
     schema_of,
     source_schema,
 )
-from tests.access.test_compile import LANDED_SOURCES, sha256_rendered
+from tests.access.test_compile import LANDED_SOURCES, all_entity, sha256_rendered
 from tests.conftest import landed_file, load_access
 
 Doc = dict[str, Any]
@@ -260,7 +260,9 @@ class LocalEngine:
 # details as columns of payments, the product whose readers the matrix states the bank tags for;
 # twelve payments of an invented year to twelve payees of each entity, half of them people, so
 # every entity has rows and a group of payments kept; and a span and year every entity brings
-# figures of more payees than the minimum to, kept for a reader of one entity's rows.
+# figures of more payees than the minimum to, so each entity's group-totals row of it is kept, as
+# is the span across all entities for a reader of one entity's rows on the invented all-entity
+# reading.
 INVENTED_TABLES = {
     "ledger": "ledger",
     "metric-definitions": "metric_definitions",
@@ -848,9 +850,9 @@ def kinds(tally: Mapping[str, Counter[str]]) -> dict[str, int]:
 # The cells proven over the samples, by kind, across the personas: on the build, and on invented
 # tables only. 120 cells; a change to the samples, the catalogues or an observation moves them.
 SAMPLE_PROVEN = {
-    "aggregate": 4,
-    "aggregate invented": 3,
-    "clear": 11,
+    "aggregate": 6,
+    "aggregate invented": 2,
+    "clear": 10,
     "clear invented": 14,
     "denied": 13,
     "denied invented": 42,
@@ -883,6 +885,7 @@ MUTATIONS = [
     "give-an-aggregate-reader-a-row-table",
     "replace-an-aggregate-with-its-rows",
     "drop-the-minimum",
+    "drop-the-minimum-of-the-group-totals",
     "drop-the-entities-apart",
     "add-a-tagged-column-to-a-denied-reader",
     "add-a-tagged-value-under-another-name",
@@ -896,6 +899,10 @@ MUTATIONS = [
     "add-an-omitted-column",
 ]
 WAREHOUSE = f"{SOURCE}.main"
+# The mutations acted out on an invented copy of the aggregates catalogue with the group totals as
+# figures across all entities, the reading the entities apart guard, which no catalogue line gives
+# today.
+ENTITIES_APART = {"drop-the-entities-apart"}
 
 
 def regroup(spec: Doc, entry: Doc, having: str) -> str:
@@ -926,7 +933,8 @@ def mutation(
     )
     stored = f"(select max(vendor_person_key) from {WAREHOUSE}.payments)"  # noqa: S608
     (review,) = cat.purpose_tables("accountant-chicago", "payments")
-    (totals_read,) = cat.purpose_tables("metric-owner", "group_totals")
+    # The metric owner reads no tag and holds only aggregate tables: one of them takes the value.
+    totals_read = "group_totals_left_out"
     if name == "leak-another-entitys-rows":
         persona = "accountant-chicago"
         plan = compile_persona(
@@ -994,7 +1002,11 @@ def mutation(
             [regroup(by_period, payments, "")],
             {f"payments {e}" for (e,) in small},
         )
+    if name == "drop-the-minimum-of-the-group-totals":
+        (rows,) = [s for s in totals["tables"] if s["name"] == "group_totals"]
+        return ("metric-owner", [regroup(rows, totals, "")], {"group-totals"})
     if name == "drop-the-entities-apart":
+        # Acted out on the invented reading of figures across all entities (`ENTITIES_APART`).
         left_out = totals["tables"][1]
         return (
             "accountant-uk-transport",
@@ -1115,7 +1127,8 @@ def test_the_matrix_goes_red_on_exactly_the_cells_a_broken_database_touches(
     warehouse: Path,
     tmp_path: Path,
 ) -> None:
-    cat = Catalogues(access, columns, aggregates, purposes)
+    at = all_entity(aggregates) if name in ENTITIES_APART else aggregates
+    cat = Catalogues(access, columns, at, purposes)
     persona, statements, places = mutation(name, cat, warehouse, visibility)
     assert places, "the samples hold something for the change to touch"
     whole = LocalEngine(warehouse, cat, tmp_path / "whole")
@@ -1309,12 +1322,23 @@ def one_entitys_figures(engine: Engine, matrix: Doc, minimum: int) -> dict[str, 
     return isolated
 
 
+def across_entities(engine: Engine) -> Engine:
+    """Invented: the engine over the catalogues with the group totals as figures across all
+    entities, the reading the entities apart guard, which no catalogue line gives today."""
+    cat = engine.catalogues
+    return engine.rebuilt(
+        Catalogues(cat.access, cat.columns, all_entity(cat.aggregates), cat.purposes)
+    )
+
+
 def test_two_aggregates_whose_difference_isolates_one_entity_are_suppressed(
     engine: Engine, visibility: Doc, aggregates: Doc
 ) -> None:
     # The samples' groups are small, so both lines run at a minimum group of two.
     assert aggregates["minimum_entities"] == 2
-    isolated = one_entitys_figures(engine, visibility, 2)
+    # Each entity's group totals apart, as the catalogue gives them, take nothing away.
+    assert one_entitys_figures(engine, visibility, 2) == {}
+    isolated = one_entitys_figures(across_entities(engine), visibility, 2)
     assert any(c["less own"] for c in isolated.values()), "no share worked out from own rows"
 
 
@@ -1331,12 +1355,12 @@ def landed_warehouse(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return built(tmp_path_factory.mktemp("dbt-landed"), "landed", landing_path().resolve()).database
 
 
-# Each persona's cells proven over the landed build by kind, and on invented tables only. The
-# readers of Chicago's payments (its accountant and the approver) are given no figure across all
-# entities on the landed build (below), so their aggregate cell is proven on invented tables.
+# Each persona's cells proven over the landed build by kind, and on invented tables only. Every
+# aggregate reader of the group totals is given each entity's rows of at least the minimum group,
+# so its group-totals cell is proven on the landed build.
 LANDED_PROVEN = {
     "accountant-chicago": {
-        "aggregate invented": 1,
+        "aggregate": 1,
         "clear": 1,
         "clear invented": 1,
         "denied": 1,
@@ -1376,7 +1400,7 @@ LANDED_PROVEN = {
         "tag clear invented": 2,
     },
     "approver": {
-        "aggregate invented": 1,
+        "aggregate": 1,
         "clear": 1,
         "clear invented": 1,
         "denied": 1,
@@ -1393,9 +1417,8 @@ LANDED_PROVEN = {
         "tag clear invented": 2,
     },
     "metric-owner": {
-        "aggregate": 2,
+        "aggregate": 3,
         "aggregate invented": 1,
-        "clear": 1,
         "denied invented": 4,
         "edit invented": 1,
         "tag denied": 1,
@@ -1416,9 +1439,11 @@ LANDED_PROVEN = {
         "tag denied invented": 2,
     },
 }
-# Per reader of figures across all entities and table, the groups of at least the minimum over the
-# landed build: (of its own entities only, of one other entity alone, of one other and its own,
-# of two others or more). Before the entities apart every one of them was given; now only the last.
+# Per reader of figures across all entities and table, on the invented reading of the group totals
+# as such figures, the groups of at least the minimum over the landed build: (of its own entities
+# only, of one other entity alone, of one other and its own, of two others or more). Without the
+# entities apart every one of them would be given; with them only the last. The metric owner knows
+# every entity's share from its payments by entity, so every group is its own.
 CHICAGO_READER = {"group_totals": (34, 1, 14, 0), "group_totals_left_out": (6, 1, 0, 0)}
 LANDED_ISOLATING = {
     "accountant-chicago": CHICAGO_READER,
@@ -1431,6 +1456,7 @@ LANDED_ISOLATING = {
         "group_totals_left_out": (1, 6, 0, 0),
     },
     "approver": CHICAGO_READER,
+    "metric-owner": {"group_totals": (49, 0, 0, 0), "group_totals_left_out": (7, 0, 0, 0)},
 }
 
 
@@ -1449,8 +1475,13 @@ def test_every_persona_sees_its_matrix_over_the_landed_build(
     )
     try:
         failures, tally = verdict(act_out(engine, visibility, PERSONAS))
-        isolating = isolating_groups(engine, visibility, aggregates)
-        isolated = one_entitys_figures(engine, visibility, aggregates["minimum_group"])
+        # Each entity's group totals apart, as the catalogue gives them, isolate nothing.
+        assert isolating_groups(engine, visibility, aggregates) == {}
+        assert one_entitys_figures(engine, visibility, aggregates["minimum_group"]) == {}
+        across = across_entities(engine)
+        at = across.catalogues.aggregates
+        isolating = isolating_groups(across, visibility, at)
+        isolated = one_entitys_figures(across, visibility, aggregates["minimum_group"])
     finally:
         engine.close()
     print(f"\ncells proven, by kind ({sum(kinds(tally).values())} cells):")
@@ -1470,7 +1501,9 @@ def test_every_persona_sees_its_matrix_over_the_landed_build(
         "accountant-nl-government": Counter({"alone": 40, "less a share from the source": 2}),
     }
     assert {p: sum(c.values()) for p, c in isolated.items()} == {
-        p: sum(t[1] + t[2] for t in tables.values()) for p, tables in LANDED_ISOLATING.items()
+        p: n
+        for p, tables in LANDED_ISOLATING.items()
+        if (n := sum(t[1] + t[2] for t in tables.values()))
     }
 
 

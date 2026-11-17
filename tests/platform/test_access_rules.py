@@ -41,6 +41,16 @@ BUILDER = "${google_project_iam_custom_role.warehouse_builder.name}"
 # Who reads every tag in clear: the payables clerk, who pays vendors, and the auditor, who reads
 # everything; pinned here apart from the catalogue, so widening it is a reviewed change to both.
 CLEAR_READERS = {"payables-clerk", "auditor"}
+# Who reads every tag masked: the other personas that read payments, the one product carrying a
+# tagged column, by rows. The metric owner reads payments only in aggregate and the agent operator
+# not at all, so neither holds a role on a tag; pinned apart from the catalogue as above.
+MASKED_READERS = {
+    "accountant-chicago",
+    "accountant-uk-transport",
+    "accountant-nl-government",
+    "group-controller",
+    "approver",
+}
 
 
 def catalogue(name: str) -> dict[str, Any]:
@@ -341,6 +351,24 @@ def test_the_builder_role_builds_tables_with_row_policies_and_policy_tags() -> N
 def test_each_tag_is_read_in_clear_by_the_pinned_readers_only() -> None:
     for tag in catalogue("columns.yaml")["tags"]:
         assert set(tag["clear"]) == CLEAR_READERS, tag["id"]
+
+
+def test_each_tag_is_read_masked_by_the_pinned_readers_only() -> None:
+    for tag in catalogue("columns.yaml")["tags"]:
+        assert set(tag["masked"]) == MASKED_READERS, tag["id"]
+
+
+def test_the_metric_owner_and_the_agent_operator_read_no_group_totals_or_payments_dataset() -> None:
+    # The metric owner reads payments and the group totals only in aggregate, which takes no
+    # dataset role; the agent operator reads only the metric definitions and the audit log.
+    grants = expected_dataset_grants()
+    assert {g for g in grants if g[0] == "metric-owner"} == {
+        ("metric-owner", "metric_definitions", DATASET_ROLES["edit"])
+    }
+    assert {g for g in grants if g[0] == "agent-operator"} == {
+        ("agent-operator", "metric_definitions", DATASET_ROLES["read"]),
+        ("agent-operator", "audit_log", DATASET_ROLES["read"]),
+    }
 
 
 def test_masking_rule_ids_are_the_tag_ids_with_underscores() -> None:

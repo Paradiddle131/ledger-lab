@@ -1,12 +1,16 @@
 # The policy tags the warehouse puts on sensitive columns: what each tag marks, the masking rule a
 # masked reader sees, and which personas read its columns in clear or masked. `platform/gcp`
 # declares one policy tag, one masking rule and these readers' grants per tag from this file.
-# Every persona that reads the warehouse (a `read` or `edit` grant in personas.yaml) is a clear or
-# a masked reader of every tag, so a tagged column one of its purposes (access/purposes.yaml)
-# lists is read clear or masked, never refused, and a column none of its purposes lists is absent
-# from its database; a persona that reads nothing in the warehouse is neither. The account that
-# builds the models reads every tag in clear, since a model copying a masked value would store the
-# mask. Shape: access/columns.schema.json.
+# The readers of every tag are exactly the personas that read by rows (a `read` or `edit` grant in
+# personas.yaml) a product carrying a tagged column in the column list below, payments today, each
+# either clear or masked: a tagged column one of its purposes (access/purposes.yaml) lists is read
+# clear or masked, and a column none of its purposes lists is absent from its database. Every other
+# persona reads no tag, an aggregate reader of such a product included: its aggregate tables
+# (access/aggregates.yaml) hold no tagged column, though the payments one counts the tagged payee
+# as its units; whether BigQuery needs a tag role for that is not settled here. The compiler
+# refuses a purpose that lists a tagged column its persona reads neither way. The account that builds the models reads
+# every tag in clear, since a model copying a masked value would store the mask.
+# Shape: access/columns.schema.json.
 #
 # Masking rules: nullify (the cell reads as null), hash (SHA-256 of the value, so equal values
 # still join and count), last-four (only the last four characters).
@@ -22,8 +26,6 @@ tags:
       - accountant-nl-government
       - group-controller
       - approver
-      - metric-owner
-      - agent-operator
   - id: bank-account-holder
     marks: The name on a vendor's bank account, which is a person's name when the vendor is one.
     masking: nullify
@@ -34,8 +36,6 @@ tags:
       - accountant-nl-government
       - group-controller
       - approver
-      - metric-owner
-      - agent-operator
   - id: individual-id
     marks: A keyed hash that stands for a vendor or payee who may be a person, their vendor id or a document they were paid on, alone in its column or among clear values.
     masking: hash
@@ -46,8 +46,6 @@ tags:
       - accountant-nl-government
       - group-controller
       - approver
-      - metric-owner
-      - agent-operator
 
 # The column list: per data product, the tag on each column its data contract (the `*.odcs.yaml`
 # whose id is the product's) classifies `personal`, keyed `<table>.<column>`. The contract's
