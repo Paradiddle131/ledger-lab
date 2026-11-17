@@ -37,8 +37,8 @@ Its limits:
 The same check is run on databases a broken compiler would build, at least one for each item
 flagged above and one for each catalogue function above, and `current_database()`, shadowed by
 a stored macro of its name, and goes red on each. The absent columns are worked out here from
-the source's columns, and the metric definition's columns from the metrics' semantic model, apart
-from the catalogue.
+the source's columns, and the columns the metric owner's aggregate of the group totals must hold,
+from the metrics' semantic model, apart from the catalogue.
 """
 
 import copy

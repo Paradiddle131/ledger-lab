@@ -5,9 +5,10 @@
 # personas.yaml) a product carrying a tagged column in the column list below, payments today, each
 # either clear or masked: a tagged column one of its purposes (access/purposes.yaml) lists is read
 # clear or masked, and a column none of its purposes lists is absent from its database. Every other
-# persona reads no tag, an aggregate reader of such a product included, since no aggregate table
-# groups by or sums a tagged column (access/aggregates.yaml); the compiler refuses a purpose that
-# lists a tagged column its persona reads neither way. The account that builds the models reads
+# persona reads no tag, an aggregate reader of such a product included: its aggregate tables
+# (access/aggregates.yaml) hold no tagged column, though the payments one counts the tagged payee
+# as its units; whether BigQuery needs a tag role for that is not settled here. The compiler
+# refuses a purpose that lists a tagged column its persona reads neither way. The account that builds the models reads
 # every tag in clear, since a model copying a masked value would store the mask.
 # Shape: access/columns.schema.json.
 #

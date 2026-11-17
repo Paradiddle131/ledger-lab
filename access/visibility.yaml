@@ -29,7 +29,8 @@
 
 personas:
   # Books and reconciles one entity: its payments in clear, no other entity's payment rows, the
-  # group totals only in aggregate (each entity's rows of at least the minimum group), the metrics
+  # group totals only through aggregate tables (each entity's rows, each holding at least the
+  # minimum group of payees), the metrics
   # it reports against, and no one's bank details or identity.
   accountant-chicago:
     products:
@@ -95,8 +96,11 @@ personas:
       metric-definitions: clear
       audit-log: clear
     columns: {bank-account-number: clear, bank-account-holder: clear, individual-id: clear}
-  # Defines the metrics: changes their definitions, reads payments and the group totals only in
-  # aggregate, each group of at least the minimum group of payees.
+  # Defines the metrics: changes their definitions, reads payments and the group totals only
+  # through aggregate tables, each group of which holds at least the minimum group of payees.
+  # Its payments and group-totals tables sum the same non-repeat payments at grains one level
+  # apart, so their difference can give back a group-totals row the minimum dropped; nothing
+  # here stops that.
   metric-owner:
     products:
       payments: {chicago: aggregate, uk-transport: aggregate, nl-government: aggregate}

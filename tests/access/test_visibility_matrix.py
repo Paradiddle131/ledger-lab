@@ -286,6 +286,8 @@ def test_the_matrix_agrees_with_the_grants_and_the_tag_readers(
 def test_the_matrix_keeps_the_personas_duties(visibility: Doc, access: Doc) -> None:
     products = set(ids(access["data_products"]))
     assert {*SUMMED_FROM, *SUMMED_FROM.values()} <= products
+    # Pinned, so emptying the map cannot pass the duty on nothing.
+    assert SUMMED_FROM == {"group-totals": "payments"}
     assert duty_breaches(visibility, access) == []
 
 

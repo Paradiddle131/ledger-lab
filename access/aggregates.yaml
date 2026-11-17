@@ -24,7 +24,10 @@
 # public rates split the group between them. No table here is of that kind, so this applies to
 # none; the tests act it out on a copy of this file with the group totals switched to `false`.
 # Differencing two answers of different grains is not stopped here: within one table each row
-# counts in one group, and the two group-totals tables sum different figures.
+# counts in one group, but two tables can sum the same figures at different grains. The metric
+# owner's payments and group-totals tables sum the same non-repeat payments at grains one level
+# apart, so their difference can give back a group-totals row the minimum dropped, and nothing
+# here stops that.
 
 # Ten, a common small-cell threshold, and the one the adversarial cases measure their targets
 # against (agent/evals/adversarial.yaml, held equal by a test); BigQuery states it as the policy's
@@ -52,8 +55,8 @@ products:
         units: {name: payees, count_distinct: vendor_name}
   # The group totals' aggregate readers read each entity's rows: a group-totals row's entity, span,
   # basis and own currency are in the grain, its key too, and a group is kept when the largest
-  # count of distinct payees among its rows is at least the minimum group. So an aggregate reader
-  # may know another entity's period totals of at least that many payees; these are public bodies'
+  # count of distinct payees among its rows is at least the minimum group. So the table holds
+  # another entity's period totals of at least that many payees; these are public bodies'
   # published spending. `entity_rows: false` would give figures across all entities only: a span's
   # euros at constant rates, kept under `minimum_entities` above.
   group-totals:
