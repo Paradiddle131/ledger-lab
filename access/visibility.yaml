@@ -1,7 +1,7 @@
 # What each persona must see and do: the outcome the access tests act out as each persona, written
-# from the personas' duties in access/personas.yaml, except where a comment says a cell states the
-# current grant while its choice is open, and checked against the grants there and the tag readers
-# in access/columns.yaml, which are the mechanism. Shape: access/visibility.schema.json.
+# from the personas' duties in access/personas.yaml and the owner's choices where a comment names
+# one, and checked against the grants there and the tag readers in access/columns.yaml, which are
+# the mechanism. Shape: access/visibility.schema.json.
 #
 # Each persona states one cell per data product, and per entity for an entity-scoped product, so
 # its own entity against the others is the row rule; and one cell per policy tag.
@@ -14,9 +14,8 @@
 # (the tag's masking rule applied), denied (it reads no rows of a product with a tagged column in
 # the column list in access/columns.yaml). A cell is stated per tag but reached per product, so a
 # reader of payments states the bank tags too, which mark no column until the ERP's tables exist.
-# A persona that reads the warehouse but no such product still holds a masked-reader role on every
-# tag, so a tagged column a purpose of it lists is read masked, never refused, and a column no
-# purpose of it lists is absent from its database; its cells are denied all the same.
+# A persona that reads no such product by rows, an aggregate reader of one included, holds no role
+# on any tag in access/columns.yaml, so its tag cells are denied.
 # A product cell states the rows; which of their columns a persona reads is its purposes'
 # (access/purposes.yaml). A clear or masked tag cell is how the persona reads the tag's columns
 # wherever its purposes list one; where they list none (the group controller's period close), the
@@ -29,8 +28,9 @@
 #   question or a result bound as a parameter, it shows the operator no data value.
 
 personas:
-  # Books and reconciles one entity: its payments in clear, no other entity's rows, the group only
-  # in aggregate, the metrics it reports against, and no one's bank details or identity.
+  # Books and reconciles one entity: its payments in clear, no other entity's payment rows, the
+  # group totals only in aggregate (each entity's rows of at least the minimum group), the metrics
+  # it reports against, and no one's bank details or identity.
   accountant-chicago:
     products:
       payments: {chicago: clear, uk-transport: denied, nl-government: denied}
@@ -86,8 +86,7 @@ personas:
       audit-log: denied
     columns: {bank-account-number: masked, bank-account-holder: masked, individual-id: masked}
   # Reads everything there is, changes nothing: only one entity has a ledger.
-  # Its three column cells state the current grant, clear; the visibility matrix's sketch on the
-  # roadmap says masked, and which it should be is open with the owner.
+  # Its three column cells are clear, as the owner chose.
   auditor:
     products:
       payments: {chicago: clear, uk-transport: clear, nl-government: clear}
@@ -96,12 +95,13 @@ personas:
       metric-definitions: clear
       audit-log: clear
     columns: {bank-account-number: clear, bank-account-holder: clear, individual-id: clear}
-  # Defines the metrics: changes their definitions, reads payments only in aggregate.
+  # Defines the metrics: changes their definitions, reads payments and the group totals only in
+  # aggregate, each group of at least the minimum group of payees.
   metric-owner:
     products:
       payments: {chicago: aggregate, uk-transport: aggregate, nl-government: aggregate}
       ledger: {chicago: denied, uk-transport: denied, nl-government: denied}
-      group-totals: clear
+      group-totals: aggregate
       metric-definitions: edit
       audit-log: denied
     columns: {bank-account-number: denied, bank-account-holder: denied, individual-id: denied}

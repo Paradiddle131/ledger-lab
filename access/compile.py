@@ -17,10 +17,11 @@ it, and everything else is simply absent:
 - the minimum group: an `aggregate` grant gives the product's aggregate tables of
   `access/aggregates.yaml` and never its rows, each table holding only the groups of at least the
   minimum, so no filter or grain the persona writes can reach a smaller one;
-- the entities apart: a table of figures across all entities keeps a group only when it holds at
-  least the minimum entities among those the persona reads neither by rows nor per entity in an
-  aggregate table, and their rows alone hold the minimum group, so neither the group nor the group
-  less what the persona can work out of its own is one entity's figure or a small group.
+- the entities apart: a table of figures across all entities (`entity_rows: false`, which no
+  product of `access/aggregates.yaml` has today) keeps a group only when it holds at least the
+  minimum entities among those the persona reads neither by rows nor per entity in an aggregate
+  table, and their rows alone hold the minimum group, so neither the group nor the group less what
+  the persona can work out of its own is one entity's figure or a small group.
 
 Masked values are stored masked, so a filter, a join or a count on a masked column sees the masked
 value, as on BigQuery, where predicates read the masked column. The persona's connection
