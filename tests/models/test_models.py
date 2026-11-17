@@ -381,7 +381,7 @@ def test_a_build_with_the_default_database_path_needs_no_folder_made_first(tmp_p
     assert not (clone / "target").exists() and not (clone / "models" / "target").exists()
     unset = {"LEDGER_LAB_GCP_PROJECT", "LEDGER_LAB_DUCKDB_PATH", "DBT_TARGET_PATH", "DBT_LOG_PATH"}
     env = {k: v for k, v in os.environ.items() if k not in unset}
-    env["DBT_SEND_ANONYMOUS_USAGE_STATS"] = "false"
+    env |= {"DBT_SEND_ANONYMOUS_USAGE_STATS": "false", "PWD": str(clone)}
     result = subprocess.run(
         [str(DBT), "build", "--project-dir", "models", "--profiles-dir", "models"]
         + ["--target", "local", "--select", "fiscal_year_starts"]
@@ -396,18 +396,65 @@ def test_a_build_with_the_default_database_path_needs_no_folder_made_first(tmp_p
     assert (clone / LOCAL_DATABASE).is_file()
 
 
-def default_database_path() -> str:
-    """The local output's database path when the environment names none, rendered as dbt does."""
+def database_path(env: dict[str, str]) -> str:
+    """The local output's database path, rendered as dbt does, against the given environment."""
     output = yaml.safe_load((PROJECT / "profiles.yml").read_text())["ledger_lab"]["outputs"]
     template = jinja2.Environment(autoescape=False).from_string(output["local"]["path"])  # noqa: S701
-    return template.render(env_var=lambda name, default="": default)
+    return template.render(env_var=lambda name, default="": env.get(name, default))
+
+
+def default_database_path() -> str:
+    """The local output's database path when the environment names none, rendered as dbt does."""
+    return database_path({})
 
 
 LOCAL_DATABASE = "models/target/ledger_lab.duckdb"
+ROOT_HINT = "run-dbt-from-the-repository-root/ledger_lab.duckdb"
 
 
 def test_the_local_database_defaults_to_the_projects_target_folder() -> None:
     assert default_database_path() == LOCAL_DATABASE
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"PWD": "/some/clone"}, LOCAL_DATABASE),
+        ({"PWD": "/some/clone/models/target"}, LOCAL_DATABASE),
+        ({"PWD": "/some/clone/models"}, ROOT_HINT),
+        ({"PWD": "/some/clone/models", "LEDGER_LAB_DUCKDB_PATH": "/x/a.duckdb"}, "/x/a.duckdb"),
+        ({"PWD": "/some/clone", "LEDGER_LAB_DUCKDB_PATH": "/x/a.duckdb"}, "/x/a.duckdb"),
+    ],
+    ids=["root", "below the project", "the project", "the project, named", "root, named"],
+)
+def test_the_default_database_path_names_the_root_only_from_the_project_folder(
+    env: dict[str, str], expected: str
+) -> None:
+    assert database_path(env) == expected
+
+
+def test_a_connection_opened_inside_the_project_folder_names_the_root(tmp_path: Path) -> None:
+    """`dbt debug` on the local target, started inside `models/` with the profile's default
+    database path and `PWD` set as a shell's `cd` sets it, fails its connection test with DuckDB's
+    error naming the folder that says to run from the root, and makes no such folder."""
+    env = {k: v for k, v in os.environ.items() if k != "LEDGER_LAB_DUCKDB_PATH"}
+    env |= {
+        "PWD": str(PROJECT),
+        "DBT_LOG_PATH": str(tmp_path / "logs"),
+        "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
+    }
+    result = subprocess.run(
+        [str(DBT), "debug", "--profiles-dir", ".", "--target", "local"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+        cwd=PROJECT,
+    )
+    out = result.stdout + result.stderr
+    assert result.returncode != 0, out
+    assert f'Cannot open file "{PROJECT / ROOT_HINT}"' in out, out
+    assert not (PROJECT / ROOT_HINT).parent.exists()
 
 
 def test_the_contract_test_reads_the_database_the_default_build_writes() -> None:

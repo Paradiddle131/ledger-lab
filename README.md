@@ -85,12 +85,16 @@ It compares with the `origin/main` last fetched, which it cannot check offline: 
 The dbt models build on DuckDB in the session by default, reading the landed files in place under `LEDGER_LAB_LANDING`; setting `LEDGER_LAB_GCP_PROJECT` (with `uv sync --group bigquery`) in a session that carries no `GCP_PROJECT` moves them to BigQuery.
 The BigQuery target needs `LEDGER_LAB_BQ_LOCATION` set to one of the free-tier regions `platform/gcp/variables.tf` allows (`us-west1`, `us-central1`, `us-east1`, in lower case; surrounding whitespace is trimmed); unset, empty or any other value, `US` included, makes dbt refuse the profile when it reads it, before any connection.
 Run dbt from the repository's root: the default database path is read relative to the folder dbt starts in.
-From the root, a DuckDB build writes its database to `models/target/ledger_lab.duckdb`, in the project's target folder, which dbt makes when it parses the project, so a fresh clone needs no folder made first; `LEDGER_LAB_DUCKDB_PATH` names another file, in a folder that must exist, and a build that moves the target folder (`--target-path`, `DBT_TARGET_PATH`) needs it.
-A build started inside `models/` with no `LEDGER_LAB_DUCKDB_PATH` stops when it opens the database, with DuckDB's `Cannot open file ".../models/models/target/ledger_lab.duckdb": No such file or directory`; start it from the root instead:
+From the root, a DuckDB build writes its database to `models/target/ledger_lab.duckdb`, in the project's target folder, which dbt makes when it parses the project, so a fresh clone needs no folder made first; `LEDGER_LAB_DUCKDB_PATH` names another file, in a folder that must exist, and a build that moves the target folder (`--target-path`, `DBT_TARGET_PATH`) needs it:
 
 ```bash
 uv run dbt build --project-dir models --profiles-dir models
 ```
+
+With no `LEDGER_LAB_DUCKDB_PATH` and a `PWD` that ends in `/models`, as a shell's `cd models` leaves it, the default is `run-dbt-from-the-repository-root/ledger_lab.duckdb` instead, a folder the project does not make, so a build started inside `models/` from such a shell stops when it opens the database with DuckDB's `Cannot open file ".../models/run-dbt-from-the-repository-root/ledger_lab.duckdb": No such file or directory`.
+The profile reads only `PWD` for this.
+A launcher that leaves `PWD` unset, or set to another folder, gets the root's path, and a build it starts inside `models/` stops on DuckDB's plain `Cannot open file ".../models/models/target/ledger_lab.duckdb"`.
+A clone whose own folder is named `models` gets the hint path at its root too; set `LEDGER_LAB_DUCKDB_PATH` there.
 
 Every model that reads a fetched source reads the file the fetch kit landed (`python -m ingest.fetch ecb-rates`, `python -m ingest.fetch nl-government-budget`, for the payments mart `chicago` and `uk-transport-spend-2025`, for the reconciliation of Chicago's payments to their contracts' awards `chicago`, and for the vendors' legal entities `chicago`, `uk-transport-spend-2025` and `gleif-legal-entities`), and the build fails on a missing file; the tests pass `--vars '{source_rows: sample}'` to read the committed samples of real rows instead (ECB rates of a fortnight of 2024, a day of 2023 and March 2026, Dutch budget rows chosen for their mess, and Chicago contract and payment rows and UK spend rows of companies, each landed through its landing step with a test hash key), and `uv run pytest -m landed` runs the translation and budget rules over the landed files.
 The Dutch budget against outturn shows the figures as the file serves them: a zero the file may serve in place of a figure is flagged on its line (`has_doubtful_zero`), and the landed tests count the figures the file serves wrong.
