@@ -70,7 +70,8 @@ nodes are held to. The placement configs (`PLACEMENT`) are `schema`, `alias`, `e
     value, are refused, and on a data test also `schema`, which places its stored failures;
   - a model, seed or snapshot with a `schema` where the project has no allowed schema macro is
     refused (dbt's own prefixes it with the profile's dataset).
-- On either tree, a node of the project that the local parse disables is refused.
+- On either tree, a model, seed, snapshot or data test of the project that the local parse
+  disables is refused (a disabled metric or semantic model is read as gone, as before).
 - On the working tree: a model, seed or snapshot's `schema` is the dataset `ROUTES` gives its
   folder, and none outside those folders; a routed folder's relation names (an alias, else the
   node's name) are its route's tables, each built once.
@@ -560,7 +561,7 @@ def parse_and_refuse(project: Path, report: Path) -> int:
         node
         for versions_of in manifest.disabled.values()
         for node in versions_of
-        if node.package_name == root
+        if node.package_name == root and node.resource_type.value in PLACED
     ]
     refused += [
         f"{in_tree(project, node.original_file_path, tree)}: {node.resource_type.value}"
