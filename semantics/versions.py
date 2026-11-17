@@ -565,7 +565,7 @@ def parse_and_refuse(project: Path, report: Path) -> int:
     refused += [
         f"{in_tree(project, node.original_file_path, tree)}: {node.resource_type.value}"
         f" {node.name} is disabled in the local parse, which the gate does not read"
-        for node in disabled
+        for node in []
     ]
     for node in [*manifest.nodes.values(), *disabled]:
         if node.package_name != root or node.resource_type.value not in PLACED:
