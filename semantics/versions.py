@@ -37,9 +37,9 @@ Outside the definition, so a change there is not seen by the gate:
 - the SQL of the dbt models a semantic model reads (caught, if at all, by the models' tests, the
   payments data contract's gate and the values pinned over the landed build);
 - command-line `--vars` a consumer passes to dbt;
-- relation names decided by the profile, by an alias or database set in a model's SQL `config()`,
-  or on a target other than the local one, but for the BigQuery dataset the routing below gives:
-  the gate compares the local target's parse;
+- relation names decided by the profile, by an alias a model's SQL `config()` renders from the
+  environment, or on a target other than the local one, but for a node's `schema` config, which
+  the routing below reads: the gate compares the local target's parse;
 - dbt packages, which the gate refuses rather than reads.
 
 The ways a project's macros can decide relation names that the gate refuses:
@@ -54,20 +54,25 @@ The ways a project's macros can decide relation names that the gate refuses:
 - a project file `dispatch` entry for the `dbt` macro namespace, which those three dispatch in, or
   a `dispatch` setting the gate cannot read as entries for other namespaces.
 
-The routing, which the gate holds (`ROUTES`: a folder of the project mapped to a BigQuery dataset
-a data product owns), and the rules a model, seed or snapshot of the project is held to:
+The routing, which the gate holds (`ROUTES`: a folder of the project mapped to a BigQuery dataset;
+a test holds each to a data product's dataset in platform/gcp/warehouse.tf), and the rules each
+model, seed and snapshot of the project is held to:
 
-- on either tree, a `schema` config is the literal dbt's parse records unrendered, so neither dbt
-  Jinja nor a later setting that overrides it, is not set in a SQL `config()` call, and is set
-  only beside the allowed macro (dbt's own would prefix it with the profile's dataset); no
-  `database`, and no snapshot `target_schema` or `target_database`, is set;
-- on the working tree, its `schema` config is the dataset `ROUTES` gives its folder, and none
+- on either tree: a `schema` config equals the unrendered value dbt's parse records for it (so it
+  is a literal, not dbt Jinja, and no later setting overrides it), is not set in a SQL `config()`
+  call, and is set only where the project defines the allowed macro (dbt's own prefixes it with
+  the profile's dataset); `database`, and a snapshot's `target_schema` and `target_database`, are
+  not set;
+- on the working tree: its `schema` config is the dataset `ROUTES` gives its folder, and none
   outside those folders.
 
-So on BigQuery a node is built in its route's dataset, or in the profile's. Stated limits of the
-routing: data tests are not checked (their `schema` is where stored failures go, which no model
-reads); a node's alias is not routed, but is compared on the local parse for what a semantic model
-reads.
+With the allowed macro, such a node is built on BigQuery in its route's dataset, or in the
+profile's. Stated limits of the routing: data tests are not checked (their `schema` is where
+stored failures go, which no semantic model reads); an alias is not routed, and is compared only
+as the local parse names it, for what a semantic model reads; the macro's text is compared, its
+behaviour rests on dbt's `target` (a project macro named `target` makes the pinned dbt's parse
+fail); and since both trees are read with the working tree's gate, a change to `SCHEMA_MACRO`
+makes an `origin/main` holding the old text unreadable.
 
 Stated limits of that refusal: it rests on dbt's default implementations of the three, in the dbt
 the lock pins, calling no other macro (the database one asks the adapter for a model's catalog
@@ -85,9 +90,10 @@ The gate fails when:
 - either tree holds, in what dbt reads, a symbolic link or a submodule; declares dbt packages
   (`packages.yml`, `dependencies.yml`); has a project file holding Jinja, or a path setting that is
   absolute or outside the tree; defines a macro that decides relation names or sets a `dispatch`
-  entry for the `dbt` namespace (both above); breaks a rule of the routing (above); holds dbt Jinja where dbt renders it in a semantic
-  model or metric entry, or in the entry of a model, seed or snapshot a semantic model reads or a
-  time spine is (dbt renders that Jinja with the environment, command-line variables and the clock);
+  entry for the `dbt` namespace (both above); breaks a rule of the routing (above); holds dbt
+  Jinja where dbt renders it in a semantic model or metric entry, or in the entry of a model, seed
+  or snapshot a semantic model reads or a time spine is (dbt renders that Jinja with the
+  environment, command-line variables and the clock);
 - dbt cannot parse either tree: the message names the tree and dbt's error class, never dbt's own
   output;
 - a metric `origin/main` defines is gone from the working tree or renamed;

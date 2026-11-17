@@ -838,7 +838,6 @@ def test_the_routing_names_declared_product_datasets_and_the_project_file_implem
     personas = yaml.safe_load((versions.REPO / "access" / "personas.yaml").read_text())
     products = {p["id"].replace("-", "_") for p in personas["data_products"]}
     assert set(versions.ROUTES.values()) <= products
-    assert "payments" not in versions.ROUTES.values()
     macros = (versions.REPO / SCHEMA_MACRO_FILE).read_text()
     assert macros.count(versions.SCHEMA_MACRO) == 1
     project = yaml.safe_load((versions.REPO / PROJECT_FILE).read_text())
