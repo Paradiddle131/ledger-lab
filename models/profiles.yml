@@ -12,10 +12,10 @@
 # trimmed, is not exactly one of the free-tier regions listed in the method line (lower case; unset
 # and empty included), the method is another one dbt refuses at the same point; the location dbt
 # sends is that trimmed value. A test holds the listed regions equal to the ones the region
-# validation in platform/gcp/variables.tf allows; dbt does not read that file. Its credential is Application Default Credentials (`oauth`), or, while
-# CLOUDSDK_AUTH_ACCESS_TOKEN is set, that access token (`oauth-secrets`), the one gcloud and bq
-# send, which a session whose proxy injects the credential holds as a stand-in the proxy
-# replaces; the token is not refreshed.
+# validation in platform/gcp/variables.tf allows; dbt does not read that file. Its credential
+# is Application Default Credentials (`oauth`), or, while CLOUDSDK_AUTH_ACCESS_TOKEN is set, that
+# access token (`oauth-secrets`), the one gcloud and bq send, which a session whose proxy injects
+# the credential holds as a stand-in the proxy replaces; the token is not refreshed.
 ledger_lab:
   target: "{{ 'bigquery' if env_var('LEDGER_LAB_GCP_PROJECT', '') | trim and not env_var('GCP_PROJECT', '') else 'local' }}"
   outputs:
