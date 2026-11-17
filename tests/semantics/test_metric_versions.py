@@ -26,7 +26,6 @@ import pytest
 import yaml
 
 from semantics import versions
-from tests.models import bigquery_offline
 from tests.models.dbt_build import Build
 from tests.semantics.metric_cli import manifest
 
@@ -741,7 +740,116 @@ NOT_LITERAL = (
     "sets its schema other than as the literal dbt renders (dbt Jinja, or a setting it overrides),"
     " which the gate does not compare"
 )
+ON_BIGQUERY = "on BigQuery, "
+CONTRACT_NUMBER_TEST = (
+    f"{ON_BIGQUERY}{CHICAGO_DOCS}: test not_null_int_chicago__contract_revisions_contract_number"
+)
+TEST_HELD = "where the gate holds a data test to dbt_test__audit of the profile's project"
+ROUTE_HELD = "where the gate's routing (semantics/versions.py ROUTES) builds it in"
+ONLY_ON_BIGQUERY = "{{% if target.type == 'bigquery' %}}{{{{ config({}) }}}}{{% endif %}}"
+NO_PARSE_SHOWS = "whose writes no parse shows, which the gate refuses"
+PLACE_MACRO = "models/macros/place.sql"
+
+
+def generic_test_config(key: str, value: str) -> Edit:
+    """The contract number's `not_null` test given, in its YAML `config:`, `key` set to what
+    renders to `value` on BigQuery and to none on the local target, and stored failures."""
+    jinja = f"\"{{{{ '{value}' if target.type == 'bigquery' else none }}}}\""
+    return replaced(
+        CHICAGO_DOCS,
+        "          - not_null\n      - name: revision_number",
+        f"          - not_null:\n              config:\n                {key}: {jinja}\n"
+        "                store_failures: true\n      - name: revision_number",
+    )
+
+
+def only_on_bigquery(config: str) -> Edit:
+    """A `config()` call in the group totals' SQL that only a BigQuery target runs."""
+    return replaced(
+        GROUP_TOTALS_SQL, "\nselect", "\n" + ONLY_ON_BIGQUERY.format(config) + "\nselect"
+    )
+
+
+def project_macro(text: str) -> Edit:
+    return lambda files: files.update({PLACE_MACRO: text})
+
+
 ROUTING_REFUSED: dict[str, tuple[Edit, list[str]]] = {
+    "a generic test's schema that renders to none on the local target": (
+        generic_test_config("schema", "group_totals"),
+        [f"{CONTRACT_NUMBER_TEST} is placed in group_totals, {TEST_HELD}"],
+    ),
+    "a generic test's database that renders to none on the local target": (
+        generic_test_config("database", "elsewhere"),
+        [
+            f"{CONTRACT_NUMBER_TEST} is placed in dbt_test__audit of the project elsewhere,"
+            f" {TEST_HELD}"
+        ],
+    ),
+    "a schema set in a config() call only BigQuery runs": (
+        only_on_bigquery("schema='payments'"),
+        [f"{ON_BIGQUERY}{GROUP_TOTALS_NODE} lands in payments, {ROUTE_HELD} group_totals"],
+    ),
+    "a database set in a config() call only BigQuery runs": (
+        only_on_bigquery("database='elsewhere'"),
+        [
+            f"{ON_BIGQUERY}{GROUP_TOTALS_NODE} lands in group_totals of the project elsewhere,"
+            f" {ROUTE_HELD} group_totals"
+        ],
+    ),
+    "an alias set in a config() call only BigQuery runs": (
+        only_on_bigquery("alias='elsewhere'"),
+        [
+            f"{ON_BIGQUERY}{GROUP_TOTALS_SQL}: builds elsewhere in models/marts/group_totals,"
+            " which the gate's routing (semantics/versions.py ROUTES) holds to group_totals,"
+            " group_totals_left_out"
+        ],
+    ),
+    "a materialization of the project": (
+        project_macro(
+            "{% materialization payments_table, default %}\n"
+            "{{ return({'relations': []}) }}\n{% endmaterialization %}\n"
+        ),
+        [
+            f"{ON_BIGQUERY}{PLACE_MACRO}: macro materialization_payments_table_default is a"
+            f" materialization of the project, {NO_PARSE_SHOWS}"
+        ],
+    ),
+    "a project macro named as one of dbt-bigquery's": (
+        project_macro(
+            "{% macro bigquery__create_table_as(temporary, relation, compiled_code,"
+            " language='sql') -%}\ncreate or replace table"
+            " `{{ relation.database }}`.payments.`{{ relation.identifier }}`"
+            " as {{ compiled_code }}\n{%- endmacro %}\n"
+        ),
+        [
+            f"{ON_BIGQUERY}{PLACE_MACRO}: macro bigquery__create_table_as overrides one of dbt's"
+            f" or dbt-bigquery's own macros, {NO_PARSE_SHOWS}"
+        ],
+    ),
+    "a project macro dbt's dispatch reaches by its prefix": (
+        project_macro(
+            "{% macro bigquery__get_create_table_as_sql(temporary, relation, sql) -%}\n"
+            "create table payments.copy as {{ sql }}\n{%- endmacro %}\n"
+        ),
+        [
+            f"{ON_BIGQUERY}{PLACE_MACRO}: macro bigquery__get_create_table_as_sql overrides one"
+            f" of dbt's or dbt-bigquery's own macros, {NO_PARSE_SHOWS}"
+        ],
+    ),
+    "a data test enabled only on BigQuery": (
+        lambda files: files.update(
+            {
+                STORED_FAILURES: "{{ config(enabled=(target.type == 'bigquery'),"
+                " schema='group_totals', store_failures=true) }}\n"
+                "select vendor_name from {{ ref('int_chicago__payments') }} where false\n"
+            }
+        ),
+        [
+            f"{STORED_FAILURES}: test probe_every_payment is disabled in the local parse, which"
+            " the gate does not read"
+        ],
+    ),
     "the schema macro with a space added": (
         schema_macro("{{ target.schema }}", "{{  target.schema }}"),
         [NOT_THE_GATES],
@@ -1040,13 +1148,10 @@ def test_the_refused_bigquery_names_are_the_locked_adapters_placement_aliases() 
     """The gate's `BIGQUERY_ALIASES` are the locked dbt-bigquery's `_ALIASES` whose target is a
     placement config, and each of its other aliases is one known not to place a relation, so an
     alias the adapter adds fails here until it is sorted; read from the lock's `bigquery` group in
-    uv's cache, offline (tests/models/bigquery_offline.py), and skipped only when that group is not
-    cached or the adapter does not import; any other failure of the probe fails the test."""
-    reason = bigquery_offline.unavailable()
-    if reason:
-        pytest.skip(reason)
-    found = bigquery_offline.run("python", "-c", ALIASES)
-    assert found.returncode == 0, found.stderr[-500:]
+    uv's cache, offline (semantics/versions.py `offline_run`), which `make sync` caches; when it is
+    not cached, the test fails as the gate does."""
+    found = versions.offline_run("python", "-c", ALIASES)
+    assert found.returncode == 0, versions.group_failure(found.stderr) or found.stderr[-500:]
     aliases = json.loads(found.stdout)
     placement = {"schema", *versions.UNROUTED}
     assert {k: v for k, v in aliases.items() if v in placement} == versions.BIGQUERY_ALIASES
