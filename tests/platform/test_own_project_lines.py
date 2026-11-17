@@ -6,23 +6,29 @@ space, a tab, a newline or a project id, each beside `GCP_PROJECT` missing, empt
 another lab's id.
 
 Checked, by those cases only:
-- the backticked `[ ... ]` check on the known-condition line of `docs/agents/autopilot.md` that
-  names the GCP credential has the shape SHELL_CHECK allows (`[ -n|-z "<expansion>" ]` tests
-  joined by `&&`, each expansion one of the two variables, bare, with an empty `:-` default or
-  with whitespace removed by `//[[:space:]]/`), and its exit status under `bash --noprofile
-  --norc -c`, in an environment holding only `PATH` and the case's variables, is 0 exactly on the
-  own-environment cases;
-- the condition after the first `while` up to the next comma, on the Queue rule's line and on the
-  Never line, read with the closed vocabulary of WORDS (clauses joined by `or`), is true exactly
-  on the cases that are not the own environment; a clause outside the vocabulary fails;
-- `AGENTS.md` has, under `## Guardrails`, a line starting `- **Own project only:**` holding the
-  phrase OWN_ENVIRONMENT.
+- the known-condition line of `docs/agents/autopilot.md` that names the GCP credential holds one
+  backticked `[ ... ]` check, followed by `` fails there``, and holds KNOWN_INSTRUCTION; the check
+  has the shape SHELL_CHECK allows (`[ -n|-z "<expansion>" ]` tests joined by `&&`, each expansion
+  one of the two variables, bare, with an empty `:-` default or with whitespace removed by
+  `//[[:space:]]/`), and its exit status under `bash --noprofile --norc -c`, in an environment
+  holding only `PATH` and the case's variables, is 0 exactly on the own-environment cases;
+- the Queue rule's line holds QUEUE_BEFORE once, and the condition right after it, up to the next
+  comma, read with the closed vocabulary of WORDS (clauses joined by `or`), is true exactly on the
+  cases that are not the own environment;
+- the Never line starts with NEVER_BEFORE and ends with NEVER_INSTRUCTION, and the condition right
+  after NEVER_BEFORE, up to NEVER_AFTER, read the same way, is true exactly on those cases;
+- the reader refuses the clauses in REFUSED_CLAUSES, and SHELL_CHECK refuses the checks in
+  REFUSED_CHECKS; the run helper refuses one of them before bash starts, leaving no file behind;
+- `AGENTS.md` has, under `## Guardrails`, a line starting `- **Own project only:**` holding each
+  phrase of GUARDRAIL_PHRASES.
 
 Not checked:
-- any other wording on those lines, or the rest of the guardrail line's prose;
+- the wording on those lines outside the pinned phrases and the extracted condition, and the rest
+  of the guardrail line's prose;
+- WORDS reads `empty` as empty or whitespace only, which is wider than the word;
 - whitespace beyond the ASCII cases above, where Python's `str.strip` and bash's `[[:space:]]`
   may differ;
-- that the shell check is run, or run as the line says, by any agent or hook.
+- that the shell check is run, or run as the line says, by an agent or hook.
 """
 
 import os
@@ -41,12 +47,32 @@ AGENTS = REPO / "AGENTS.md"
 BASH = shutil.which("bash") or "bash"
 
 QUEUE_ANCHOR = "**An item that turns out to need GCP or the owner:**"
-NEVER_ANCHOR = "- Call GCP outside this lab's own environment"
-OWN_ENVIRONMENT = f"configures to set `{VARIABLE}` and no `{FOREIGN}`"
+QUEUE_BEFORE = "swap `ready` and `agent:claimed` for `needs-gcp` (the step calls GCP while "
+NEVER_BEFORE = "- Call GCP outside this lab's own environment: while "
+NEVER_AFTER = ", where"
+NEVER_INSTRUCTION = "label the item `needs-gcp` instead."
+KNOWN_INSTRUCTION = "make no GCP call and label the item `needs-gcp`"
+GUARDRAIL_PHRASES = (
+    f"configures to set `{VARIABLE}` and no `{FOREIGN}`",
+    "is made only in this lab's own environment",
+    "no GCP call is made",
+)
 
 _EXPANSION = rf'"\$\{{(?:{VARIABLE}|{FOREIGN})(?::-|//\[\[:space:\]\]/)?\}}"'
 _TEST = rf"\[ -[nz] {_EXPANSION} \]"
 SHELL_CHECK = re.compile(rf"{_TEST}(?: && {_TEST})*")
+
+_LAB = f'[ -n "${{{VARIABLE}//[[:space:]]/}}" ]'
+_NO_FOREIGN = f'[ -z "${{{FOREIGN}:-}}" ]'
+REFUSED_CHECKS = {
+    "semicolon": f"{_LAB} && {_NO_FOREIGN}; true",
+    "and command": f"{_LAB} && {_NO_FOREIGN} && true",
+    "or command": f"{_LAB} || true",
+    "command substitution": f'{_LAB} && [ -z "${{{FOREIGN}:-}}$(true)" ]',
+    "backtick": f'{_LAB} && [ -z "`true`" ]',
+    "another variable": f'{_LAB} && [ -z "${{HOME:-}}" ]',
+    "newline and command": f"{_LAB} && {_NO_FOREIGN}\ntrue",
+}
 
 Env = Mapping[str, str]
 WORDS: dict[tuple[str, str], Callable[[Env], bool]] = {
@@ -58,6 +84,11 @@ WORDS: dict[tuple[str, str], Callable[[Env], bool]] = {
     (FOREIGN, "empty"): lambda env: env.get(FOREIGN) == "",
 }
 _CLAUSE = re.compile(rf"(?:(?:a )?`({VARIABLE}|{FOREIGN})` is )?(unset|empty|set)")
+REFUSED_CLAUSES = {
+    "not set": f"`{VARIABLE}` is not set",
+    "and": f"`{VARIABLE}` is unset and a `{FOREIGN}` is set",
+    "mode": "the Digest says `Mode: offline`",
+}
 
 LAB_VALUES: tuple[str | None, ...] = (None, "", " ", "\t", "\n", "the-lab")
 FOREIGN_VALUES: tuple[str | None, ...] = (None, "", " ", "another-lab")
@@ -96,37 +127,63 @@ def line_starting(lines: list[str], anchor: str, where: str) -> str:
     return found[0]
 
 
+def between(line: str, before: str, after: str) -> str:
+    """The text right after the one `before` on the line, up to the first `after` past it."""
+    assert line.count(before) == 1, f"expected {before!r} once, on: {line}"
+    rest = line.split(before, 1)[1]
+    assert after in rest, f"expected {after!r} after {before!r}, on: {line}"
+    return rest.split(after, 1)[0]
+
+
 def known_condition_check() -> str:
     lines = section(AUTOPILOT, "## Known conditions")
     named = [line for line in lines if "GCP credential" in line]
     assert len(named) == 1, f"expected one known condition naming the GCP credential: {named}"
-    checks = [span for span in re.findall(r"`([^`]*)`", named[0]) if span.startswith("[")]
-    assert len(checks) == 1, f"expected one backticked `[ ... ]` check: {named[0]}"
+    line = named[0]
+    checks = [span for span in re.findall(r"`([^`]*)`", line) if span.startswith("[")]
+    assert len(checks) == 1, f"expected one backticked `[ ... ]` check: {line}"
+    assert f"`{checks[0]}` fails there" in line, (
+        f"the check is not followed by `fails there`: {line}"
+    )
+    assert KNOWN_INSTRUCTION in line, f"expected {KNOWN_INSTRUCTION!r}, on: {line}"
     return checks[0]
 
 
-def condition(line: str) -> Callable[[Env], bool]:
-    """The clause after the line's first `while`, up to the next comma, read with WORDS."""
-    found = re.search(r"\bwhile ([^,]*),", line)
-    assert found, f"no `while ...,` condition on: {line}"
+def run_check(check: str, env: Env) -> subprocess.CompletedProcess[str]:
+    """Runs `check` in bash with only PATH and `env`, after refusing a check SHELL_CHECK does not
+    allow."""
+    assert SHELL_CHECK.fullmatch(check), f"refusing to run a check of another shape: {check!r}"
+    return subprocess.run(
+        [BASH, "--noprofile", "--norc", "-c", check],
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **env},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def read_condition(text: str, where: str) -> Callable[[Env], bool]:
+    """`text`, clauses joined by ` or `, read with WORDS; a clause outside them fails."""
     predicates: list[Callable[[Env], bool]] = []
     subject: str | None = None
-    for clause in found.group(1).split(" or "):
+    for clause in text.split(" or "):
         read = _CLAUSE.fullmatch(clause)
-        assert read, f"clause {clause!r} is outside the vocabulary, on: {line}"
+        assert read, f"clause {clause!r} is outside the vocabulary, on: {where}"
         subject = read.group(1) or subject
-        assert subject, f"clause {clause!r} names no variable, on: {line}"
+        assert subject, f"clause {clause!r} names no variable, on: {where}"
         predicates.append(WORDS[(subject, read.group(2))])
     return lambda env: any(predicate(env) for predicate in predicates)
 
 
-def queue_line() -> str:
-    lines = AUTOPILOT.read_text().splitlines()
-    return line_starting(lines, QUEUE_ANCHOR, "docs/agents/autopilot.md")
+def queue_condition() -> Callable[[Env], bool]:
+    line = line_starting(AUTOPILOT.read_text().splitlines(), QUEUE_ANCHOR, "autopilot.md")
+    return read_condition(between(line, QUEUE_BEFORE, ","), line)
 
 
-def never_line() -> str:
-    return line_starting(section(AUTOPILOT, "## Never"), NEVER_ANCHOR, "autopilot.md, ## Never")
+def never_condition() -> Callable[[Env], bool]:
+    line = line_starting(section(AUTOPILOT, "## Never"), NEVER_BEFORE, "autopilot.md, ## Never")
+    assert line.endswith(NEVER_INSTRUCTION), f"expected the end {NEVER_INSTRUCTION!r}, on: {line}"
+    return read_condition(between(line, NEVER_BEFORE, NEVER_AFTER), line)
 
 
 def test_the_cases_hold_own_and_foreign_environments() -> None:
@@ -140,32 +197,44 @@ def test_the_known_condition_check_has_the_allowed_shape() -> None:
     assert SHELL_CHECK.fullmatch(check), f"the known condition's check is not allowed: {check!r}"
 
 
+@pytest.mark.parametrize("check", REFUSED_CHECKS.values(), ids=REFUSED_CHECKS.keys())
+def test_the_allowed_shape_refuses_more_than_the_tests(check: str) -> None:
+    assert not SHELL_CHECK.fullmatch(check)
+
+
+def test_a_check_of_another_shape_is_refused_before_bash_runs(tmp_path: Path) -> None:
+    marker = tmp_path / "ran"
+    with pytest.raises(AssertionError, match="refusing to run"):
+        run_check(f"{_LAB} && touch {marker}", {VARIABLE: "the-lab"})
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize("env", CASES, ids=repr)
 def test_the_known_condition_check_passes_only_in_the_own_environment(env: dict[str, str]) -> None:
-    check = known_condition_check()
-    assert SHELL_CHECK.fullmatch(check), f"refusing to run a check of another shape: {check!r}"
-    ran = subprocess.run(
-        [BASH, "--noprofile", "--norc", "-c", check],
-        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **env},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    ran = run_check(known_condition_check(), env)
     assert ran.returncode in (0, 1), ran.stderr
     assert (ran.returncode == 0) == own(env)
 
 
-@pytest.mark.parametrize("line", [queue_line, never_line], ids=["queue rule", "never line"])
+@pytest.mark.parametrize(
+    "condition", [queue_condition, never_condition], ids=["queue rule", "never line"]
+)
 @pytest.mark.parametrize("env", CASES, ids=repr)
 def test_the_written_condition_is_the_foreign_environment(
-    line: Callable[[], str], env: dict[str, str]
+    condition: Callable[[], Callable[[Env], bool]], env: dict[str, str]
 ) -> None:
-    written = line()
-    assert condition(written)(env) == (not own(env)), f"disagrees with gcp_project on: {written}"
+    assert condition()(env) == (not own(env))
+
+
+@pytest.mark.parametrize("text", REFUSED_CLAUSES.values(), ids=REFUSED_CLAUSES.keys())
+def test_the_reader_refuses_a_clause_outside_the_vocabulary(text: str) -> None:
+    with pytest.raises(AssertionError, match="outside the vocabulary"):
+        read_condition(text, "a probe")
 
 
 def test_the_guardrail_names_the_own_environment() -> None:
     guardrail = line_starting(
         section(AGENTS, "## Guardrails"), "- **Own project only:**", "AGENTS.md, ## Guardrails"
     )
-    assert OWN_ENVIRONMENT in guardrail
+    missing = [phrase for phrase in GUARDRAIL_PHRASES if phrase not in guardrail]
+    assert missing == [], f"the own-project guardrail lacks {missing}"
