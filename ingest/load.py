@@ -137,7 +137,7 @@ def landed_names() -> frozenset[str]:
 
 def table_name(name: str, landed: frozenset[str] | None = None) -> str:
     """The `landed` table a landed file loads into."""
-    if not LANDED_NAME.match(name) or name not in (landed or landed_names()):
+    if not LANDED_NAME.fullmatch(name) or name not in (landed or landed_names()):
         raise LoadError(f"{name!r} is not a landed file's name")
     return name.replace("-", "_")
 

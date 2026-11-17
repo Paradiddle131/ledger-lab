@@ -32,6 +32,8 @@ from ingest.load import (
     DATASET,
     LOCATION_VARIABLE,
     MAX_BYTES_BILLED,
+    SLICE,
+    SLICES,
     STORAGE_CAP,
     Digest,
     LoadError,
@@ -39,6 +41,7 @@ from ingest.load import (
     counts,
     digest,
     distinct_values,
+    duckdb_digest_sql,
     free_regions,
     lab,
     landed_names,
@@ -297,6 +300,24 @@ def test_the_landed_names_are_the_seven_files_the_landing_steps_write() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "name", ["ECB-rates", "ecb_rates", "x-", "-x", "a--b", "ecb rates", "ecb-rates\n", ""]
+)
+def test_a_name_off_the_landed_pattern_is_refused_though_the_landed_names_hold_it(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pattern's own refusal: each name here is put in the landed names, so only the pattern
+    refuses it."""
+    with pytest.raises(LoadError, match="not a landed file"):
+        table_name(name, frozenset({name}))
+    monkeypatch.setattr("ingest.load.landed_names", lambda: frozenset({name}))
+    bq, fs = Bq(), bucket_holding(*LANDED)
+    with pytest.raises(LoadError, match="not a landed file"):
+        load([name], ENV, bq, fs)
+    assert bq.calls == []
+    assert not locked(fs)
+
+
 def test_a_file_the_bucket_does_not_hold_is_refused_before_any_load() -> None:
     bq, fs = Bq(), bucket_holding("chicago-contracts")
     with pytest.raises(LoadError, match="holds no ecb-rates"):
@@ -364,6 +385,22 @@ def test_an_interrupted_load_releases_the_lock() -> None:
     with pytest.raises(KeyboardInterrupt):
         load(LANDED, ENV, bq, fs)
     assert not locked(fs)
+
+
+def test_a_lock_the_load_cannot_release_is_reported_with_how_to_delete_it() -> None:
+    bq, fs = Bq(), bucket_holding(*LANDED)
+    remove = fs.rm_file
+
+    def refuse_the_lock(path: str, *args: Any, **kwargs: Any) -> Any:
+        if path.endswith(f"/{LOCK}"):
+            raise PermissionError(path)
+        return remove(path, *args, **kwargs)
+
+    fs.rm_file = refuse_the_lock  # type: ignore[method-assign]
+    with pytest.raises(LoadError, match=f"delete {re.escape(LOCK)} by hand once nothing runs$"):
+        load(LANDED, ENV, bq, fs)
+    assert bq.verbs().count("load") == 2
+    assert locked(fs)
 
 
 def test_no_name_twice_and_at_least_one() -> None:
@@ -465,6 +502,34 @@ def test_a_run_that_starts_above_the_storage_cap_loads_nothing() -> None:
     assert not locked(fs)
 
 
+@pytest.mark.parametrize(
+    ("earlier", "loaded"),
+    [(STORAGE_CAP, 0), (0, STORAGE_CAP)],
+    ids=["an earlier table at the cap and an empty load", "one empty table at the cap"],
+)
+def test_a_zero_row_table_and_a_landed_dataset_at_exactly_the_cap_are_accepted(
+    earlier: int, loaded: int
+) -> None:
+    """The landed dataset holds exactly `STORAGE_CAP` bytes at each check, the one before the load
+    in the first case and the one after it in both, and the loaded table holds no row."""
+    bq, fs = Bq(rows=0), bucket_holding("chicago-contracts")
+    bq.listed = {"from_an_earlier_run"} if earlier else set()
+
+    def run(command: Sequence[str]) -> str:
+        out = bq(command)
+        if verb_of(command) == "show":
+            answer = json.loads(out)
+            mine = answer["tableReference"]["tableId"] == "chicago_contracts"
+            answer["numBytes"] = str(loaded if mine else earlier)
+            return json.dumps(answer)
+        return out
+
+    (table,) = load(["chicago-contracts"], ENV, run, fs)
+    assert (table.rows, table.bytes) == (0, loaded)
+    assert bq.verbs().count("load") == 1
+    assert not locked(fs)
+
+
 def test_a_negative_byte_count_cancels_no_other_tables_bytes() -> None:
     """An earlier table holds three quarters of the cap, and the table this run loads reports a
     negative size at each `bq show`: the load is refused at the first such answer, before a
@@ -562,6 +627,25 @@ def test_a_table_answer_of_another_shape_project_dataset_or_table_is_refused(ans
         load(["chicago-contracts"], ENV, lambda c: answer, bucket_holding("chicago-contracts"))
 
 
+def test_a_table_answer_with_no_project_is_taken_as_the_lab_projects() -> None:
+    """`bq show` is asked for `<lab project>:landed.<table>`; an answer that names no project is
+    read as that table, and one that names another project is refused (above)."""
+    answer = shown(datasetId=DATASET, tableId="chicago_contracts")
+    assert table_of("chicago-contracts", answer, PROJECT).table == "landed.chicago_contracts"
+    bq = Bq()
+
+    def run(command: Sequence[str]) -> str:
+        out = bq(command)
+        if verb_of(command) == "show":
+            answer = json.loads(out)
+            del answer["tableReference"]["projectId"]
+            return json.dumps(answer)
+        return out
+
+    tables = load(["chicago-contracts"], ENV, run, bucket_holding("chicago-contracts"))
+    assert [t.table for t in tables] == ["landed.chicago_contracts"]
+
+
 def counted(rows: Any, size: Any) -> str:
     """A `bq show` answer for `landed.chicago_contracts` with these JSON values as its counts."""
     return json.dumps(
@@ -640,6 +724,21 @@ def test_the_free_regions_are_the_ones_the_lab_projects_definitions_allow() -> N
     condition = str(region["validation"][0]["condition"])
     assert set(free_regions()) == set(re.findall(r"us-[a-z]+[0-9]", condition))
     assert free_regions() == ("us-west1", "us-central1", "us-east1")
+
+
+def test_definitions_with_no_region_validation_refuse_every_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    variables = tmp_path / "variables.tf"
+    variables.write_text('variable "region" {\n  type    = string\n  default = "us-central1"\n}\n')
+    monkeypatch.setattr("ingest.load.VARIABLES_TF", variables)
+    with pytest.raises(LoadError, match="^no region validation in variables.tf$"):
+        free_regions()
+    bq, fs = Bq(), bucket_holding(*LANDED)
+    with pytest.raises(LoadError, match="^no region validation in variables.tf$"):
+        load(LANDED, ENV, bq, fs)
+    assert bq.calls == []
+    assert not locked(fs)
 
 
 # The queries.
@@ -810,6 +909,29 @@ def test_the_bigquery_digest_is_the_local_digest_of_the_same_rows(tmp_path: Path
 def test_the_digest_holds_no_column_type_without_a_rule() -> None:
     with pytest.raises(LoadError, match="no digest rule for a FLOAT column"):
         bigquery_digest_sql("`t`", [("`x`", "FLOAT")])
+
+
+@pytest.mark.parametrize("kind", ["DOUBLE", "DATE", "DECIMAL(9,2)"])
+def test_the_local_digest_holds_no_column_type_without_a_rule(tmp_path: Path, kind: str) -> None:
+    with pytest.raises(LoadError, match=re.escape(f"no digest rule for a {kind} column")):
+        duckdb_digest_sql("t", [('"x"', kind)])
+    path = tmp_path / "typed"
+    con = duckdb.connect()
+    con.execute(f"CREATE TABLE t (vendor_name VARCHAR, x {kind})")
+    con.execute(f"COPY t TO '{path}' (FORMAT parquet)")
+    with pytest.raises(LoadError, match=re.escape(f"no digest rule for a {kind} column")):
+        local_digest(path)
+
+
+def test_the_digest_cuts_a_row_hash_into_eight_slices_of_eight_hex_digits(tmp_path: Path) -> None:
+    """The 64 hex digits of a SHA-256 cut whole into eight 32-bit slices, each a sum over a million
+    rows below 2**52, and each engine's digest gives eight sums."""
+    assert (SLICES, SLICE) == (8, 8)
+    assert SLICES * SLICE == 64
+    assert 1_000_000 * (16**SLICE - 1) < 2**52
+    assert len(local_digest(landed_table(tmp_path, ROWS)).sums) == 8
+    for sql in (bigquery_digest_sql("`t`", []), duckdb_digest_sql("t", [])):
+        assert re.findall(r"AS s(\d+)", sql) == [str(i) for i in range(8)]
 
 
 def test_a_local_digest_answered_with_no_row_is_refused(
