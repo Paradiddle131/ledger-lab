@@ -1242,6 +1242,7 @@ def test_the_lab_env_holds_only_the_variables_read_and_shows_no_value() -> None:
 # `LAB_ENV_REGRESSION`, set only by the probe below, names a regression the child applies to
 # `lab_env` or `LabEnv` before the call; a name it does not know stops it before it prints a token.
 LAB_ENV_CHILD = """
+raise SystemExit(0)
 import os
 import secrets
 import sys
