@@ -83,6 +83,7 @@ It compares with the `origin/main` last fetched, which it cannot check offline: 
 `make sync` also puts the Data Contract CLI's DuckDB engine (the lock's `contract` group) in uv's cache; the contract tests and `make contract-test`, which runs `datacontract test` over a local dbt build, use it offline on DuckDB 1.5 over a copy of the build in that version's storage format, and the tests skip, saying so, when it is not cached.
 
 The dbt models build on DuckDB in the session by default, reading the landed files in place under `LEDGER_LAB_LANDING`; setting `LEDGER_LAB_GCP_PROJECT` (with `uv sync --group bigquery`) in a session that carries no `GCP_PROJECT` moves them to BigQuery.
+The BigQuery target needs `LEDGER_LAB_BQ_LOCATION` set to one of the free-tier regions `platform/gcp/variables.tf` allows (`us-west1`, `us-central1`, `us-east1`, in lower case; surrounding whitespace is trimmed); unset, empty or any other value, `US` included, makes dbt refuse the profile when it reads it, before any connection.
 Run from the repository's root, a DuckDB build writes its database to `models/target/ledger_lab.duckdb`, in the project's target folder, which dbt makes when it parses the project, so a fresh clone needs no folder made first; `LEDGER_LAB_DUCKDB_PATH` names another file, in a folder that must exist, and a build that moves the target folder (`--target-path`, `DBT_TARGET_PATH`) needs it:
 
 ```bash

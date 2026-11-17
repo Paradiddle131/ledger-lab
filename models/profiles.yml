@@ -8,10 +8,14 @@
 # every job is capped by maximum_bytes_billed; every model and seed is built in one dataset,
 # `intermediate`, which platform/gcp/warehouse.tf declares. In such a session an explicit
 # `--target bigquery` names a method dbt refuses when it reads the profile, before any
-# connection. Its credential is Application Default Credentials (`oauth`), or, while
-# CLOUDSDK_AUTH_ACCESS_TOKEN is set, that access token (`oauth-secrets`), the one gcloud and bq
-# send, which a session whose proxy injects the credential holds as a stand-in the proxy
-# replaces; the token is not refreshed.
+# connection. Outside such a session, while LEDGER_LAB_BQ_LOCATION, with surrounding whitespace
+# trimmed, is not exactly one of the free-tier regions listed in the method line (lower case; unset
+# and empty included), the method is another one dbt refuses at the same point; the location dbt
+# sends is that trimmed value. A test holds the listed regions equal to the ones the region
+# validation in platform/gcp/variables.tf allows; dbt does not read that file. Its credential
+# is Application Default Credentials (`oauth`), or, while CLOUDSDK_AUTH_ACCESS_TOKEN is set, that
+# access token (`oauth-secrets`), the one gcloud and bq send, which a session whose proxy injects
+# the credential holds as a stand-in the proxy replaces; the token is not refreshed.
 ledger_lab:
   target: "{{ 'bigquery' if env_var('LEDGER_LAB_GCP_PROJECT', '') | trim and not env_var('GCP_PROJECT', '') else 'local' }}"
   outputs:
@@ -21,10 +25,10 @@ ledger_lab:
       threads: 4
     bigquery:
       type: bigquery
-      method: "{{ 'refused-in-another-labs-session' if env_var('GCP_PROJECT', '') else ('oauth-secrets' if env_var('CLOUDSDK_AUTH_ACCESS_TOKEN', '') else 'oauth') }}"
+      method: "{{ 'refused-in-another-labs-session' if env_var('GCP_PROJECT', '') else ('refused-outside-the-free-tier-regions' if env_var('LEDGER_LAB_BQ_LOCATION', '') | trim not in ['us-west1', 'us-central1', 'us-east1'] else ('oauth-secrets' if env_var('CLOUDSDK_AUTH_ACCESS_TOKEN', '') else 'oauth')) }}"
       token: "{{ env_var('CLOUDSDK_AUTH_ACCESS_TOKEN', '') }}"
       project: "{{ env_var('LEDGER_LAB_GCP_PROJECT', '') }}"
       dataset: intermediate
-      location: "{{ env_var('LEDGER_LAB_BQ_LOCATION', 'US') }}"
+      location: "{{ env_var('LEDGER_LAB_BQ_LOCATION', '') | trim }}"
       maximum_bytes_billed: 1000000000
       threads: 4
