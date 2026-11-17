@@ -1,5 +1,6 @@
 models:
   - name: payments
+    config: {dataset: payments}
     description: >
       The payments data product: one row per payment of every entity, in the entity's own
       currency, with the contract it was made against and that contract's award after revisions.

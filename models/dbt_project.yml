@@ -54,5 +54,6 @@ models:
       +materialized: table
       group_totals:
         +schema: group_totals
+        +project: another-project
     reconciliations:
       +materialized: table
