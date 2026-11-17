@@ -6,21 +6,26 @@ of it is judged here instead: this file parses it by the rules `tier.sh` states 
 PINNED (`ingest/load.py`, `ingest/bucket.py`, `access/personas.yaml`, `platform/cost_check.py`).
 
 Checked:
-- `REVIEW.md` parses with none of the refusals `tier.sh` makes (each makes `tier.sh` warn and
-  count every path as sensitive): a second `## Sensitive` or `## Routine`, a non-blank line
-  under either that is not a `- ` or `* ` item, `; lenses:` on a `## Routine` item, a backtick
-  or `;` in the reason after ` — `, an item that is not backticked globs (its backticks removed,
-  say), and a glob with a leading or trailing space, a leading `/` or a `\\`;
+- `REVIEW.md` parses: `parse` raises where `tier.sh` would warn and count every path as
+  sensitive, and the test fails with the reason;
 - each path in PINNED gets exactly its pinned lenses: the union of the `; lenses:` of every
   `## Sensitive` item with a glob that matches it, as `tier.sh` computes it; so a pinned path's
   glob changed to match nothing, its item's lenses clause dropped, or a lens removed from it,
   turns it red when no other item matching that path gives the same lenses;
-- `parse` refuses each of those refusals on a one-line example (REFUSED), and reads a glob
-  without a slash at any depth, `**` across folders, and `*` and `?` within one folder;
-- where the review skill's `tier.sh` is found (`$LOADOUT/skills/review/scripts/tier.sh`;
-  `make test` passes the Makefile's `LOADOUT`), run on a scratch repository whose base holds
-  the text as its `REVIEW.md`: for the working tree's `REVIEW.md` it prints `sensitive`, each
-  pinned path with its pinned lenses, and no warning; for each REFUSED text it warns that it
+- `parse` refuses each text in REFUSED: a second `## Sensitive` or `## Routine`; a non-blank
+  line under either that is not a `- ` or `* ` item; `; lenses:` on a `## Routine` item; a
+  lenses clause that does not end the line; a backtick or `;` in the reason after ` — `; an
+  item with no backticked glob, or with other text beside its globs; and a glob with a leading
+  or trailing space, a leading `/` or a `\\`;
+- `parse` and `lenses_for` read the examples in the reading test as the stated rules say: only
+  a level-two `## Sensitive` heading opens the list, `- ` and `* ` items, a reason and a lenses
+  clause, an item with no lenses; a glob without a slash matches the file name at the root and
+  below, `**` spans folders, `*` and `?` stay within one, and a glob matches the whole path;
+- where the review skill's `tier.sh` is found (`$LOADOUT/skills/review/scripts/tier.sh`, with
+  a relative `LOADOUT` read from the repository root; `make test` passes the Makefile's
+  `LOADOUT`), run on a scratch repository whose base holds the text as its `REVIEW.md`: for the
+  working tree's `REVIEW.md` it prints `sensitive`, each pinned path with its pinned lenses, and
+  no warning, also when `LOADOUT` is given relative; for each REFUSED text it warns that it
   cannot parse it. With no `LOADOUT`, or no `tier.sh` under it, these cross-checks are reported
   as skipped, with the reason.
 
@@ -61,7 +66,7 @@ PINNED = {
 }
 
 
-# One-line REVIEW.md texts, one per refusal of tier.sh's parser.
+# Short REVIEW.md texts, each one that tier.sh's parser refuses.
 REFUSED = [
     "## Sensitive\n- `a`\n## Sensitive\n- `b`\n",
     "## Routine\n- `a`\n## Routine\n- `b`\n",
@@ -74,6 +79,10 @@ REFUSED = [
     "## Sensitive\n- ` a`\n",
     "## Sensitive\n- `/a`\n",
     "## Sensitive\n- `a\\b`\n",
+    "## Sensitive\n- `a `\n",
+    "## Routine\nprose\n",
+    "## Sensitive\n- `x.py`; lenses: leak-hunter — why\n",
+    "## Sensitive\n- ; lenses: leak-hunter\n",
 ]
 
 
@@ -175,13 +184,16 @@ def test_the_parser_refuses_what_tier_sh_refuses(text: str) -> None:
         parse(text)
 
 
-def test_the_parser_reads_items_globs_and_lenses_as_tier_sh_does() -> None:
+def test_the_parser_reads_items_globs_and_lenses_by_the_stated_rules() -> None:
     items = parse(
-        "# Review\nprose\n## Sensitive\n"
+        "# Review\nprose\n# Sensitive\n- `top.py`; lenses: leak-hunter\n"
+        "### Sensitive\n- `deeper.py`; lenses: leak-hunter\n"
+        "## Sensitive\n"
         "- `x.py`, `src/**`; lenses: leak-hunter, control-prober\n"
         "- `one/*.py` — a reason; lenses: claims-auditor\n"
         "- `two/a?c.py`; lenses: guardrail-reviewer\n"
         "- `three/**`\n"
+        "* `star.py`; lenses: claims-auditor\n"
         "## Other\nprose\n"
         "## Routine\n- `docs/**` — prose\n"
     )
@@ -190,8 +202,15 @@ def test_the_parser_reads_items_globs_and_lenses_as_tier_sh_does() -> None:
         (["one/*.py"], {"claims-auditor"}),
         (["two/a?c.py"], {"guardrail-reviewer"}),
         (["three/**"], set()),
+        (["star.py"], {"claims-auditor"}),
     ]
+    assert lenses_for("x.py", items) == {"leak-hunter", "control-prober"}
     assert lenses_for("deep/down/x.py", items) == {"leak-hunter", "control-prober"}
+    assert lenses_for("x.pyc", items) == set()
+    assert lenses_for("deep/x.py.bak", items) == set()
+    assert lenses_for("top.py", items) == set()
+    assert lenses_for("deeper.py", items) == set()
+    assert lenses_for("a/star.py", items) == {"claims-auditor"}
     assert lenses_for("src/a/b/c.txt", items) == {"leak-hunter", "control-prober"}
     assert lenses_for("one/a.py", items) == {"claims-auditor"}
     assert lenses_for("one/a/b.py", items) == set()
@@ -205,14 +224,21 @@ def test_the_parser_reads_items_globs_and_lenses_as_tier_sh_does() -> None:
 def tier_sh(tmp_path: Path, review: str, paths: list[str]) -> subprocess.CompletedProcess[str]:
     """Runs tier.sh on a scratch repository: a base holding `review` as REVIEW.md, then `paths`."""
     loadout = os.environ.get("LOADOUT", "")
-    tier = Path(loadout) / "skills" / "review" / "scripts" / "tier.sh"
+    tier = (REPO / loadout / "skills" / "review" / "scripts" / "tier.sh").resolve()
     if not loadout or not tier.is_file():
         pytest.skip("no review skill's tier.sh under $LOADOUT: the cross-check with it did not run")
 
     def git(*args: str) -> None:
         subprocess.run([GIT, "-C", str(tmp_path), *args], capture_output=True, check=True)
 
-    identity = ("-c", "user.name=review-routing-test", "-c", "user.email=")
+    identity = (
+        "-c",
+        "user.name=review-routing-test",
+        "-c",
+        "user.email=",
+        "-c",
+        "commit.gpgsign=false",
+    )
     git("init", "--quiet", "--initial-branch=base")
     (tmp_path / "REVIEW.md").write_text(review)
     git("add", "REVIEW.md")
@@ -253,3 +279,25 @@ def test_tier_sh_refuses_each_text_the_parser_refuses(tmp_path: Path, text: str)
     done = tier_sh(tmp_path, text, ["src/changed.py"])
     assert done.returncode == 0, done.stderr
     assert "cannot be parsed" in done.stderr, done.stderr
+
+
+def test_tier_sh_cross_check_reads_a_loadout_relative_to_the_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loadout = os.environ.get("LOADOUT", "")
+    if not loadout or not (REPO / loadout / "skills" / "review" / "scripts" / "tier.sh").is_file():
+        pytest.skip("no review skill's tier.sh under $LOADOUT: the cross-check with it did not run")
+    # The Makefile's fallback, `../loadout`, is relative to the repository root.
+    monkeypatch.setenv("LOADOUT", os.path.relpath((REPO / loadout).resolve(), REPO))
+    assert not Path(os.environ["LOADOUT"]).is_absolute()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    try:
+        done = tier_sh(scratch, REVIEW.read_text(), sorted(PINNED))
+    except pytest.skip.Exception as skipped:
+        pytest.fail(f"the cross-check skipped with a relative LOADOUT: {skipped}")
+    assert done.returncode == 0, done.stderr
+    assert done.stderr == ""
