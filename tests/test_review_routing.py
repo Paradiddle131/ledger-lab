@@ -261,7 +261,10 @@ def tier_sh(tmp_path: Path, review: str, paths: list[str]) -> subprocess.Complet
 def test_tier_sh_prints_the_pinned_lenses_for_the_working_trees_review_md(
     tmp_path: Path,
 ) -> None:
-    done = tier_sh(tmp_path, REVIEW.read_text(), sorted(PINNED))
+    assert_prints_the_pinned_lenses(tier_sh(tmp_path, REVIEW.read_text(), sorted(PINNED)))
+
+
+def assert_prints_the_pinned_lenses(done: subprocess.CompletedProcess[str]) -> None:
     assert done.returncode == 0, done.stderr
     assert done.stderr == ""
     lines = done.stdout.splitlines()
@@ -299,5 +302,4 @@ def test_tier_sh_cross_check_reads_a_loadout_relative_to_the_repository(
         done = tier_sh(scratch, REVIEW.read_text(), sorted(PINNED))
     except pytest.skip.Exception as skipped:
         pytest.fail(f"the cross-check skipped with a relative LOADOUT: {skipped}")
-    assert done.returncode == 0, done.stderr
-    assert done.stderr == ""
+    assert_prints_the_pinned_lenses(done)
