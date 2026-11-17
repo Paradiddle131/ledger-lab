@@ -123,6 +123,59 @@ def test_the_clis_own_settings_do_not_reach_the_engine(
     assert engine.envs[0]["LEDGER_LAB_BQ_LOCATION"] == "us-central1"
 
 
+# Names the engine must not be handed: the individuals' hash key, another lab's project, the CLI's
+# settings under each prefix it reads, and a name the allowlist has never heard of.
+DROPPED = [
+    "LEDGER_LAB_HASH_KEY",
+    "GCP_PROJECT",
+    "DATACONTRACT_BIGQUERY_PROJECT",
+    "ENTROPY_DATA_API_KEY",
+    "DATAMESH_MANAGER_API_KEY",
+    "SOME_UNKNOWN_NAME",
+]
+# Names the engine needs to fetch the CLI through a proxy and open the lab's connection, written
+# out here, not read from `warehouse.ENGINE_NAMES`, so a change to that list shows.
+KEPT = [
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "UV",
+    "UV_CACHE_DIR",
+    "UV_SYSTEM_CERTS",
+    "XDG_CACHE_HOME",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "NO_PROXY",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "LEDGER_LAB_GCP_PROJECT",
+    "LEDGER_LAB_BQ_LOCATION",
+    "CLOUDSDK_AUTH_ACCESS_TOKEN",
+]
+
+
+@pytest.mark.parametrize("name", DROPPED)
+def test_the_engine_environment_drops_a_name_outside_the_allowlist(name: str) -> None:
+    assert name not in warehouse.engine_environment({name: "stand-in", "PATH": "/bin"})
+
+
+@pytest.mark.parametrize("name", KEPT)
+def test_the_engine_environment_keeps_what_uv_and_the_connection_need(name: str) -> None:
+    assert warehouse.engine_environment({name: "stand-in"}) == {name: "stand-in"}
+
+
+def test_the_hash_key_does_not_reach_the_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = start(monkeypatch, ENV | {"LEDGER_LAB_HASH_KEY": "an-invented-key"})
+    assert warehouse.main() == 0
+    assert "LEDGER_LAB_HASH_KEY" not in engine.envs[0]
+    assert "an-invented-key" not in engine.envs[0].values()
+    assert engine.envs[0]["LEDGER_LAB_GCP_PROJECT"] == "example-project"
+
+
 def test_the_project_id_in_the_engines_output_is_masked(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -159,14 +212,27 @@ class Connection:
         self.storage_client = object()
 
 
-class Settings:
-    """The CLI's settings: `get_bigquery_*` getters, each answering its value or None."""
+# The CLI's BigQuery settings as datacontract-cli 1.2.9 names them, written out here, not read
+# from `warehouse.GETTERS`, so a change to that list shows.
+BIGQUERY_SETTINGS = [
+    "location",
+    "dataset",
+    "billing_project",
+    "project",
+    "account_info_json_path",
+    "impersonation_account",
+    "kms_key_name",
+]
 
-    def __init__(self, **values: str) -> None:
-        for name in ("location", "dataset", "billing_project", "project", "kms_key_name"):
-            setattr(self, f"get_bigquery_{name}", lambda name=name: values.get(name))
-        for name in ("account_info_json_path", "impersonation_account"):
-            setattr(self, f"get_bigquery_{name}", lambda name=name: values.get(name))
+
+class Settings:
+    """The CLI's settings: `get_bigquery_*` getters, each answering its value or None, less any
+    named in `without`, plus any named in `extra`."""
+
+    def __init__(self, without: tuple[str, ...] = (), extra: tuple[str, ...] = (), **values: str):
+        for name in [*BIGQUERY_SETTINGS, *extra]:
+            if name not in without:
+                setattr(self, f"get_bigquery_{name}", lambda name=name: values.get(name))
 
 
 def run_engine(
@@ -225,18 +291,35 @@ def test_the_engine_refuses_a_copy_that_names_a_project(monkeypatch: pytest.Monk
         run_engine(monkeypatch, "another-lab", Settings())
 
 
-@pytest.mark.parametrize(
-    "setting",
-    [
-        "location",
-        "dataset",
-        "billing_project",
-        "project",
-        "account_info_json_path",
-        "impersonation_account",
-        "kms_key_name",
-    ],
-)
+def test_the_engine_checks_the_seven_getters_of_the_pinned_cli() -> None:
+    assert sorted(warehouse.GETTERS) == sorted(f"get_bigquery_{s}" for s in BIGQUERY_SETTINGS)
+
+
+@pytest.mark.parametrize("setting", BIGQUERY_SETTINGS)
+def test_the_engine_refuses_settings_that_lack_a_getter(
+    monkeypatch: pytest.MonkeyPatch, setting: str
+) -> None:
+    """A CLI that renamed or dropped one of the getters stops the run before any connection."""
+    with pytest.raises(RuntimeError, match=f"lack the getters.*get_bigquery_{setting}"):
+        run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, Settings(without=(setting,)))
+
+
+def test_the_engine_refuses_settings_with_no_getters(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(RuntimeError, match="lack the getters"):
+        run_engine(
+            monkeypatch, warehouse.PROJECT_PLACEHOLDER, Settings(without=tuple(BIGQUERY_SETTINGS))
+        )
+
+
+def test_the_engine_refuses_a_getter_it_does_not_name_that_holds_a_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(extra=("region",), region="elsewhere")
+    with pytest.raises(RuntimeError, match="get_bigquery_region"):
+        run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, settings)
+
+
+@pytest.mark.parametrize("setting", BIGQUERY_SETTINGS)
 def test_the_engine_refuses_a_cli_setting_that_overrides_the_copy(
     monkeypatch: pytest.MonkeyPatch, setting: str
 ) -> None:
