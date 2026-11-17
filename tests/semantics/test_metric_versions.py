@@ -782,7 +782,94 @@ def project_macro(text: str) -> Edit:
     return lambda files: files.update({PLACE_MACRO: text})
 
 
+PAYMENTS_SQL = "models/models/marts/payments/payments.sql"
+
+
+def payments_on(condition: str) -> Edit:
+    """The payments mart moved to its product's dataset by a `config()` call that runs only when
+    `condition` holds, which no local target meets."""
+    call = f"{{% if {condition} %}}{{{{ config(schema='payments') }}}}{{% endif %}}\n"
+    return lambda files: files.update({PAYMENTS_SQL: call + files[PAYMENTS_SQL]})
+
+
+PAYMENTS_MOVED = f"{ON_BIGQUERY}{PAYMENTS_NODE} lands in payments, {ROUTE_HELD} intermediate"
 ROUTING_REFUSED: dict[str, tuple[Edit, list[str]]] = {
+    "a function built in a product's dataset": (
+        lambda files: files.update(
+            {
+                "models/functions/probe_leak.sql": "select 1\n",
+                "models/functions/probe_leak.yml": "functions:\n  - name: probe_leak\n"
+                "    config:\n      schema: payments\n    returns:\n      data_type: int64\n",
+            }
+        ),
+        [
+            f"{ON_BIGQUERY}models/functions/probe_leak.sql: function probe_leak lands in payments,"
+            f" {ROUTE_HELD} intermediate"
+        ],
+    ),
+    "a relation name that holds a quote": (
+        node_config(PAYMENTS_DOCS, "payments", '{alias: "payments` as select 1; select `x"}'),
+        [
+            f"{ON_BIGQUERY}{PAYMENTS_NODE} names its relation 'payments` as select 1; select `x',"
+            " which holds a character other than a letter, a digit or `_`, which the gate refuses"
+        ],
+    ),
+    "a SQL header on a model": (
+        replaced(
+            GROUP_TOTALS_SQL,
+            "\nselect",
+            "\n{{ config(sql_header='create table payments.copy as select 1;') }}\nselect",
+        ),
+        [
+            f"{ON_BIGQUERY}{GROUP_TOTALS_NODE} sets sql_header, which runs SQL no parse places,"
+            " which the gate refuses"
+        ],
+    ),
+    "a post-hook on a model": (
+        replaced(
+            GROUP_TOTALS_SQL,
+            "\nselect",
+            "\n{{ config(post_hook='create table payments.copy as select 1') }}\nselect",
+        ),
+        [
+            f"{ON_BIGQUERY}{GROUP_TOTALS_NODE} sets post_hook, which runs SQL no parse places,"
+            " which the gate refuses"
+        ],
+    ),
+    "grants on a model": (
+        node_config(PAYMENTS_DOCS, "payments", "{grants: {select: [someone]}}"),
+        [
+            f"{ON_BIGQUERY}{PAYMENTS_NODE} sets grants, which runs SQL no parse places,"
+            " which the gate refuses"
+        ],
+    ),
+    "an on-run hook of the project": (
+        lambda files: files.update(
+            {
+                PROJECT_FILE: files[PROJECT_FILE]
+                + '\non-run-end: ["create table payments.copy as select 1"]\n'
+            }
+        ),
+        ["an on-run hook of the project runs SQL no parse places, which the gate refuses"],
+    ),
+    "a config() call only the BigQuery output's name reaches": (
+        payments_on("target.name == 'bigquery'"),
+        [PAYMENTS_MOVED],
+    ),
+    "a config() call only the BigQuery output's settings reach": (
+        payments_on(
+            "target.type == 'bigquery' and target.maximum_bytes_billed and target.threads > 1"
+        ),
+        [PAYMENTS_MOVED],
+    ),
+    "a config() call only another project reaches": (
+        payments_on(f"target.type == 'bigquery' and target.project != '{versions.PROBES[0][0]}'"),
+        [PAYMENTS_MOVED],
+    ),
+    "a config() call only the lab's region reaches": (
+        payments_on(f"target.location == '{versions.PROBES[0][1]}'"),
+        [PAYMENTS_MOVED],
+    ),
     "a generic test's schema that renders to none on the local target": (
         generic_test_config("schema", "group_totals"),
         [f"{CONTRACT_NUMBER_TEST} is placed in group_totals, {TEST_HELD}"],
@@ -1108,7 +1195,14 @@ def test_a_routing_the_gate_does_not_hold_fails_the_gate(tmp_path: Path, name: s
     ok, report = versions.check(working(tmp_path, edit))
     assert not ok, report
     for each in expected:
-        assert each in report, report
+        assert said(report, each), report
+
+
+def said(report: str, line: str) -> bool:
+    """Whether the report holds `line` as written: a local rule's line counts only where the
+    outcome check's own copy of it (the same text after `ON_BIGQUERY`) does not stand in for it."""
+    starts = [i for i in range(len(report)) if report.startswith(line, i)]
+    return any(line.startswith(ON_BIGQUERY) or not report[:i].endswith(ON_BIGQUERY) for i in starts)
 
 
 def test_a_main_with_a_routing_the_gate_cannot_read_fails_the_gate(tmp_path: Path) -> None:

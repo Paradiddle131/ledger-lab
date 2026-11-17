@@ -77,26 +77,37 @@ nodes are held to. The placement configs (`PLACEMENT`) are `schema`, `alias`, `e
 - On the working tree: a model, seed or snapshot's `schema` is the dataset `ROUTES` gives its
   folder, and none outside those folders; a routed folder's relation names (an alias, else the
   node's name) are its route's tables, each built once.
-- On the working tree, the outcome: dbt-bigquery's own parse of the tree on a throwaway BigQuery
-  profile (an invented project, a stand-in token, the profile's dataset `intermediate`), run from
-  the lock's `bigquery` group in uv's cache with the network refused, beside the local parse and
-  under the same fixed environment. Refused: a model, seed or snapshot of the project that lands
-  anywhere but its folder's route, else `intermediate`, of the profile's project; a data test
-  placed anywhere but `dbt_test__audit` of the profile's project, where dbt puts its stored
-  failures; a routed folder whose relations are not its route's tables, each once; a materialization
-  the project defines; and a project macro that overrides one of dbt's or dbt-bigquery's own by
-  name, directly or as `<prefix>__<name>` of one (the allowed schema macro aside), since no parse
-  shows what such macros write. This sees what the local parse cannot: a generic test's YAML config
-  read rendered, a `config()` call only a BigQuery target runs, a node enabled only there.
-- When the `bigquery` group is not in uv's cache, or dbt-bigquery does not import, the gate fails
-  and says to run `make sync`, which caches it.
+- On the working tree, the outcome: dbt-bigquery's own parse of the tree, run from the lock's
+  `bigquery` group in uv's cache with the network refused, beside the local parse and under the
+  same fixed environment, on each of two throwaway profiles (`PROBES`). Each is the tree's own
+  BigQuery output of `models/profiles.yml`, its name and every literal setting kept (the dataset
+  `intermediate` among them), with a stand-in token, an invented project and a free-tier region;
+  the two differ in project and region, the first region being the lab's. Refused, on either: a
+  model, seed, snapshot or function (a UDF, which `dbt build` creates as it does a model) of the
+  project that lands anywhere but its folder's route, else the profile's dataset, of the profile's
+  project; a data test placed anywhere but `dbt_test__audit` of the profile's project, where dbt
+  would put its stored failures; a routed folder whose relations are not its route's tables, each
+  once; a relation name holding a character other than a letter, a digit or `_` (dbt-bigquery
+  quotes it unescaped); a node's `pre_hook`, `post_hook`, `sql_header` or `grants`, and an
+  `on-run-*` hook of the project; a materialization the project defines; and a project macro
+  that overrides one of dbt's or dbt-bigquery's own by name, directly or as `<prefix>__<name>`
+  of one (the allowed schema macro aside), since no parse shows what such SQL and macros write.
+  This sees what the local parse cannot: a generic test's YAML config read rendered, a `config()`
+  call only the BigQuery target runs, a node enabled only there, whether they turn on the target's
+  type, name or literal settings, or on its project or region.
+- When the `bigquery` group is not in uv's cache, the gate fails and says to run `make sync`,
+  which caches it; any other failure of the BigQuery parse, dbt-bigquery not importing among them,
+  fails the gate with dbt's error class.
 
 Stated limits of the routing: a placement config dbt-bigquery adds after the locked version is not
 refused by the local rules until it is listed (a test compares the listed names with the locked
 adapter's `_ALIASES`), though the outcome check still sees where it places a node; a placement that
 turns on the environment, the clock or command-line `--vars` is read as the gate's fixed
-environment gives it, not as a real build's; SQL a hook or an `on-run-*` setting runs, and a project
-macro that overrides `ref` or `source` (which dbt provides as functions, not macros), are not read;
+environment gives it, not as a real build's; one that turns on the project or region being one
+named value (the real project's id, which no file may hold, or a third region) is read as the two
+probes give it; SQL a node's Jinja runs through `run_query` or a `statement` block when dbt
+executes it (a parse does not), and a project macro that overrides `ref` or `source` (which dbt
+provides as functions, not macros), are not read;
 the macro's text is compared, its behaviour rests on dbt's `target` (a project macro named `target`
 makes the pinned dbt's parse fail); and since both trees are read with the working tree's gate, a
 change to `SCHEMA_MACRO` makes an `origin/main` holding the old text unreadable.
@@ -123,7 +134,7 @@ The gate fails when:
   environment, command-line variables and the clock);
 - dbt cannot parse either tree, or the working tree on the BigQuery target: the message names the
   tree and dbt's error class, never dbt's own output;
-- the lock's `bigquery` group is not in uv's cache, or dbt-bigquery does not import (above);
+- the lock's `bigquery` group is not in uv's cache (above);
 - a metric `origin/main` defines is gone from the working tree or renamed;
 - a metric's definition changed and its version did not go up, or its version went down;
 - a metric has no version that is an integer from 1 to 2^53 - 1, or no owner.
@@ -143,6 +154,7 @@ import hashlib
 import json
 import os
 import posixpath
+import re
 import shutil
 import signal
 import subprocess
@@ -242,27 +254,29 @@ NOT_CACHED_ADVICE = (
     "the lock's bigquery group is not in uv's cache, so where the nodes land on BigQuery cannot be"
     " read: run `make sync`, which caches it"
 )
-PROBE_PROJECT = "probe-project"
-# The dataset models/profiles.yml's bigquery output names (a test holds the two equal), and the
-# one dbt places every data test in, where its stored failures would be written.
-PROFILE_DATASET = "intermediate"
+# The two throwaway profiles the outcome check parses the working tree on: each is the tree's own
+# `models/profiles.yml` BigQuery output, its name and every setting written as a literal kept, with
+# an invented project, a stand-in token and one of the free-tier regions in place of what the real
+# build reads from the environment. They differ in project and region (the first is the lab's,
+# platform/gcp/variables.tf), so a placement that turns on either is off its route in one of them.
+PROBES = (("probe-project", "us-central1"), ("probe-other-project", "us-east1"))
+PROFILES_FILE = f"{PROJECT}/profiles.yml"
+BIGQUERY_TYPE = "bigquery"
+# What the real output reads from the environment, which each probe sets itself.
+PROBED = {"method": "oauth-secrets", "token": "stand-in"}
+# The dataset dbt places every data test in, where its stored failures would be written.
 TEST_SCHEMA = "dbt_test__audit"
-BIGQUERY_PROFILE = {
-    "ledger_lab": {
-        "target": "bq",
-        "outputs": {
-            "bq": {
-                "type": "bigquery",
-                "method": "oauth-secrets",
-                "token": "stand-in",
-                "project": PROBE_PROJECT,
-                "dataset": PROFILE_DATASET,
-                "location": "US",
-                "threads": 1,
-            }
-        },
-    }
-}
+# The kinds of node the outcome check places: the placed ones, and dbt's functions (UDFs), which
+# `dbt build` creates in a dataset as it does a model; an `operation` (an `on-run-*` hook) runs SQL
+# no parse places, and is refused.
+OUTCOME_KINDS = (*PLACED, "function")
+OPERATION = "operation"
+# A node's configs that run SQL besides its build, which no parse places (`grants` among them:
+# dbt grants each listed principal on the relation): each is refused.
+SIDE_SQL = ("pre_hook", "post_hook", "sql_header", "grants")
+# The characters a relation name may hold on the outcome check, so that dbt-bigquery's quoted
+# identifier is the relation the parse names and no more.
+RELATION_NAME = re.compile(r"[A-Za-z0-9_]+")
 # The prefix dbt gives a materialization's macro (`materialization_<name>_<adapter>`).
 MATERIALIZATION = "materialization_"
 # The largest integer the audit record (agent/audit.schema.json) carries exactly.
@@ -329,6 +343,8 @@ class Landed:
     database: str | None
     schema: str
     relation: str
+    # The configs set on the node that run SQL of their own besides its build (`SIDE_SQL`).
+    side: tuple[str, ...] = ()
 
 
 def git(repo: Path, *args: str, stdin: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
@@ -756,22 +772,51 @@ def offline_run(
 
 def group_failure(stderr: str) -> str | None:
     """Why the `bigquery` group could not run, from what the command wrote, or None when the
-    failure is not the group's: its packages are not in uv's cache, or the adapter does not
-    import."""
+    failure is not the group's: its packages are not in uv's cache."""
     if NOT_CACHED in stderr:
         return NOT_CACHED_ADVICE
-    if "ModuleNotFoundError" in stderr or "ImportError" in stderr:
-        return (
-            "dbt-bigquery does not import in the lock's bigquery group, so where the nodes land on"
-            " BigQuery cannot be read: run `make sync`"
-        )
     return None
 
 
-def start_bigquery(tree: Path, work: Path) -> subprocess.Popen[str]:
-    """dbt-bigquery's parse of the exported tree (`parse_on_bigquery`), started in a process
-    group of its own, so it runs beside the local parse and can be ended whole."""
-    work.mkdir(parents=True, exist_ok=True)
+def probe_profile(tree: Path, project: str, location: str) -> Block:
+    """The throwaway profile of one probe: the tree's own BigQuery output of `models/profiles.yml`
+    (the one output whose `type` is the literal `bigquery`, of the profile `dbt_project.yml`
+    names), as its target, with its name and every literal setting kept and `PROBED`, `project` and
+    `location` in place of the rest; Unreadable when there is no such output, or its `dataset` is
+    not a literal."""
+    try:
+        name = yaml.safe_load((tree / PROJECT_FILE).read_text())["profile"]
+        outputs = yaml.safe_load((tree / PROFILES_FILE).read_text())[name]["outputs"]
+    except (OSError, yaml.YAMLError, KeyError, TypeError) as e:
+        raise Unreadable(f"{PROFILES_FILE} names no outputs for the project's profile") from e
+    found = [
+        key
+        for key, out in outputs.items()
+        if isinstance(out, dict) and out.get("type") == BIGQUERY_TYPE
+    ]
+    if len(found) != 1:
+        raise Unreadable(f"{PROFILES_FILE} holds {len(found)} outputs of type bigquery, not one")
+    (output,) = found
+    literal = {
+        key: value
+        for key, value in outputs[output].items()
+        if not (isinstance(value, str) and any(mark in value for mark in JINJA))
+    }
+    if not isinstance(literal.get("dataset"), str):
+        raise Unreadable(f"{PROFILES_FILE}'s {output} output has no literal dataset")
+    target = literal | PROBED | {"project": project, "location": location}
+    return {name: {"target": output, "outputs": {output: target}}}
+
+
+def start_bigquery(
+    tree: Path, work: Path, probe: tuple[str, str] = PROBES[0]
+) -> subprocess.Popen[str]:
+    """dbt-bigquery's parse of the exported tree (`parse_on_bigquery`) on one probe's profile
+    (`probe_profile`), started in a process group of its own, so it runs beside the local parse and
+    can be ended whole; Unreadable when the tree's profile has no BigQuery output to probe."""
+    (work / "profiles").mkdir(parents=True, exist_ok=True)
+    profile = probe_profile(tree, *probe)
+    (work / "profiles" / "profiles.yml").write_text(yaml.safe_dump(profile))
     command = offline_command(
         "python", str(Path(__file__).resolve()), "--bigquery-parse", str(tree / PROJECT), str(work)
     )
@@ -816,16 +861,19 @@ def bigquery_refusals(child: subprocess.Popen[str], work: Path) -> list[str]:
 
 
 def parse_on_bigquery(project: Path, work: Path) -> int:
-    """Run in the `bigquery` group (`start_bigquery`): `dbt parse` of the project on the throwaway
-    BigQuery profile, under the gate's fixed environment (`environment`), writing to
+    """Run in the `bigquery` group (`start_bigquery`): `dbt parse` of the project on the probe's
+    profile in `work/profiles`, under the gate's fixed environment (`environment`) with every proxy
+    variable pointed at `CLOSED`, writing to
     `work/report.json` dbt's error class when it fails, else where each node of the project lands
     (`landed`) and what lands off the routing (`placed_off`)."""
-    fixed = environment(work)
+    fixed = environment(work) | {name: CLOSED for name in PROXIES}
     os.environ.clear()
     os.environ.update(fixed)
-    for folder in ("home", "tmp", "profiles"):
+    for folder in ("home", "tmp"):
         (work / folder).mkdir(parents=True, exist_ok=True)
-    (work / "profiles" / "profiles.yml").write_text(yaml.safe_dump(BIGQUERY_PROFILE))
+    profile = yaml.safe_load((work / "profiles" / "profiles.yml").read_text())
+    ((_, chosen),) = profile.items()
+    output = chosen["outputs"][chosen["target"]]
     from dbt.cli.main import dbtRunner
     from dbt.contracts.graph.manifest import Manifest
 
@@ -847,9 +895,15 @@ def parse_on_bigquery(project: Path, work: Path) -> int:
             node.database,
             node.schema,
             node.alias or node.name,
+            tuple(key for key in SIDE_SQL if side_sql(node.config, key)),
         )
+        for node in [*manifest.nodes.values(), *manifest.functions.values()]
+        if node.package_name == root and node.resource_type.value in OUTCOME_KINDS
+    ]
+    operations = [
+        in_tree(project, node.original_file_path, tree)
         for node in manifest.nodes.values()
-        if node.package_name == root and node.resource_type.value in PLACED
+        if node.package_name == root and node.resource_type.value == OPERATION
     ]
     macros = [
         (macro.name, in_tree(project, macro.original_file_path, tree), macro.macro_sql)
@@ -858,10 +912,21 @@ def parse_on_bigquery(project: Path, work: Path) -> int:
     ]
     installed = {macro.name for macro in manifest.macros.values() if macro.package_name != root}
     landed = {f"{n.kind} {n.name}": [n.database, n.schema] for n in nodes}
-    report.write_text(
-        json.dumps({"refused": placed_off(nodes, macros, installed), "landed": landed})
-    )
+    refused = placed_off(nodes, macros, installed, output["project"], output["dataset"])
+    refused += [
+        f"{place}: an on-run hook of the project runs SQL no parse places, which the gate refuses"
+        for place in sorted(set(operations))
+    ]
+    report.write_text(json.dumps({"refused": refused, "landed": landed}))
     return 0
+
+
+def side_sql(config: Any, key: str) -> bool:
+    """Whether a node's config sets `key` (a hook list or a SQL header) to anything."""
+    value = getattr(config, key, None)
+    if value is None and hasattr(config, "get"):
+        value = config.get(key)
+    return bool(value)
 
 
 def unprefixed(macro: str) -> str:
@@ -873,10 +938,12 @@ def placed_off(
     nodes: list[Landed],
     macros: list[tuple[str, str, str]],
     installed: Collection[str],
+    project: str,
+    dataset: str,
 ) -> list[str]:
     """What dbt-bigquery's parse of the working tree places off the gate's routing: a model, seed
-    or snapshot outside its route's dataset (`ROUTES`, else `PROFILE_DATASET`) or the profile's
-    project; a data test outside `TEST_SCHEMA` or the profile's project; a routed folder whose
+    or snapshot outside its route's dataset (`ROUTES`, else the profile's `dataset`) or the
+    profile's `project`; a data test outside `TEST_SCHEMA` or that project; a routed folder whose
     relations are not its route's tables; and a macro of the project that is a materialization,
     or that overrides one of the `installed` macros of dbt and dbt-bigquery by name (directly, or
     as `<prefix>__<name>` of one), whose writes no parse shows, but the allowed schema macro.
@@ -891,7 +958,7 @@ def placed_off(
                 f"{place}: macro {name} is a materialization of the project, whose writes no"
                 " parse shows, which the gate refuses"
             )
-        elif name in installed or unprefixed(name) in bases:
+        elif unprefixed(name) in bases:
             found.append(
                 f"{place}: macro {name} overrides one of dbt's or dbt-bigquery's own macros, whose"
                 " writes no parse shows, which the gate refuses"
@@ -899,19 +966,28 @@ def placed_off(
     built: list[tuple[str, str, str]] = []
     for node in nodes:
         where = node.schema
-        if node.database != PROBE_PROJECT:
+        if node.database != project:
             where += f" of the project {node.database}"
         what = f"{node.place}: {node.kind} {node.name}"
+        found += [
+            f"{what} sets {key}, which runs SQL no parse places, which the gate refuses"
+            for key in node.side
+        ]
+        if not RELATION_NAME.fullmatch(node.relation):
+            found.append(
+                f"{what} names its relation {node.relation!r}, which holds a character other than"
+                " a letter, a digit or `_`, which the gate refuses"
+            )
         if node.kind == "test":
-            if (node.database, node.schema) != (PROBE_PROJECT, TEST_SCHEMA):
+            if (node.database, node.schema) != (project, TEST_SCHEMA):
                 found.append(
                     f"{what} is placed in {where}, where the gate holds a data test to"
                     f" {TEST_SCHEMA} of the profile's project"
                 )
             continue
         built.append((node.path, node.place, node.relation))
-        expected = route(node.path) or PROFILE_DATASET
-        if (node.database, node.schema) != (PROBE_PROJECT, expected):
+        expected = route(node.path) or dataset
+        if (node.database, node.schema) != (project, expected):
             found.append(
                 f"{what} lands in {where}, where the gate's routing (semantics/versions.py"
                 f" ROUTES) builds it in {expected} of the profile's project"
@@ -1296,18 +1372,20 @@ def check(repo: Path = REPO, base: str = BASE) -> tuple[bool, str]:
         published = published_metrics(repo, commit, base, Path(scratch) / "base")
         tree = Path(scratch) / "work" / "tree"
         tree.mkdir()
-        child: subprocess.Popen[str] | None = None
+        children: list[tuple[subprocess.Popen[str], Path]] = []
         try:
             export_working(repo, tree)
-            child = start_bigquery(tree, Path(scratch) / "bigquery")
+            for n, probe in enumerate(PROBES):
+                work = Path(scratch) / f"bigquery-{n}"
+                children.append((start_bigquery(tree, work, probe), work))
             current = read(tree, Path(scratch) / "work", "working", routed=True)
-            refused = bigquery_refusals(child, Path(scratch) / "bigquery")
+            refused = sorted({line for c, w in children for line in bigquery_refusals(c, w)})
             if refused:
                 raise Unreadable("; ".join(refused))
         except Unreadable as e:
             return False, f"metric-versions: the working tree's metrics cannot be read: {e}"
         finally:
-            if child is not None:
+            for child, _ in children:
                 end(child)
     return compare(published, current, base)
 

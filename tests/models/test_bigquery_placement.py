@@ -53,21 +53,37 @@ def test_the_project_lands_where_the_routing_says_on_bigquery(tmp_path: Path) ->
     work = tmp_path / "bigquery"
     assert outcome(copy_project(tmp_path / "tree"), work) == []
     landed = json.loads((work / "report.json").read_text())["landed"]
-    product = [versions.PROBE_PROJECT, "group_totals"]
-    profile = [versions.PROBE_PROJECT, versions.PROFILE_DATASET]
+    project, _ = versions.PROBES[0]
+    product, profile = [project, "group_totals"], [project, "intermediate"]
     assert landed["model group_totals"] == landed["model group_totals_left_out"] == product
     assert landed["model payments"] == landed["model budget_against_outturn"] == profile
     tests = [where for name, where in landed.items() if name.startswith("test ")]
     assert tests
-    assert all(where == [versions.PROBE_PROJECT, versions.TEST_SCHEMA] for where in tests)
+    assert all(where == [project, versions.TEST_SCHEMA] for where in tests)
 
 
-def test_the_outcome_checks_profile_names_the_projects_dataset() -> None:
-    """The throwaway profile's dataset is the one models/profiles.yml's bigquery output names."""
-    profiles = yaml.safe_load((versions.REPO / "models" / "profiles.yml").read_text())
-    dataset = profiles["ledger_lab"]["outputs"]["bigquery"]["dataset"]
-    assert dataset == versions.PROFILE_DATASET
-    assert versions.BIGQUERY_PROFILE["ledger_lab"]["outputs"]["bq"]["dataset"] == dataset
+def test_each_probe_is_the_projects_bigquery_output_but_for_what_the_environment_gives(
+    tmp_path: Path,
+) -> None:
+    """Each probe's profile keeps the real BigQuery output's name, as its target, and every
+    literal setting; only the method, token, project and region are its own, and the two probes
+    differ in project and region, the first region being the lab's (platform/gcp/variables.tf)."""
+    tree = copy_project(tmp_path / "tree")
+    real = yaml.safe_load((tree / "models" / "profiles.yml").read_text())["ledger_lab"]
+    variables = (versions.REPO / "platform" / "gcp" / "variables.tf").read_text()
+    lab_region = variables.split('variable "region"')[1].split('default     = "')[1].split('"')[0]
+    (projects, regions) = zip(*versions.PROBES, strict=True)
+    assert len(set(projects)) == len(set(regions)) == len(versions.PROBES) == 2
+    assert regions[0] == lab_region
+    for project, region in versions.PROBES:
+        profile = versions.probe_profile(tree, project, region)["ledger_lab"]
+        assert profile["target"] == "bigquery"
+        probe = profile["outputs"]["bigquery"]
+        own = {"method", "token", "project", "location"}
+        assert {k: v for k, v in probe.items() if k not in own} == {
+            k: v for k, v in real["outputs"]["bigquery"].items() if k not in own
+        }
+        assert (probe["project"], probe["location"]) == (project, region)
 
 
 def test_the_gate_refuses_when_the_bigquery_group_is_not_cached(
@@ -79,3 +95,10 @@ def test_the_gate_refuses_when_the_bigquery_group_is_not_cached(
         outcome(copy_project(tmp_path / "tree"), tmp_path / "bigquery")
     assert str(refused.value) == versions.NOT_CACHED_ADVICE
     assert "make sync" in str(refused.value)
+
+
+def test_only_an_uncached_group_is_the_groups_failure() -> None:
+    """uv's offline refusal is read as the group not being cached; any other failure, an adapter
+    that does not import among them, is dbt's, which the gate reports by its error class."""
+    assert versions.group_failure(f"error: {versions.NOT_CACHED}") == versions.NOT_CACHED_ADVICE
+    assert versions.group_failure("ModuleNotFoundError: No module named 'dbt'") is None
