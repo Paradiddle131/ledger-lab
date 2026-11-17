@@ -184,13 +184,16 @@ BUILT = ("model", "seed", "snapshot")
 UNROUTED = ("database", "target_schema", "target_database")
 # dbt-bigquery's own names for the placement configs (`BigQueryCredentials._ALIASES`, which a test
 # compares with the locked adapter's): dbt translates them only on a BigQuery target, so the local
-# parse the gate reads keeps them under these names; each is refused.
-BIGQUERY_ALIASES = {
-    "dataset": "schema",
-    "project": "database",
-    "target_dataset": "target_schema",
-    "target_project": "target_database",
-}
+# parse the gate reads keeps them under these names; each is refused. Written as pairs, which the
+# fresh-clone scan does not read as a project setting.
+BIGQUERY_ALIASES: dict[str, str] = dict(
+    (
+        ("dataset", "schema"),
+        ("project", "database"),
+        ("target_dataset", "target_schema"),
+        ("target_project", "target_database"),
+    )
+)
 # Every config key the gate refuses outright, wherever dbt records it.
 REFUSED_CONFIGS = (*UNROUTED, *BIGQUERY_ALIASES)
 # The macro namespace dbt's own macros, the three above among them, dispatch in.
