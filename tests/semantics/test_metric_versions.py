@@ -13,7 +13,6 @@ committed tree, changed in place.
 import copy
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -27,6 +26,7 @@ import pytest
 import yaml
 
 from semantics import versions
+from tests.models import bigquery_offline
 from tests.models.dbt_build import Build
 from tests.semantics.metric_cli import manifest
 
@@ -706,6 +706,14 @@ GROUP_TOTALS_SQL = "models/models/marts/group_totals/group_totals.sql"
 LEFT_OUT = "models/models/marts/group_totals/group_totals_left_out.sql: model group_totals_left_out"
 PAYMENTS_NODE = "models/models/marts/payments/payments.sql: model payments"
 PAYMENTS_DOCS = "models/models/marts/payments/_payments__models.yml"
+CHICAGO_DOCS = "models/models/intermediate/chicago/_chicago__models.yml"
+CHICAGO_PAYMENTS = "models/models/intermediate/chicago/int_chicago__payments.sql: model"
+CHICAGO_PAYMENTS += " int_chicago__payments"
+GROUP_TOTALS_NODE = "models/models/marts/group_totals/group_totals.sql: model group_totals"
+STORED_FAILURES = "models/tests/marts/probe_every_payment.sql"
+IN_CALL = (
+    "in a config() call (in its SQL, or a generic test's own config), which the gate does not read"
+)
 NEW_IN_FOLDER = "models/models/marts/group_totals/payment_rows.sql"
 SNAPSHOT_FILE = "models/snapshots/history.yml"
 SNAPSHOT_NODE = f"{SNAPSHOT_FILE}: snapshot period_status_history"
@@ -796,10 +804,7 @@ ROUTING_REFUSED: dict[str, tuple[Edit, list[str]]] = {
             "\nselect",
             "\n{{ config(schema='group_totals') }}\nselect",
         ),
-        [
-            "models/models/marts/group_totals/group_totals.sql: model group_totals sets its"
-            " schema in a SQL config() call, which the gate does not read"
-        ],
+        [f"{GROUP_TOTALS_NODE} sets its schema {IN_CALL}"],
     ),
     "a database set for a folder": (
         replaced(PROJECT_FILE, ROUTED, ROUTED + "        +database: elsewhere\n"),
@@ -840,6 +845,102 @@ ROUTING_REFUSED: dict[str, tuple[Edit, list[str]]] = {
             " 'scratch', where the gate's routing (semantics/versions.py ROUTES) builds it in the"
             " profile's dataset"
         ],
+    ),
+    "a snapshot's target database": (
+        lambda files: files.update({SNAPSHOT_FILE: snapshot_with("target_database: elsewhere")}),
+        [f"{SNAPSHOT_NODE} sets target_database, which places it outside the gate's routing"],
+    ),
+    "a snapshot's target project, dbt-bigquery's name for its target database": (
+        lambda files: files.update({SNAPSHOT_FILE: snapshot_with("target_project: elsewhere")}),
+        [f"{SNAPSHOT_NODE} sets target_project {BIGQUERY_NAME.format('target_database')}"],
+    ),
+    "a schema that renders to none on the local target": (
+        node_config(
+            CHICAGO_DOCS,
+            "int_chicago__payments",
+            "{schema: \"{{ 'payments' if target.type == 'bigquery' else none }}\"}",
+        ),
+        [f"{CHICAGO_PAYMENTS} {NOT_LITERAL}"],
+    ),
+    "a literal alias set in a model's SQL": (
+        replaced(GROUP_TOTALS_SQL, "\nselect", "\n{{ config(alias='group_totals') }}\nselect"),
+        [f"{GROUP_TOTALS_NODE} sets its alias {IN_CALL}"],
+    ),
+    "an alias that depends on the target": (
+        replaced(
+            GROUP_TOTALS_SQL,
+            "\nselect",
+            "\n{{ config(alias=('group_totals' if target.type != 'bigquery' else 'elsewhere')) }}"
+            "\nselect",
+        ),
+        [f"{GROUP_TOTALS_NODE} sets its alias {IN_CALL}"],
+    ),
+    "a twin of a metric's model enabled only on BigQuery": (
+        both(
+            replaced(
+                GROUP_TOTALS_SQL,
+                "\nselect",
+                "\n{{ config(enabled=(target.type != 'bigquery')) }}\nselect",
+            ),
+            lambda files: files.update(
+                {
+                    "models/models/scratch/group_totals.sql": (
+                        "{{ config(enabled=(target.type == 'bigquery'), schema='payments') }}\n"
+                        + REAL[GROUP_TOTALS_SQL]
+                    )
+                }
+            ),
+        ),
+        [
+            "models/models/scratch/group_totals.sql: model group_totals is disabled in the local"
+            " parse, which the gate does not read",
+            f"{GROUP_TOTALS_NODE} sets its enabled {IN_CALL}",
+        ],
+    ),
+    "a model in a product's folder enabled only on BigQuery": (
+        lambda files: files.update(
+            {
+                NEW_IN_FOLDER: "{{ config(enabled=(target.type == 'bigquery')) }}\n"
+                "select * from {{ ref('payments') }}\n"
+            }
+        ),
+        [
+            f"{NEW_IN_FOLDER}: model payment_rows is disabled in the local parse, which the gate"
+            " does not read"
+        ],
+    ),
+    "a model disabled by a literal in its properties": (
+        lambda files: files.update(
+            {
+                "models/models/marts/switched_off.sql": "select 1 as a\n",
+                "models/models/marts/switched_off.yml": (
+                    "models:\n  - name: switched_off\n    config: {enabled: false}\n"
+                ),
+            }
+        ),
+        [
+            "models/models/marts/switched_off.sql: model switched_off is disabled in the local"
+            " parse, which the gate does not read"
+        ],
+    ),
+    "a data test storing its failures in a product's dataset": (
+        lambda files: files.update(
+            {
+                STORED_FAILURES: "{{ config(schema='group_totals', store_failures=true) }}\n"
+                "select vendor_name from {{ ref('int_chicago__payments') }} where false\n"
+            }
+        ),
+        [
+            f"{STORED_FAILURES}: test probe_every_payment sets its schema {IN_CALL}",
+            f"{STORED_FAILURES}: test probe_every_payment sets schema, which places it outside"
+            " the gate's routing",
+        ],
+    ),
+    "a schema for the project's data tests": (
+        lambda files: files.update(
+            {PROJECT_FILE: files[PROJECT_FILE] + "\ndata_tests:\n  ledger_lab:\n    +schema: x\n"}
+        ),
+        ["sets schema, which places it outside the gate's routing"],
     ),
     "a snapshot's target schema": (
         lambda files: files.update({SNAPSHOT_FILE: snapshot_with("target_schema: scratch")}),
@@ -939,18 +1040,13 @@ def test_the_refused_bigquery_names_are_the_locked_adapters_placement_aliases() 
     """The gate's `BIGQUERY_ALIASES` are the locked dbt-bigquery's `_ALIASES` whose target is a
     placement config, and each of its other aliases is one known not to place a relation, so an
     alias the adapter adds fails here until it is sorted; read from the lock's `bigquery` group in
-    uv's cache, offline, and skipped when the cache does not hold it."""
-    uv = os.environ.get("UV") or shutil.which("uv") or "uv"
-    found = subprocess.run(  # noqa: S603
-        [uv, "run", "--isolated", "--frozen", "--offline", "--only-group", "bigquery"]
-        + ["python", "-I", "-c", ALIASES],
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=versions.REPO,
-    )
-    if found.returncode != 0:
-        pytest.skip("dbt-bigquery is not in uv's cache: run `uv sync --group bigquery` once")
+    uv's cache, offline (tests/models/bigquery_offline.py), and skipped only when that group is not
+    cached or the adapter does not import; any other failure of the probe fails the test."""
+    reason = bigquery_offline.unavailable()
+    if reason:
+        pytest.skip(reason)
+    found = bigquery_offline.run("python", "-c", ALIASES)
+    assert found.returncode == 0, found.stderr[-500:]
     aliases = json.loads(found.stdout)
     placement = {"schema", *versions.UNROUTED}
     assert {k: v for k, v in aliases.items() if v in placement} == versions.BIGQUERY_ALIASES

@@ -37,9 +37,8 @@ Outside the definition, so a change there is not seen by the gate:
 - the SQL of the dbt models a semantic model reads (caught, if at all, by the models' tests, the
   payments data contract's gate and the values pinned over the landed build);
 - command-line `--vars` a consumer passes to dbt;
-- relation names decided by the profile, by an alias a model's SQL `config()` renders from the
-  environment, or on a target other than the local one, but for a node's `schema` config, which
-  the routing below reads: the gate compares the local target's parse;
+- relation names decided by the profile, or on a target other than the local one, but for what
+  the routing below holds: the gate compares the local target's parse;
 - dbt packages, which the gate refuses rather than reads.
 
 The ways a project's macros can decide relation names that the gate refuses:
@@ -56,29 +55,37 @@ The ways a project's macros can decide relation names that the gate refuses:
 
 The routing, which the gate holds (`ROUTES`: a folder of the project mapped to a BigQuery dataset
 and the relation names the folder holds; a test holds each to a data product's dataset in
-platform/gcp/warehouse.tf and to its `tables` in access/personas.yaml), and the rules each model,
-seed and snapshot of the project is held to:
+platform/gcp/warehouse.tf and to its `tables` in access/personas.yaml), and the rules the project's
+nodes are held to. The placement configs (`PLACEMENT`) are `schema`, `alias`, `enabled`,
+`database`, a snapshot's `target_schema` and `target_database`, and dbt-bigquery's names `dataset`,
+`project`, `target_dataset` and `target_project`, which dbt translates only on a BigQuery target.
 
-- on either tree: a `schema` config equals the unrendered value dbt's parse records for it (so it
-  is a literal, not dbt Jinja, and no later setting overrides it), is not set in a SQL `config()`
-  call, and is set only where the project defines the allowed macro (dbt's own prefixes it with
-  the profile's dataset); none of `database`, a snapshot's `target_schema` and `target_database`,
-  or dbt-bigquery's names for those and for `schema` (`dataset`, `project`, `target_dataset`,
-  `target_project`, which dbt translates only on a BigQuery target) is in the node's rendered
-  config, its unrendered config or its SQL `config()` call;
-- on the working tree: its `schema` config is the dataset `ROUTES` gives its folder, and none
-  outside those folders; a routed folder's relation names (an alias, else the node's name) are
-  its route's tables, each built once.
+- On either tree, for each model, seed, snapshot and data test of the project, enabled or not:
+  - a placement config set in a `config()` call (a node's SQL, or a generic test's own `config`,
+    which dbt records the same way) is refused, but a data test's `alias`, which dbt's generic
+    tests set there themselves;
+  - a placement config whose rendered value is not the value dbt records as written (dbt Jinja,
+    `none` included, or a later setting that overrides it) is refused;
+  - `database`, `target_schema`, `target_database` and the four dbt-bigquery names, written with a
+    value, are refused, and on a data test also `schema`, which places its stored failures;
+  - a model, seed or snapshot with a `schema` where the project has no allowed schema macro is
+    refused (dbt's own prefixes it with the profile's dataset).
+- On either tree, a node of the project that the local parse disables is refused.
+- On the working tree: a model, seed or snapshot's `schema` is the dataset `ROUTES` gives its
+  folder, and none outside those folders; a routed folder's relation names (an alias, else the
+  node's name) are its route's tables, each built once.
 
-Stated limits of the routing: config keys are read as dbt's local parse records them, so a placement
-key dbt-bigquery adds after the locked version is not refused until it is listed (a test compares
-the listed names with the locked adapter's `_ALIASES` when uv's cache holds that adapter, and skips
-otherwise); data tests are not checked (their `schema` is where stored failures go, which no
-semantic model reads); outside the routed folders an alias is compared only as the local parse names
-it, for what a semantic model reads; the macro's text is compared, its behaviour rests on dbt's
-`target` (a project macro named `target` makes the pinned dbt's parse fail); and since both trees
-are read with the working tree's gate, a change to `SCHEMA_MACRO` makes an `origin/main` holding the
-old text unreadable.
+A test parses the project on a BigQuery target offline (tests/models/test_bigquery_placement.py)
+and finds each built node in its route's dataset or the profile's, in the profile's project, and no
+data test's schema a product's dataset.
+
+Stated limits of the routing: a placement config dbt-bigquery adds after the locked version is not
+refused until it is listed (a test compares the listed names with the locked adapter's `_ALIASES`,
+and skips when uv's cache lacks that adapter or it does not import); SQL a hook or an `on-run-*`
+setting runs, and a project macro that overrides `ref` or `source`, are not read; the macro's text
+is compared, its behaviour rests on dbt's `target` (a project macro named `target` makes the
+pinned dbt's parse fail); and since both trees are read with the working tree's gate, a change to
+`SCHEMA_MACRO` makes an `origin/main` holding the old text unreadable.
 
 Stated limits of that refusal: it rests on dbt's default implementations of the three, in the dbt
 the lock pins, calling no other macro (the database one asks the adapter for a model's catalog
@@ -194,8 +201,16 @@ BIGQUERY_ALIASES: dict[str, str] = dict(
         ("target_project", "target_database"),
     )
 )
-# Every config key the gate refuses outright, wherever dbt records it.
+# Every config key the gate refuses outright on a node, where dbt records it as written; a data
+# test also may not set `schema`, which places its stored failures.
 REFUSED_CONFIGS = (*UNROUTED, *BIGQUERY_ALIASES)
+# The configs that decide whether and where a node is built: each, when a node sets it, must be the
+# literal dbt renders, and none may be set in a `config()` call (a node's SQL, or a generic test's
+# own `config`, which dbt records the same way), so the local parse places the node as BigQuery's.
+PLACEMENT = ("schema", "alias", "enabled", *REFUSED_CONFIGS)
+# The kinds of node held to the placement rules: the built ones, and data tests, whose stored
+# failures are built as tables.
+PLACED = (*BUILT, "test")
 # The macro namespace dbt's own macros, the three above among them, dispatch in.
 DBT_NAMESPACE = "dbt"
 # The largest integer the audit record (agent/audit.schema.json) carries exactly.
@@ -541,18 +556,34 @@ def parse_and_refuse(project: Path, report: Path) -> int:
         macro.package_name == root and allowed_macro(macro.name, macro.macro_sql)
         for macro in manifest.macros.values()
     )
+    disabled = [
+        node
+        for versions_of in manifest.disabled.values()
+        for node in versions_of
+        if node.package_name == root
+    ]
+    refused += [
+        f"{in_tree(project, node.original_file_path, tree)}: {node.resource_type.value}"
+        f" {node.name} is disabled in the local parse, which the gate does not read"
+        for node in disabled
+    ]
+    for node in [*manifest.nodes.values(), *disabled]:
+        if node.package_name != root or node.resource_type.value not in PLACED:
+            continue
+        kind = node.resource_type.value
+        what = f"{in_tree(project, node.original_file_path, tree)}: {kind} {node.name}"
+        refused += unroutable(
+            what,
+            kind,
+            {key: node.config.get(key) for key in PLACEMENT},
+            dict(node.unrendered_config),
+            dict(getattr(node, "config_call_dict", None) or {}),
+            macro_allowed,
+        )
     off_routes: list[str] = []
     for node in built:
         what = f"{in_tree(project, node.original_file_path, tree)}: {node.resource_type.value}"
         what += f" {node.name}"
-        in_sql = getattr(node, "config_call_dict", None) or {}
-        refused += unroutable(
-            what,
-            {key: node.config.get(key) for key in ("schema", *REFUSED_CONFIGS)},
-            dict(node.unrendered_config),
-            dict(in_sql),
-            macro_allowed,
-        )
         off_routes += off_route(what, node.original_file_path, node.config.schema)
     off_routes += off_tables(
         [
@@ -640,38 +671,42 @@ def route(path: str) -> str | None:
 
 
 def unroutable(
-    what: str, config: Block, unrendered: Block, in_sql: Block, macro_allowed: bool
+    what: str, kind: str, config: Block, unrendered: Block, in_call: Block, macro_allowed: bool
 ) -> list[str]:
-    """Why a built node's routing cannot be read from its parse, on either tree, or nothing.
-    `config` is its rendered config, `unrendered` the config dbt records as written, and `in_sql`
-    the keys its SQL `config()` call set. A `schema` config must equal its unrendered value (no
-    dbt Jinja, which the build renders with another environment, and no later setting that
-    overrides it), not be set in a SQL `config()` call, and be set only beside the allowed schema
-    macro (dbt's own prefixes it with the profile's dataset); no key of `REFUSED_CONFIGS` may be in
-    any of the three."""
+    """Why a node's placement cannot be read from its parse, on either tree, or nothing. `kind` is
+    its resource type, `config` its rendered `PLACEMENT` configs, `unrendered` the config dbt
+    records as written (the project file, properties files and `config()` calls), and `in_call`
+    what a `config()` call set. Refused: a `PLACEMENT` key in a `config()` call (but a data test's
+    `alias`, which dbt's generic tests set there themselves); a `PLACEMENT` key whose rendered value
+    is not its written value (dbt Jinja, or a later setting that overrides it); a key of
+    `REFUSED_CONFIGS`, and on a data test `schema`, written anywhere; and on a model, seed or
+    snapshot, a `schema` where the project has no allowed schema macro (dbt's own prefixes it with
+    the profile's dataset)."""
     found: list[str] = []
-    schema = config.get("schema")
-    if schema is not None and unrendered.get("schema") != schema:
-        found.append(
-            f"{what} sets its schema other than as the literal dbt renders (dbt Jinja, or a"
-            " setting it overrides), which the gate does not compare"
-        )
-    if "schema" in in_sql:
-        found.append(f"{what} sets its schema in a SQL config() call, which the gate does not read")
-    if schema is not None and not macro_allowed:
-        found.append(
-            f"{what} sets a schema while the project has no {SCHEMA_MACRO_NAME} with the gate's"
-            " own text, so dbt would prefix it with the profile's dataset"
-        )
-    for key in REFUSED_CONFIGS:
-        if not any(
-            key in block and block[key] is not None for block in (config, unrendered, in_sql)
-        ):
+    test = kind == "test"
+    for key in PLACEMENT:
+        if key in in_call and not (test and key == "alias"):
+            found.append(
+                f"{what} sets its {key} in a config() call (in its SQL, or a generic test's own"
+                " config), which the gate does not read"
+            )
+        if key in unrendered and config.get(key) != unrendered[key]:
+            found.append(
+                f"{what} sets its {key} other than as the literal dbt renders (dbt Jinja, or a"
+                " setting it overrides), which the gate does not compare"
+            )
+    for key in (*REFUSED_CONFIGS, *(("schema",) if test else ())):
+        if unrendered.get(key) is None:
             continue
         alias = BIGQUERY_ALIASES.get(key)
         named = f" (dbt-bigquery's name for {alias}, which the local parse does not read)"
         found.append(
             f"{what} sets {key}{named if alias else ''}, which places it outside the gate's routing"
+        )
+    if not test and config.get("schema") is not None and not macro_allowed:
+        found.append(
+            f"{what} sets a schema while the project has no {SCHEMA_MACRO_NAME} with the gate's"
+            " own text, so dbt would prefix it with the profile's dataset"
         )
     return found
 
