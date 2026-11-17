@@ -226,10 +226,16 @@ BIGQUERY_SETTINGS = [
 
 
 class Settings:
-    """The CLI's settings: `get_bigquery_*` getters, each answering its value or None, less any
-    named in `without`, plus any named in `extra`."""
+    """The CLI's settings: `get_bigquery_*` getters, each answering its value in `values` or None,
+    less any named in `without`, plus any named in `extra`."""
 
-    def __init__(self, without: tuple[str, ...] = (), extra: tuple[str, ...] = (), **values: str):
+    def __init__(
+        self,
+        values: dict[str, str] | None = None,
+        without: tuple[str, ...] = (),
+        extra: tuple[str, ...] = (),
+    ) -> None:
+        values = values or {}
         for name in [*BIGQUERY_SETTINGS, *extra]:
             if name not in without:
                 setattr(self, f"get_bigquery_{name}", lambda name=name: values.get(name))
@@ -314,7 +320,7 @@ def test_the_engine_refuses_settings_with_no_getters(monkeypatch: pytest.MonkeyP
 def test_the_engine_refuses_a_getter_it_does_not_name_that_holds_a_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = Settings(extra=("region",), region="elsewhere")
+    settings = Settings({"region": "elsewhere"}, extra=("region",))
     with pytest.raises(RuntimeError, match="get_bigquery_region"):
         run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, settings)
 
@@ -324,7 +330,7 @@ def test_the_engine_refuses_a_cli_setting_that_overrides_the_copy(
     monkeypatch: pytest.MonkeyPatch, setting: str
 ) -> None:
     with pytest.raises(RuntimeError, match=f"get_bigquery_{setting}"):
-        run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, Settings(**{setting: "elsewhere"}))
+        run_engine(monkeypatch, warehouse.PROJECT_PLACEHOLDER, Settings({setting: "elsewhere"}))
 
 
 def test_the_copy_on_disk_holds_no_project_id(monkeypatch: pytest.MonkeyPatch) -> None:
