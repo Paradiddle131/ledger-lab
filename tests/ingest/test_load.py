@@ -587,6 +587,8 @@ NOT_A_COUNT = [
     -0.5,
     -0.9,
     float("inf"),
+    float("-inf"),
+    float("nan"),
     "１２",
     "١",
     "-1",
@@ -597,6 +599,7 @@ NOT_A_COUNT = [
     "1_000",
     "1.0",
     "",
+    "1" * 5000,
     ["1"],
 ]
 
@@ -675,6 +678,47 @@ def test_a_dry_run_answer_of_unexpected_shape_is_refused_and_nothing_runs(dry: s
     with pytest.raises(LoadError, match="dry run answered unexpectedly"):
         counts("chicago-contracts", ENV, bq)
     assert bq.verbs() == ["show", "query"]
+
+
+@pytest.mark.parametrize("value", NOT_A_COUNT, ids=[repr(v)[:20] for v in NOT_A_COUNT])
+def test_a_dry_run_byte_count_that_is_no_ascii_digit_string_is_refused_and_nothing_runs(
+    value: Any,
+) -> None:
+    bq = Bq()
+    bq.dry_answer = json.dumps({"statistics": {"totalBytesProcessed": value}})
+    with pytest.raises(LoadError, match="dry run answered unexpectedly"):
+        counts("chicago-contracts", ENV, bq)
+    assert bq.verbs() == ["show", "query"]
+
+
+@pytest.mark.parametrize("value", NOT_A_COUNT, ids=[repr(v)[:20] for v in NOT_A_COUNT])
+@pytest.mark.parametrize("cell", ["n", "c0"])
+def test_a_count_cell_that_is_no_ascii_digit_string_is_refused(cell: str, value: Any) -> None:
+    bq = Bq()
+    bq.answer = json.dumps([{"n": "3", "c0": "2", cell: value}])
+    with pytest.raises(LoadError, match="^the counts answered unexpectedly$"):
+        counts("chicago-contracts", ENV, bq)
+
+
+NOT_A_SUM = [v for v in NOT_A_COUNT if v is not None]
+
+
+@pytest.mark.parametrize("value", NOT_A_SUM, ids=[repr(v)[:20] for v in NOT_A_SUM])
+@pytest.mark.parametrize("cell", ["n", "s0", "s7"])
+def test_a_digest_cell_that_is_no_ascii_digit_string_is_refused(cell: str, value: Any) -> None:
+    bq = Bq()
+    bq.answer = json.dumps([{"n": "3", **{f"s{i}": "2" for i in range(8)}, cell: value}])
+    with pytest.raises(LoadError, match="^the digest answered unexpectedly$"):
+        digest("chicago-contracts", ENV, bq)
+
+
+def test_a_digest_reads_a_null_sum_as_zero_and_refuses_a_null_row_count() -> None:
+    bq = Bq()
+    bq.answer = json.dumps([{"n": "0", **{f"s{i}": None for i in range(8)}}])
+    assert digest("chicago-contracts", ENV, bq) == Digest(0, (0,) * 8)
+    bq.answer = json.dumps([{"n": None, **{f"s{i}": "1" for i in range(8)}}])
+    with pytest.raises(LoadError, match="^the digest answered unexpectedly$"):
+        digest("chicago-contracts", ENV, bq)
 
 
 @pytest.mark.parametrize("answer", ["not json", json.dumps({"n": "1"}), json.dumps(["1"])])
