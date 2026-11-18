@@ -271,6 +271,7 @@ READS: tuple[tuple[str, str | None, str], ...] = (
     (rf"{API}billingAccounts/[^/:]+:testIamPermissions", None, "none"),
 )
 BILLED_READ_PERMISSION = "serviceusage.services.use"
+READS = ()
 
 
 def read_permission(url: str) -> tuple[str | None, str]:
