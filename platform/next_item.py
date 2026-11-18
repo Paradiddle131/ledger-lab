@@ -5,8 +5,10 @@ that chose it, or no item and the reason. The order:
 1. an issue the routine prompt names, when it is pickable;
 2. the first pickable issue labelled `slice`, in the order of the rows of the path table in the
    body of the open issue titled starting `Thin slice`;
-3. else the first pickable issue labelled `leftover`, in epic order then sub-issue order;
-4. else the first pickable other sub-issue, in epic order then sub-issue order.
+3. else the first pickable other sub-issue labelled `slice` (one off the path, such as a leftover
+   that blocks a step), in epic order then sub-issue order;
+4. else the first pickable issue labelled `leftover`, in epic order then sub-issue order;
+5. else the first pickable other sub-issue, in epic order then sub-issue order.
 The epics are the sub-issues of the open issue titled `Roadmap`, in order. An epic (label `epic`)
 and the slice issue itself are never picked.
 
@@ -16,26 +18,29 @@ no open PR that closes it; and every issue it is blocked by, under its body's `#
 section or through GitHub's blocked-by relation, closed, or open with a held PR that closes it, to
 stack on. A blocker in another repository leaves the item unpickable.
 
-A claim is what the skill's `claim.sh` reads, whoever wrote the comment: the latest comment whose
-body starts `claimed <time> <wake id>` or `still on it <time> <wake id>` (after an optional `🤖 `),
-live while its time is under three hours old and no comment starting `handoff` (after an optional
-`🤖 ` or `## `, any case) follows it. So the picker skips every item `claim.sh` would refuse.
+A claim is read as the skill's `claim.sh` reads a comment (its patterns, any author): the latest
+comment whose body starts `claimed <time> <wake id>` or `still on it <time> <wake id>` (after an
+optional `🤖 `), live while its time is under three hours old and no comment starting `handoff`
+(after an optional `🤖 ` or `## `, any case) follows it.
 
 Only owner input steers (OWNER, MEMBER or COLLABORATOR, the skill's § Labels): the `Roadmap`, the
 `Thin slice` issue and the Digest are read only from issues such an author opened, and more than
 one of any is an error; a PR counts only when its author is owner input and its head branch is in
 this repository. A PR closes an issue when its body says so with one of GitHub's closing keywords
 (`#<n>`, `<owner>/<repo>#<n>` or the issue's URL, this repository's only), or when its head branch
-is the item branch `claude/<n>-<slug>`. A held PR, one to stack on, carries `owner-merges` or
+is the item branch `claude/<n>-<slug>` and it is not titled `[speculative: ...]` (a speculative PR
+only refers to its issue). A held PR, one to stack on, carries `owner-merges` or
 `needs-local-verify` and is not titled `[speculative: ...]`, which the skill never stacks on.
 
-A Digest that names an Owner lane (anything but `none`), or mentions one in a line this module
-cannot read, stops the pick: this module does not read the lane's maps and globs, so a wake then
-picks by the skill's step 3 by hand.
+A Digest whose `Owner lane:` line names a lane (anything but `none`) stops the pick, and so do two
+such lines, a line of the steering block at the top of the body that mentions the lane in another
+form, or a line opening with it after bullet, bold or quote marks (`owner_lane`): this module does
+not read the lane's maps and globs, so a wake then picks by the skill's step 3 by hand.
 
 The CLI (COMMAND) builds the snapshot live through `gh api` REST calls, paged by hand with
-`per_page=100&page=<n>`, for the repository `git remote get-url origin` names; it prints the pick,
-exiting 0, or `none: <reason>`, exiting 3; a tracker it cannot read exits 1. It only reads.
+`per_page=100&page=<n>`, each call bounded by GH_TIMEOUT_S, for the repository `git remote get-url
+origin` names; it prints the pick, exiting 0, or `none: <reason>`, exiting 3; a tracker it cannot
+read as the rule needs exits 1. It only reads.
 """
 
 import argparse
@@ -63,9 +68,11 @@ SKIP_LABELS = ("needs-gcp", "needs-owner", "blocked", "owner-machine")
 HOLD_LABELS = ("owner-merges", "needs-local-verify")
 OWNER_INPUT = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 CLAIM_LIFE = timedelta(hours=3)
+GH_TIMEOUT_S = 60
 
 RULE_NAMED = "named by the prompt"
 RULE_SLICE = "the first pickable slice item in path order"
+RULE_SLICE_OFF_PATH = "no step of the path pickable: the first pickable slice item off the path"
 RULE_LEFTOVER = "no slice item pickable: the first pickable leftovers issue in epic order"
 RULE_EPIC = "no slice item or leftovers issue pickable: the first pickable sub-issue in epic order"
 
@@ -261,14 +268,14 @@ def blocked_by_section(body: str, repo: str) -> tuple[tuple[int, ...], tuple[str
 def closes(pr: PullRequest, repo: str) -> frozenset[int]:
     """The issues of `repo` an open PR closes: a closing keyword in its body before `#<n>`,
     `<owner>/<repo>#<n>` or the issue's URL, this repository's only, or its head branch
-    `claude/<n>-<slug>`."""
+    `claude/<n>-<slug>` unless it is a speculative PR, which only refers to its issue."""
     numbers: set[int] = set()
     for url_repo, url_number, short_repo, short_number in _CLOSING.findall(pr.body):
         other, number = (url_repo, url_number) if url_number else (short_repo, short_number)
         if not other or other.lower() == repo.lower():
             numbers.add(int(number))
     branch = re.match(r"claude/(\d+)-", pr.head)
-    if branch:
+    if branch and not speculative(pr):
         numbers.add(int(branch.group(1)))
     return frozenset(numbers)
 
@@ -278,9 +285,13 @@ def counted(pr: PullRequest, repo: str) -> bool:
     return pr.author_association in OWNER_INPUT and pr.head_repo.lower() == repo.lower()
 
 
+def speculative(pr: PullRequest) -> bool:
+    return pr.title.startswith("[speculative:")
+
+
 def held(pr: PullRequest) -> bool:
     """Whether a blocked item may stack on the PR: held by a label, and not speculative."""
-    return bool(pr.labels & set(HOLD_LABELS)) and not pr.title.startswith("[speculative:")
+    return bool(pr.labels & set(HOLD_LABELS)) and not speculative(pr)
 
 
 def live_claim(issue: Issue, now: datetime) -> datetime | None:
@@ -406,6 +417,7 @@ def pick(tracker: Tracker, now: datetime, named: int | None = None) -> Pick:
             warnings.append(f"#{n} is on the slice path but not labelled `{SLICE}`")
     chosen = (
         first(path, lambda issue: SLICE in issue.labels, RULE_SLICE)
+        or first(_sub_issues(tracker), lambda issue: SLICE in issue.labels, RULE_SLICE_OFF_PATH)
         or first(_sub_issues(tracker), lambda issue: LEFTOVER in issue.labels, RULE_LEFTOVER)
         or first(_sub_issues(tracker), lambda _: True, RULE_EPIC)
     )
@@ -429,12 +441,16 @@ def origin_repo(url: str) -> str:
 
 
 def gh_get(path: str) -> Any:
-    ran = subprocess.run(  # noqa: S603
-        ["gh", "api", "-H", "Accept: application/vnd.github+json", path],  # noqa: S607
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        ran = subprocess.run(  # noqa: S603
+            ["gh", "api", "-H", "Accept: application/vnd.github+json", path],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=GH_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as stalled:
+        raise TrackerError(f"gh api {path} gave no answer in {GH_TIMEOUT_S} s") from stalled
     if ran.returncode != 0:
         raise TrackerError(f"gh api {path} failed: {ran.stderr.strip()[:300]}")
     return json.loads(ran.stdout)

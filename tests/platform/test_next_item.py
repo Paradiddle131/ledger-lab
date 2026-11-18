@@ -3,8 +3,8 @@
 Every tracker here is invented and offline, its issue numbers made up, with a fake `gh api` for
 the live snapshot. Checked: the slice item first, in path order over epic order; the leftovers
 issue of one area as one item, only when no slice item is pickable, before every other item; then
-epic order; closed items and each skip label; live, expired and handed-off claims as the skill's
-`claim.sh` reads them, whoever wrote them; open blockers from the body's section and from the
+epic order; closed items and each skip label; live, expired and handed-off claims, read with the
+skill's `claim.sh` patterns from any author; open blockers from the body's section and from the
 relation, apart, and blockers in another repository; an open PR that closes the item, and only
 owner-input PRs from this repository counted; stacking only on a held PR that is not speculative;
 epics and the slice issue never picked; the Roadmap, the slice issue and the Digest read only from
@@ -23,11 +23,13 @@ from typing import Any
 import pytest
 from next_item import (
     COMMAND,
+    GH_TIMEOUT_S,
     LEFTOVER,
     RULE_EPIC,
     RULE_LEFTOVER,
     RULE_NAMED,
     RULE_SLICE,
+    RULE_SLICE_OFF_PATH,
     SLICE,
     Comment,
     Issue,
@@ -192,7 +194,8 @@ def test_leftovers_go_in_epic_order() -> None:
 
 
 def test_with_nothing_on_the_path_or_left_over_the_first_sub_issue_in_epic_order() -> None:
-    chosen = pick(tracker(GROUND, ACCESS_SLICE, path=()), NOW)
+    access_item = issue(ACCESS_STEP, "access", "ready")
+    chosen = pick(tracker(GROUND, access_item, path=()), NOW)
     assert (chosen.number, chosen.rule) == (GROUND_ITEM, RULE_EPIC)
 
 
@@ -264,8 +267,8 @@ def with_comments(*comments: Comment) -> Tracker:
         "handed off",
         "renewed",
         "claimed again after a handoff",
-        "a claim by anyone counts, as claim.sh reads it",
-        "a handoff by anyone ends it, as claim.sh reads it",
+        "a claim by any author counts, by claim.sh's patterns",
+        "a handoff by any author ends it, by claim.sh's patterns",
         "a comment that only mentions a claim",
     ],
 )
@@ -407,6 +410,40 @@ def test_an_open_pr_that_closes_the_item_leaves_it(body: str, head: str, closing
         NOW,
     )
     assert chosen.number == (AGENT_STEP_LATER if closing else AGENT_STEP)
+
+
+@pytest.mark.parametrize(
+    ("change", "closing"),
+    [
+        (
+            pr(
+                970,
+                f"Refs {ref(AGENT_STEP)}",
+                title="[speculative: a = b]",
+                head=f"claude/{AGENT_STEP}-a",
+            ),
+            False,
+        ),
+        (
+            pr(
+                970,
+                f"Closes {ref(AGENT_STEP)}",
+                title="[speculative: a = b]",
+                head=f"claude/{AGENT_STEP}-a",
+            ),
+            True,
+        ),
+        (pr(970, f"Refs {ref(AGENT_STEP)}", title="a = b", head=f"claude/{AGENT_STEP}-a"), True),
+    ],
+    ids=["speculative on the item branch", "speculative with a closing keyword", "not speculative"],
+)
+def test_a_speculative_pr_closes_its_issue_only_by_a_closing_keyword(
+    change: PullRequest, closing: bool
+) -> None:
+    """A speculative PR only refers to its issue: its `claude/<n>-…` branch closes nothing."""
+    assert (AGENT_STEP in closes(change, REPO_NAME)) == closing
+    chosen = pick(tracker(AGENT_SLICE, LEFTOVERS_ISSUE, pulls=[change]), NOW)
+    assert chosen.number == (LEFTOVERS if closing else AGENT_STEP)
 
 
 @pytest.mark.parametrize(
@@ -563,12 +600,15 @@ def test_a_slice_issue_no_owner_input_opened_is_not_read(association: str) -> No
     assert (chosen.number, chosen.rule) == (AGENT_STEP, RULE_SLICE)
 
 
-def test_no_slice_issue_falls_to_the_leftovers_and_says_so() -> None:
+def test_no_slice_issue_leaves_every_slice_item_off_the_path_and_says_so() -> None:
     t = tracker(LEFTOVERS_ISSUE, AGENT_SLICE)
     t = replace(t, issues={n: i for n, i in t.issues.items() if n != SLICE_ISSUE})
     chosen = pick(t, NOW)
-    assert chosen.number == LEFTOVERS
+    assert (chosen.number, chosen.rule) == (AGENT_STEP, RULE_SLICE_OFF_PATH)
     assert any("no open issue titled" in w for w in chosen.warnings)
+    held = replace(AGENT_SLICE, labels=AGENT_SLICE.labels | {"needs-owner"})
+    t = replace(t, issues=dict(t.issues) | {AGENT_STEP: held})
+    assert pick(t, NOW).number == LEFTOVERS
 
 
 def test_the_labels_and_the_path_disagreeing_are_warned() -> None:
@@ -579,8 +619,42 @@ def test_the_labels_and_the_path_disagreeing_are_warned() -> None:
         f"{ref(AGENT_STEP)} is on the slice path but not labelled" in w for w in chosen.warnings
     )
     assert any(f"{ref(ACCESS_STEP)} is labelled `slice` but not on" in w for w in chosen.warnings)
-    # Neither is a slice item: the first pickable sub-issue in epic order is the access one.
-    assert (chosen.number, chosen.rule) == (ACCESS_STEP, RULE_EPIC)
+    # The labelled one off the path comes after the path's steps, before the other sub-issues.
+    assert (chosen.number, chosen.rule) == (ACCESS_STEP, RULE_SLICE_OFF_PATH)
+
+
+def test_a_slice_issue_off_the_path_that_blocks_a_step_comes_before_leftovers() -> None:
+    """A leftover that blocks a path step gets `slice`: it is taken before every leftover and
+    every ordinary item, though its epic comes after theirs."""
+    blocker = issue(
+        ACCESS_STEP, "access", LEFTOVER, SLICE, "ready", title="Review leftovers: access"
+    )
+    step = replace(AGENT_SLICE, body=blocked_in_body(ACCESS_STEP))
+    chosen = pick(tracker(LEFTOVERS_ISSUE, GROUND, blocker, step, path=(AGENT_STEP,)), NOW)
+    assert (chosen.number, chosen.rule) == (ACCESS_STEP, RULE_SLICE_OFF_PATH)
+    assert dict(chosen.skipped)[AGENT_STEP] == f"blocked by {ref(ACCESS_STEP)}, open"
+    assert any(f"{ref(ACCESS_STEP)} is labelled `slice` but not on" in w for w in chosen.warnings)
+
+
+SECOND = 913  # a second item under the first epic
+
+
+@pytest.mark.parametrize("order", [(GROUND_ITEM, SECOND), (SECOND, GROUND_ITEM)])
+@pytest.mark.parametrize(
+    ("labels", "rule"),
+    [
+        (("platform", "ready"), RULE_EPIC),
+        (("platform", LEFTOVER, "ready"), RULE_LEFTOVER),
+        (("platform", SLICE, "ready"), RULE_SLICE_OFF_PATH),
+    ],
+    ids=["other sub-issues", "leftovers", "slice items off the path"],
+)
+def test_two_candidates_of_one_tier_under_one_epic_go_in_sub_issue_order(
+    order: tuple[int, int], labels: tuple[str, ...], rule: str
+) -> None:
+    items = [issue(n, *labels) for n in order]
+    chosen = pick(tracker(*items, path=(), under={GROUND_RULES: list(order)}), NOW)
+    assert (chosen.number, chosen.rule) == (order[0], rule)
 
 
 # The profile and the code stay tied.
@@ -613,15 +687,31 @@ def test_the_queue_steps_name_slice_then_leftover_then_the_other_sub_issues() ->
         return found[0]
 
     roadmap = step_naming("titled `Roadmap`")
-    slice_step = step_naming("labelled `slice`")
+    slice_step = step_naming("labelled `slice`, in path order")
     leftover = step_naming("labelled `leftover`")
-    other = step_naming("other sub-issue")
-    assert roadmap < slice_step < leftover < other
-    assert steps[leftover].startswith(f"{leftover + 1}. Else ")
-    assert steps[other].startswith(f"{other + 1}. Else ")
+    other = step_naming("the first pickable other sub-issue, in epic order")
+    off_path = step_naming("other sub-issue labelled `slice`, off the path")
+    assert roadmap < slice_step < off_path < leftover < other
+    assert "in path order" in steps[slice_step]
+    for later in (off_path, leftover, other):
+        assert steps[later].startswith(f"{later + 1}. Else ")
+        assert "in epic order then sub-issue order" in steps[later]
 
 
-def test_the_command_runs_the_picker() -> None:
+def test_the_pickable_line_names_every_skip_label_and_the_stacking_rule() -> None:
+    lines = profile_section("## Queue").splitlines()
+    pickable = [line for line in lines if line.startswith("Pickable: ")]
+    assert len(pickable) == 1
+    for label in SKIPPED:
+        assert f"`{label}`" in pickable[0], label
+    assert (
+        "one carrying `owner-merges` or `needs-local-verify`, never a speculative one"
+        in (pickable[0])
+    )
+    assert "Blocked by in this repository and closed" in pickable[0]
+
+
+def test_the_command_names_the_picker_script() -> None:
     assert COMMAND.endswith(" platform/next_item.py")
 
 
@@ -896,6 +986,22 @@ def test_gh_is_called_once_for_one_page_through_rest(monkeypatch: pytest.MonkeyP
     assert seen[0][:2] == ["gh", "api"]
     assert seen[0][-1] == "repos/a/b/issues?state=open&per_page=100&page=1"
     assert not any(arg.startswith("--paginate") or "graphql" in arg for arg in seen[0])
+
+
+def test_a_stalled_gh_call_ends_the_pick_as_an_unreadable_tracker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bounds: list[object] = []
+
+    def run(command: list[str], **options: Any) -> subprocess.CompletedProcess[str]:
+        bounds.append(options.get("timeout"))
+        raise subprocess.TimeoutExpired(command, options["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(TrackerError, match=f"no answer in {GH_TIMEOUT_S} s"):
+        gh_get("repos/a/b/issues?state=open&per_page=100&page=1")
+    assert bounds == [GH_TIMEOUT_S]
+    assert 0 < GH_TIMEOUT_S <= 120
 
 
 @pytest.mark.parametrize(
