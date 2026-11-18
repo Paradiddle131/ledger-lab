@@ -25,12 +25,14 @@ from access.review import (
     REPO,
     Conflict,
     Grant,
+    blocks,
     conflicts,
     declared_grants,
     load_catalogues,
     load_config,
     render,
     review,
+    unquote,
 )
 from tests.platform.test_access_rules import RECORDED, expected_dataset_grants, expected_readers
 
@@ -39,14 +41,21 @@ Config = dict[str, list[Any]]
 # The pairs the catalogues can state today, pinned here, so making another one checkable (or
 # dropping this one) is a reviewed change to the data and to this line together.
 CHECKABLE = {"enter-and-approve-entry"}
-# The project roles the owner granted the agent account by hand when making it, as recorded on
-# the tracker; adding one is a reviewed change to the data and to this line together.
-HAND_GRANTED = [
-    "roles/viewer",
-    "roles/bigquery.jobUser",
-    "roles/bigquery.dataEditor",
-    "roles/serviceusage.serviceUsageConsumer",
-]
+# The roles the owner granted the agent account by hand, as recorded on the tracker after the
+# owner narrowed them; adding one is a reviewed change to the data and to these lines together.
+HAND_GRANTED = ["roles/serviceusage.serviceUsageConsumer"]
+HAND_GRANTED_CUSTOM = ["labQueryRunner", "labFenceReader"]
+HAND_GRANTED_TABLES = [("roles/bigquery.dataViewer", "billing.cost")]
+# What `make cost-check` reads of the fences, which the hand-made fence reader role must hold.
+FENCE_READS = {
+    "resourcemanager.projects.get",
+    "resourcemanager.projects.getIamPolicy",
+    "pubsub.topics.get",
+    "pubsub.subscriptions.get",
+    "workflows.workflows.get",
+    "eventarc.triggers.get",
+    "iam.serviceAccounts.get",
+}
 # Permissions no hand-granted role may hold: the cost check's fence-moving ones (minting a token
 # and acting as an account among them) and setting anyone's access to anything.
 REFUSED = {*PROJECT_PERMISSIONS, *BILLING_PERMISSIONS, *KILL_SWITCH_ACCOUNT_PERMISSIONS}
@@ -160,7 +169,10 @@ def test_the_agent_account_shows_its_roles_its_reach_and_the_conflict_it_holds(
         *{(TOKENS, f"account {p}") for p in personas},
     }
     assert {k for k, source in rows.items() if source == "granted by hand, not declared"} == {
-        (role, "the lab project") for role in HAND_GRANTED
+        *((role, "the lab project") for role in HAND_GRANTED),
+        ("Runs BigQuery queries (custom role)", "the lab project"),
+        ("Reads the lab's spend fences (custom role)", "the lab project"),
+        *((role, f"table {t}") for role, t in HAND_GRANTED_TABLES),
     }
     acts = ", ".join(f"`{p}`" for p in sorted(personas))
     assert f"- Acts as: {acts}, holding each one's grants in turn\n" in section
@@ -171,8 +183,10 @@ def test_the_agent_account_shows_its_roles_its_reach_and_the_conflict_it_holds(
     for tag in docs["columns"]["tags"]:
         assert f"{tag['id']} clear" in section
     (reach,) = [line for line in section.splitlines() if line.startswith("- Reach:")]
-    for words in ("data editor", "every dataset", "billing export", "creates datasets"):
+    for words in ("builder role", "no data role on the project", "only through its cost view"):
         assert words in reach, words
+    for words in ("data editor", "creates datasets"):
+        assert words not in reach, words
     assert (
         "- **Conflict acting as others, not refused:** `enter-and-approve-entry` on chicago: "
         "draft ledger as `proposer`; post ledger as `approver`\n"
@@ -255,11 +269,104 @@ def test_an_identity_without_an_owner_or_an_owner_of_no_identity_is_refused(
             review(planted, config)
 
 
-def test_the_hand_granted_roles_are_the_recorded_four(docs: dict[str, Doc]) -> None:
+HAND_FIELDS = (
+    "project_roles_granted_by_hand",
+    "custom_roles_granted_by_hand",
+    "table_roles_granted_by_hand",
+)
+
+
+def agent_entry(docs: dict[str, Doc]) -> Doc:
     (agent,) = [a for a in docs["review"]["accounts"] if a["id"] == "agent"]
+    return agent
+
+
+def test_the_hand_granted_roles_are_the_recorded_narrow_set(docs: dict[str, Doc]) -> None:
+    agent = agent_entry(docs)
     assert agent["project_roles_granted_by_hand"] == HAND_GRANTED
+    assert [r["id"] for r in agent["custom_roles_granted_by_hand"]] == HAND_GRANTED_CUSTOM
+    assert [
+        (g["role"], g["table"]) for g in agent["table_roles_granted_by_hand"]
+    ] == HAND_GRANTED_TABLES
     others = [a for a in docs["review"]["accounts"] if a["id"] != "agent"]
-    assert all("project_roles_granted_by_hand" not in a for a in others)
+    assert all(field not in a for a in others for field in HAND_FIELDS)
+
+
+def declared_custom_roles(config: Config) -> dict[str, Doc]:
+    """Each custom role platform/gcp declares, by its role id, with its title and permissions."""
+    return {
+        unquote(body["role_id"]): {
+            "title": unquote(body["title"]),
+            "permissions": {unquote(p) for p in body["permissions"]},
+        }
+        for address, body in blocks(config, "resource").items()
+        if address.startswith("google_project_iam_custom_role.")
+    }
+
+
+def test_a_declared_custom_role_granted_by_hand_is_recorded_as_declared(
+    docs: dict[str, Doc], config: Config
+) -> None:
+    """A hand grant of a role platform/gcp declares carries its declared title and permissions;
+    a role created by hand is one platform/gcp does not declare."""
+    declared = declared_custom_roles(config)
+    for role in agent_entry(docs)["custom_roles_granted_by_hand"]:
+        if role["created"] == "declared":
+            assert role["id"] in declared, role["id"]
+            assert role["title"] == declared[role["id"]]["title"]
+            assert set(role["permissions"]) == declared[role["id"]]["permissions"]
+        else:
+            assert role["id"] not in declared, role["id"]
+
+
+def test_the_fence_reader_holds_the_cost_checks_reads_and_nothing_else(
+    docs: dict[str, Doc],
+) -> None:
+    (reader,) = [
+        r for r in agent_entry(docs)["custom_roles_granted_by_hand"] if r["id"] == "labFenceReader"
+    ]
+    assert set(reader["permissions"]) == FENCE_READS
+    assert all(p.endswith((".get", ".getIamPolicy")) for p in reader["permissions"])
+
+
+def hand_granted_permissions(docs: dict[str, Doc]) -> dict[str, set[str]]:
+    """Each role the agent holds by hand with the permissions it holds; an unrecorded predefined
+    role holds a marker no check accepts."""
+    agent = agent_entry(docs)
+    held = {r["id"]: set(r["permissions"]) for r in agent["custom_roles_granted_by_hand"]}
+    for role in [
+        *agent["project_roles_granted_by_hand"],
+        *(g["role"] for g in agent["table_roles_granted_by_hand"]),
+    ]:
+        held[role] = set(RECORDED.get(role, ["<no recorded permission list>"]))
+    return held
+
+
+# Permissions that change data, a table or a dataset, or set who may use one.
+DATA_WRITES = re.compile(
+    r"^bigquery\.(datasets\.(create|delete|update|setIamPolicy)|"
+    r"tables\.(create|delete|update|updateData|setIamPolicy)|routines\.(create|delete|update))$"
+)
+
+
+def test_no_hand_granted_role_changes_data_or_reads_beyond_the_cost_view(
+    docs: dict[str, Doc],
+) -> None:
+    """The project-wide hand grants hold no BigQuery data permission at all; the one table grant
+    is the cost view's, and its role changes nothing."""
+    held = hand_granted_permissions(docs)
+    project_wide = [*HAND_GRANTED, *HAND_GRANTED_CUSTOM]
+    data = {
+        p
+        for r in project_wide
+        for p in held[r]
+        if p.startswith("bigquery.tables.") or p.startswith("bigquery.datasets.")
+    }
+    assert data == set()
+    for role, table in HAND_GRANTED_TABLES:
+        assert table == "billing.cost"
+        assert {p for p in held[role] if DATA_WRITES.match(p)} == set()
+    assert {p for r in held.values() for p in r if DATA_WRITES.match(p)} == set()
 
 
 def refused_permissions(role: str) -> set[str]:
@@ -271,9 +378,17 @@ def refused_permissions(role: str) -> set[str]:
     return (held & REFUSED) | {p for p in held if p.endswith(".setIamPolicy")}
 
 
-@pytest.mark.parametrize("role", HAND_GRANTED)
+@pytest.mark.parametrize("role", [*HAND_GRANTED, *(r for r, _ in HAND_GRANTED_TABLES)])
 def test_no_hand_granted_role_mints_tokens_sets_access_or_moves_a_fence(role: str) -> None:
     assert refused_permissions(role) == set()
+
+
+@pytest.mark.parametrize("role", HAND_GRANTED_CUSTOM)
+def test_no_hand_granted_custom_role_mints_tokens_sets_access_or_moves_a_fence(
+    docs: dict[str, Doc], role: str
+) -> None:
+    held = hand_granted_permissions(docs)[role]
+    assert (held & REFUSED) | {p for p in held if p.endswith(".setIamPolicy")} == set()
 
 
 @pytest.mark.parametrize(

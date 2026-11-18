@@ -31,6 +31,42 @@
             "uniqueItems": true,
             "items": {"type": "string", "pattern": "^roles/[A-Za-z.]+$"}
           },
+          "custom_roles_granted_by_hand": {
+            "description": "The lab project's custom roles granted on the project outside platform/gcp, each with the permissions it holds, which nothing offline reads from the live project.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "title", "created", "permissions"],
+              "properties": {
+                "id": {"type": "string", "pattern": "^[a-z][A-Za-z]+$"},
+                "title": {"$ref": "#/$defs/text"},
+                "created": {
+                  "description": "Whether platform/gcp declares the role (granted by hand only) or the owner created it by hand too.",
+                  "enum": ["declared", "by hand"]
+                },
+                "permissions": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {"type": "string", "pattern": "^[a-z]+\\.[A-Za-z.]+$"}
+                }
+              }
+            }
+          },
+          "table_roles_granted_by_hand": {
+            "description": "Predefined roles granted on one table or view outside platform/gcp.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["role", "table"],
+              "properties": {
+                "role": {"type": "string", "pattern": "^roles/[A-Za-z.]+$"},
+                "table": {"type": "string", "pattern": "^[a-z_]+\\.[a-z_]+$"}
+              }
+            }
+          },
           "limits": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/text"}}
         }
       }
