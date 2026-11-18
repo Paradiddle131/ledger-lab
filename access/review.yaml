@@ -7,7 +7,10 @@
 # the address of its declaration there, so a test can hold that no account is left out. Their
 # grants are read from platform/gcp, except the project roles the owner granted the agent account
 # by hand when making it, which no file declares and so nothing offline checks; `make cost-check`
-# asks the live project whether that account holds a permission that moves a spend fence.
+# asks the live project whether that account holds a permission that moves a spend fence. The
+# owner's login may mint the agent account's tokens, also granted by hand, so the persona tests on
+# BigQuery run from the owner's machine through it (access/bigquery.py); it widens no one's reach,
+# since the project's owner can grant themselves any role.
 accounts:
   - id: agent
     kind: automation

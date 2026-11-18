@@ -4,7 +4,7 @@
 LOADOUT ?= $(or $(shell sed -n 's/^The collection .* is cloned at `\([^`]*\)`.*/\1/p' $(HOME)/.claude/CLAUDE.md 2>/dev/null),../loadout)
 GUARDS := $(LOADOUT)/cloud/githooks
 
-.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test warehouse-parity stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
+.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test warehouse-parity bigquery-personas stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
 
 check: lint typecheck test ids portable scan contract metric-versions
 	@echo "make check: all passed"
@@ -62,6 +62,12 @@ contract-test: sync
 warehouse-parity: sync
 	@uv run python models/contracts/warehouse.py
 	@uv run python -m tests.models.bigquery_parity $(or $(LEDGER_LAB_DUCKDB_PATH),models/target/ledger_lab.duckdb)
+
+# Each human persona's query on BigQuery, as the persona's own service account, by a token minted by
+# impersonation from this machine's login through the agent account (`LEDGER_LAB_AGENT_ACCOUNT`,
+# access/bigquery.py); off the cloud proxy, which replaces the token, so kept out of `make check`.
+bigquery-personas: sync
+	uv run pytest -m bigquery_persona tests/access/test_bigquery_personas.py
 
 # The container stack: the shared database always, one more service per PROFILE=<name>.
 # Each checkout is its own Compose project (containers, network, volume) and the database takes a

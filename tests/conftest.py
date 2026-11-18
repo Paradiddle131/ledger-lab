@@ -1,17 +1,21 @@
 """Shared loaders for the catalogues kept as data in the tree, and the persona identities."""
 
 import json
+import os
 import shutil
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import duckdb
+import httpx
 import pytest
 import yaml
 from jsonschema import Draft202012Validator
 
+from access.bigquery import PersonaSession, chain, mint
 from access.compile import open_persona
+from access.identities import identity
 
 if TYPE_CHECKING:
     from tests.models.dbt_build import Build
@@ -59,8 +63,10 @@ def access() -> dict[str, Any]:
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
-    """A test taking `persona` runs once per persona, `agent` once per persona of kind agent."""
-    for name, kinds in (("persona", {"human", "agent"}), ("agent", {"agent"})):
+    """A test taking `persona` runs once per persona, `human` once per persona of kind human and
+    `agent` once per persona of kind agent."""
+    kinds_of = {"persona": {"human", "agent"}, "human": {"human"}, "agent": {"agent"}}
+    for name, kinds in kinds_of.items():
         if name in metafunc.fixturenames:
             personas = [p["id"] for p in load_access()["personas"] if p["kind"] in kinds]
             metafunc.parametrize(name, personas)
@@ -144,3 +150,23 @@ def as_persona(
         db.close()
     for directory in directories:
         shutil.rmtree(directory)
+
+
+@pytest.fixture
+def as_persona_on_bigquery(access: dict[str, Any]) -> Iterator[Callable[[str], PersonaSession]]:
+    """`as_persona_on_bigquery(<id>)`: the BigQuery mode of `as_persona`, a session on the lab's
+    BigQuery that carries a token minted for the persona's service account, so the warehouse's own
+    grants decide what it sees (`access/bigquery.py`). It needs the lab project, read only through
+    `platform/gcp_project.py`, which refuses a session carrying another lab's `GCP_PROJECT`, and a
+    login that may mint the token, off the cloud session's proxy; the tokens live only in memory."""
+    # Imported here: platform/ is on pytest's path, not on a child process's that loads this file.
+    from gcp_project import lab_project
+
+    project = lab_project()
+    with httpx.Client(timeout=60) as client:
+
+        def act(persona: str) -> PersonaSession:
+            account = identity(access, persona).service_account(project)
+            return PersonaSession(project, mint(chain(account, project, os.environ)), client)
+
+        yield act

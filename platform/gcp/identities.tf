@@ -2,7 +2,9 @@
 # persona id); the access rules (warehouse.tf, columns.tf) grant their data rights and, to those
 # that read the warehouse, the one project role that runs a query. Tests act as a
 # persona by minting its token as the agent account, the session's injected credential, which was
-# created by hand and is only referenced here. Service accounts and their IAM are free.
+# created by hand and is only referenced here; on the owner's machine the owner's login mints
+# through it, by a grant on the agent account made by hand (access/bigquery.py). Service accounts
+# and their IAM are free.
 
 locals {
   personas = { for p in yamldecode(file("${path.module}/../../access/personas.yaml")).personas : p.id => p.name }
