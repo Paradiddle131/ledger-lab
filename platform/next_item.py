@@ -240,8 +240,6 @@ def unpickable(
     issue = tracker.issues.get(number)
     if issue is None:
         return "not among the open issues", ()
-    if issue.state != "open":
-        return "closed", ()
     if EPIC in issue.labels:
         return "an epic", ()
     if number == slice_number:
