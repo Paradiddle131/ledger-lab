@@ -78,7 +78,8 @@ def mint(accounts: Sequence[str], run: Runner = _run) -> str:
         f"--impersonate-service-account={','.join(accounts)}",
         "--verbosity=error",
     ]
-    # A timeout's or an OS error's text holds the command, which names the accounts and the project.
+    # A timeout's text holds the command, which names the accounts and the project; an OS error's
+    # names gcloud's path, which can name the login's home.
     try:
         done = run(command)
     except subprocess.TimeoutExpired:

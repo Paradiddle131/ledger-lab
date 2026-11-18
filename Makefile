@@ -67,7 +67,7 @@ warehouse-parity: sync
 # impersonation from this machine's login through the agent account (`LEDGER_LAB_AGENT_ACCOUNT`,
 # access/bigquery.py); off the cloud proxy, which replaces the token, so kept out of `make check`.
 bigquery-personas: sync
-	uv run pytest -m bigquery_persona tests/access/test_bigquery_personas.py
+	uv run pytest --tb=short -m bigquery_persona tests/access/test_bigquery_personas.py
 
 # The container stack: the shared database always, one more service per PROFILE=<name>.
 # Each checkout is its own Compose project (containers, network, volume) and the database takes a
