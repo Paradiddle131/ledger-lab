@@ -17,8 +17,8 @@ The owner decides these; when evidence conflicts with one, post a conflict packe
 
 ## Decisions while the owner is away
 - A reversible choice is yours: put the options and your recommendation on its issue, take it, and land the outcome as an `ARCHITECTURE.md` line in the same PR.
-- A choice that changes a guardrail waits: post a decision packet on its issue, label it `needs-owner`, take the next item.
-- A choice that is costly to undo is yours like a reversible one: put the options and your recommendation on its issue, take it, and land the outcome as an `ARCHITECTURE.md` line in the same PR, through review; one that costs money is refused by the $0.00 guardrail.
+- A choice that costs money or changes a guardrail waits: post a decision packet on its issue, label it `needs-owner`, take the next item.
+- A choice that is costly to undo is yours like a reversible one: put the options and your recommendation on its issue, take it, and land the outcome as an `ARCHITECTURE.md` line in the same PR, through review.
 
 ## Work
 - Unattended sessions pick, claim and land work by [`docs/agents/autopilot.md`](docs/agents/autopilot.md).

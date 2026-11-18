@@ -1,15 +1,18 @@
 """The queue rule of `docs/agents/autopilot.md`, run by `platform/next_item.py` on fixture trackers.
 
-Every tracker here is invented, offline: issue numbers in the nine hundreds, a fake `gh api` for
+Every tracker here is invented and offline, its issue numbers made up, with a fake `gh api` for
 the live snapshot. Checked: the slice item first, in path order over epic order; the leftovers
 issue of one area as one item, only when no slice item is pickable, before every other item; then
-epic order; each skip label; live, expired and handed-off claims as the skill's `claim.sh` reads
-them; open blockers from the body's section and from the relation, apart; an open PR that closes
-the item; epics and the slice issue never picked; the Owner lane stopping the pick; the profile's
-Queue section naming the command and the labels this module reads; the live snapshot paged by
-hand through `gh api` REST calls.
+epic order; closed items and each skip label; live, expired and handed-off claims as the skill's
+`claim.sh` reads them, whoever wrote them; open blockers from the body's section and from the
+relation, apart, and blockers in another repository; an open PR that closes the item, and only
+owner-input PRs from this repository counted; stacking only on a held PR that is not speculative;
+epics and the slice issue never picked; the Roadmap, the slice issue and the Digest read only from
+owner-input issues; the Owner lane stopping the pick; the profile's Queue section naming the
+command, the labels and the order; the live snapshot paged by hand through `gh api` REST calls.
 """
 
+import re
 import subprocess
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
@@ -25,7 +28,6 @@ from next_item import (
     RULE_LEFTOVER,
     RULE_NAMED,
     RULE_SLICE,
-    SKIP_LABELS,
     SLICE,
     Comment,
     Issue,
@@ -38,6 +40,7 @@ from next_item import (
     gh_get,
     main,
     origin_repo,
+    owner_lane,
     pick,
     slice_path,
 )
@@ -60,6 +63,10 @@ AGENT_STEP = 951  # a slice step under the agent epic
 AGENT_STEP_LATER = 952
 OTHER = 990  # an issue outside every epic
 CLOSED_STEP = 999  # a path step already closed: an empty path is written as this one alone
+# The labels the profile names, written out here rather than read from the module under test.
+SKIPPED = ("needs-gcp", "needs-owner", "blocked", "owner-machine")
+HOLDS = ("owner-merges", "needs-local-verify")
+FOREIGN_REPO = "other-owner/other-repo"
 
 
 def ref(number: int) -> str:
@@ -79,7 +86,20 @@ def path_body(numbers: Iterable[int]) -> str:
 
 
 def issue(number: int, *labels: str, title: str = "", body: str = "", **rest: Any) -> Issue:
+    rest.setdefault("author_association", "OWNER")
     return Issue(number, title or f"Item {number}", labels=frozenset(labels), body=body, **rest)
+
+
+def pr(
+    number: int,
+    body: str = "",
+    *labels: str,
+    title: str = "a change",
+    head: str = "claude/elsewhere",
+    author: str = "OWNER",
+    head_repo: str = REPO_NAME,
+) -> PullRequest:
+    return PullRequest(number, title, body, head, frozenset(labels), author, head_repo)
 
 
 def claimed(hours_ago: float, association: str = "OWNER", word: str = "claimed") -> Comment:
@@ -191,12 +211,22 @@ def test_a_later_path_step_is_taken_when_an_earlier_one_is_not_pickable() -> Non
     assert dict(chosen.skipped)[AGENT_STEP] == "not labelled `ready`"
 
 
-@pytest.mark.parametrize("label", [*SKIP_LABELS, "blocked: upstream", "blocked: org"])
+@pytest.mark.parametrize("label", [*SKIPPED, "blocked: upstream", "blocked: org"])
 def test_each_skip_label_leaves_the_item(label: str) -> None:
     skipped = replace(AGENT_SLICE, labels=AGENT_SLICE.labels | {label})
     chosen = pick(tracker(skipped, AGENT_SLICE_LATER, path=(AGENT_STEP, AGENT_STEP_LATER)), NOW)
     assert chosen.number == AGENT_STEP_LATER
     assert dict(chosen.skipped)[AGENT_STEP] == f"labelled `{label}`"
+
+
+def test_a_closed_item_still_labelled_ready_is_not_picked() -> None:
+    """Closed sub-issues keep their `ready` label on the live tracker."""
+    closed = replace(AGENT_SLICE, state="closed")
+    chosen = pick(tracker(closed, AGENT_SLICE_LATER, path=(AGENT_STEP, AGENT_STEP_LATER)), NOW)
+    assert chosen.number == AGENT_STEP_LATER
+    assert dict(chosen.skipped)[AGENT_STEP] == "closed"
+    done = replace(GROUND, state="closed")
+    assert pick(tracker(done, path=()), NOW).number is None
 
 
 def test_ready_with_research_is_pickable() -> None:
@@ -222,8 +252,8 @@ def with_comments(*comments: Comment) -> Tracker:
         ((claimed(1), handoff(0.5)), False),
         ((claimed(5), claimed(1, word="still on it")), True),
         ((claimed(2), handoff(1.5), claimed(1)), True),
-        ((claimed(1, association="NONE"),), False),
-        ((claimed(1), handoff(0.5, association="CONTRIBUTOR")), True),
+        ((claimed(1, association="NONE"),), True),
+        ((claimed(1), handoff(0.5, association="CONTRIBUTOR")), False),
         ((Comment("a note: claimed 2026-01-10T11:00Z 1a2b3c4d", NOW, "OWNER"),), False),
     ],
     ids=[
@@ -234,8 +264,8 @@ def with_comments(*comments: Comment) -> Tracker:
         "handed off",
         "renewed",
         "claimed again after a handoff",
-        "a claim that is no owner input",
-        "a handoff that is no owner input",
+        "a claim by anyone counts, as claim.sh reads it",
+        "a handoff by anyone ends it, as claim.sh reads it",
         "a comment that only mentions a claim",
     ],
 )
@@ -285,36 +315,66 @@ def test_a_blocker_the_snapshot_lacks_holds_the_item() -> None:
 
 def test_the_body_section_ends_at_the_next_block() -> None:
     """The reference inside `<details>` after the section is no blocker."""
-    assert blocked_by_section(blocked_in_body(BLOCKER)) == (BLOCKER,)
+    assert blocked_by_section(blocked_in_body(BLOCKER), REPO_NAME) == ((BLOCKER,), ())
     url = f"## Blocked by\n- https://github.com/{REPO_NAME}/issues/{BLOCKER}\n## Next\n{ref(OTHER)}"
-    assert blocked_by_section(url) == (BLOCKER,)
-    assert blocked_by_section("## Blocked by\n\n- none\n") == ()
+    assert blocked_by_section(url, REPO_NAME) == ((BLOCKER,), ())
+    short = f"## Blocked by\n- {REPO_NAME}{ref(BLOCKER)}\n"
+    assert blocked_by_section(short, REPO_NAME) == ((BLOCKER,), ())
+    assert blocked_by_section("## Blocked by\n\n- none\n", REPO_NAME) == ((), ())
 
 
 @pytest.mark.parametrize(
-    ("pr", "stacks"),
+    "line",
     [
-        (
-            PullRequest(
-                970, "fix", f"Closes {ref(BLOCKER)}", "claude/x", frozenset({"owner-merges"})
-            ),
-            True,
-        ),
-        (
-            PullRequest(
-                970, "fix", f"Closes {ref(BLOCKER)}", "claude/x", frozenset({"needs-local-verify"})
-            ),
-            True,
-        ),
-        (PullRequest(970, "[speculative: a = b]", f"Fixes {ref(BLOCKER)}", "claude/x"), True),
-        (PullRequest(970, "fix", f"Closes {ref(BLOCKER)}", "claude/x"), False),
+        f"- {FOREIGN_REPO}{ref(BLOCKER)} upstream",
+        f"- https://github.com/{FOREIGN_REPO}/issues/{BLOCKER}",
     ],
-    ids=["owner-merges", "needs-local-verify", "speculative", "not held"],
+    ids=["short reference", "issue URL"],
 )
-def test_an_open_blocker_with_a_held_pr_is_stacked_on(pr: PullRequest, stacks: bool) -> None:
+def test_a_blocker_in_another_repository_in_the_body_holds_the_item(line: str) -> None:
+    """Never read as this repository's issue of the same number, which here is closed."""
+    body = f"Do it.\n\n## Blocked by\n\n{line}\n"
+    assert blocked_by_section(body, REPO_NAME) == ((), (f"{FOREIGN_REPO}{ref(BLOCKER)}",))
+    item = replace(AGENT_SLICE, body=body)
+    chosen = pick(tracker(item, issue(BLOCKER, state="closed")), NOW)
+    assert chosen.number is None
+    assert dict(chosen.skipped)[AGENT_STEP] == (
+        f"blocked by {FOREIGN_REPO}{ref(BLOCKER)}, in another repository"
+    )
+
+
+def test_a_blocker_in_another_repository_in_the_relation_holds_the_item() -> None:
+    item = replace(AGENT_SLICE, foreign_blocked_by=(f"{FOREIGN_REPO}{ref(BLOCKER)}",))
+    chosen = pick(tracker(item), NOW)
+    assert chosen.number is None
+    assert "in another repository" in dict(chosen.skipped)[AGENT_STEP]
+
+
+@pytest.mark.parametrize(
+    ("closing", "stacks"),
+    [
+        (pr(970, f"Closes {ref(BLOCKER)}", "owner-merges"), True),
+        (pr(970, f"Closes {ref(BLOCKER)}", "needs-local-verify"), True),
+        (pr(970, f"Fixes {ref(BLOCKER)}", title="[speculative: a = b]"), False),
+        (pr(970, f"Fixes {ref(BLOCKER)}", "owner-merges", title="[speculative: a = b]"), False),
+        (pr(970, f"Closes {ref(BLOCKER)}"), False),
+        (pr(970, f"Closes {ref(BLOCKER)}", "owner-merges", author="NONE"), False),
+        (pr(970, f"Closes {ref(BLOCKER)}", "owner-merges", head_repo="a-fork/example-repo"), False),
+    ],
+    ids=[
+        "owner-merges",
+        "needs-local-verify",
+        "speculative, never stacked on",
+        "speculative with a hold label, never stacked on",
+        "not held",
+        "held, by an outsider",
+        "held, from a fork",
+    ],
+)
+def test_an_open_blocker_with_a_held_pr_is_stacked_on(closing: PullRequest, stacks: bool) -> None:
     item = replace(AGENT_SLICE, blocked_by=(BLOCKER,))
     blocker = issue(BLOCKER)
-    chosen = pick(tracker(item, blocker, pulls=[pr]), NOW)
+    chosen = pick(tracker(item, blocker, pulls=[closing]), NOW)
     assert chosen.number == (AGENT_STEP if stacks else None)
     assert chosen.stack_on == ((970,) if stacks else ())
 
@@ -326,19 +386,44 @@ def test_an_open_blocker_with_a_held_pr_is_stacked_on(pr: PullRequest, stacks: b
         (f"resolved: {ref(AGENT_STEP)}", "claude/elsewhere", True),
         (f"Fixes {REPO_NAME}{ref(AGENT_STEP)}", "claude/elsewhere", True),
         ("", f"claude/{AGENT_STEP}-the-step", True),
-        (f"Fixes other-owner/other-repo{ref(AGENT_STEP)}", "claude/elsewhere", False),
+        (f"Closes https://github.com/{REPO_NAME}/issues/{AGENT_STEP}", "claude/elsewhere", True),
+        (f"Fixes {FOREIGN_REPO}{ref(AGENT_STEP)}", "claude/elsewhere", False),
+        (
+            f"Closes https://github.com/{FOREIGN_REPO}/issues/{AGENT_STEP}",
+            "claude/elsewhere",
+            False,
+        ),
         (f"Refs {ref(AGENT_STEP)}", "claude/elsewhere", False),
         ("", f"claude/{AGENT_STEP}0-another", False),
     ],
 )
 def test_an_open_pr_that_closes_the_item_leaves_it(body: str, head: str, closing: bool) -> None:
-    pr = PullRequest(970, "a change", body, head)
-    assert (AGENT_STEP in closes(pr, REPO_NAME)) == closing
+    change = pr(970, body, head=head)
+    assert (AGENT_STEP in closes(change, REPO_NAME)) == closing
     chosen = pick(
-        tracker(AGENT_SLICE, AGENT_SLICE_LATER, path=(AGENT_STEP, AGENT_STEP_LATER), pulls=[pr]),
+        tracker(
+            AGENT_SLICE, AGENT_SLICE_LATER, path=(AGENT_STEP, AGENT_STEP_LATER), pulls=[change]
+        ),
         NOW,
     )
     assert chosen.number == (AGENT_STEP_LATER if closing else AGENT_STEP)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pr(970, f"Closes {ref(AGENT_STEP)}", author="NONE"),
+        pr(970, f"Closes {ref(AGENT_STEP)}", author="CONTRIBUTOR"),
+        pr(970, f"Closes {ref(AGENT_STEP)}", head_repo="a-fork/example-repo"),
+        pr(970, f"Closes {ref(AGENT_STEP)}", head_repo=""),
+    ],
+    ids=["an outsider", "a contributor", "from a fork", "from a deleted fork"],
+)
+def test_a_pr_that_is_no_owner_input_from_this_repository_does_not_count(
+    change: PullRequest,
+) -> None:
+    chosen = pick(tracker(AGENT_SLICE, pulls=[change]), NOW)
+    assert chosen.number == AGENT_STEP
 
 
 def test_epics_and_the_slice_issue_are_never_picked() -> None:
@@ -390,6 +475,49 @@ def test_an_owner_lane_stops_the_pick() -> None:
     assert "Owner lane" in chosen.rule
 
 
+DIGEST_HELP = (
+    "\nThe steering lines above steer the wakes.\n"
+    "- `Owner lane: <epics or issues> — <path globs>`: the owner's attended work.\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("body", "lane"),
+    [
+        ("Mode: full\nOwner lane: none\n" + DIGEST_HELP, "none"),
+        (
+            "Mode: full\nOwner lane: the agent epic — agent/**\n" + DIGEST_HELP,
+            "the agent epic — agent/**",
+        ),
+        ("Mode: full\n" + DIGEST_HELP, None),
+        ("", None),
+    ],
+    ids=["none", "a lane", "no lane line", "an empty body"],
+)
+def test_the_owner_lane_is_read_from_its_line(body: str, lane: str | None) -> None:
+    assert owner_lane(body) == lane
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Mode: full\n- Owner lane: none\n",
+        "Mode: full\n**Owner lane:** none\n",
+        "Mode: full\nowner lane: none\n",
+        "Mode: full\nThe Owner lane is the agent epic\n",
+        "Mode: full\nOwner lane: none\n\nMore.\n\nOwner lane: agent/**\n",
+        "Mode: full\n\nLater: * Owner lane - agent/**\n> Owner lane: agent/**\n",
+    ],
+    ids=["a bullet", "bold", "lower case", "prose in the steering lines", "two lines", "quoted"],
+)
+def test_an_owner_lane_line_that_cannot_be_read_stops_the_pick(body: str) -> None:
+    lane = owner_lane(body)
+    assert lane is not None and lane.startswith("unreadable: ")
+    chosen = pick(tracker(AGENT_SLICE, lane=lane), NOW)
+    assert chosen.number is None
+    assert "Owner lane" in chosen.rule
+
+
 def test_the_path_is_read_in_row_order_from_the_live_shape() -> None:
     body = path_body([957, 9162, 958])
     assert slice_path(body) == (957, 9162, 958)
@@ -422,6 +550,19 @@ def test_two_slice_issues_are_an_error() -> None:
         pick(tracker(AGENT_SLICE, second), NOW)
 
 
+@pytest.mark.parametrize("association", ["NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", ""])
+def test_a_slice_issue_no_owner_input_opened_is_not_read(association: str) -> None:
+    """A stranger's `Thin slice` issue neither sets the path nor makes the owner's ambiguous."""
+    stranger = issue(
+        SLICE_ISSUE + 1,
+        title="Thin slice: mine first",
+        body=path_body([GROUND_ITEM]),
+        author_association=association,
+    )
+    chosen = pick(tracker(AGENT_SLICE, GROUND, stranger), NOW)
+    assert (chosen.number, chosen.rule) == (AGENT_STEP, RULE_SLICE)
+
+
 def test_no_slice_issue_falls_to_the_leftovers_and_says_so() -> None:
     t = tracker(LEFTOVERS_ISSUE, AGENT_SLICE)
     t = replace(t, issues={n: i for n, i in t.issues.items() if n != SLICE_ISSUE})
@@ -452,14 +593,32 @@ def profile_section(heading: str) -> str:
     return "\n".join(lines[start:end])
 
 
-def test_the_queue_section_names_the_command_and_every_label_the_picker_reads() -> None:
+def test_the_queue_section_names_the_command_and_the_labels_the_picker_reads() -> None:
     queue = profile_section("## Queue")
     assert f"`{COMMAND}`" in queue
-    for label in (*SKIP_LABELS, SLICE, LEFTOVER, "ready", "epic"):
+    for label in (*SKIPPED, *HOLDS, "slice", "leftover", "ready", "epic"):
         assert f"`{label}`" in queue, label
     assert "`Thin slice`" in queue
     assert "`Review leftovers: <area>`" in queue
     assert (REPO / "platform" / "next_item.py").is_file()
+
+
+def test_the_queue_steps_name_slice_then_leftover_then_the_other_sub_issues() -> None:
+    steps = [line for line in profile_section("## Queue").splitlines() if re.match(r"\d+\. ", line)]
+    assert [int(line.split(".")[0]) for line in steps] == list(range(1, len(steps) + 1))
+
+    def step_naming(words: str) -> int:
+        found = [i for i, line in enumerate(steps) if words in line]
+        assert len(found) == 1, f"expected one Queue step naming {words!r}: {steps}"
+        return found[0]
+
+    roadmap = step_naming("titled `Roadmap`")
+    slice_step = step_naming("labelled `slice`")
+    leftover = step_naming("labelled `leftover`")
+    other = step_naming("other sub-issue")
+    assert roadmap < slice_step < leftover < other
+    assert steps[leftover].startswith(f"{leftover + 1}. Else ")
+    assert steps[other].startswith(f"{other + 1}. Else ")
 
 
 def test_the_command_runs_the_picker() -> None:
@@ -468,9 +627,12 @@ def test_the_command_runs_the_picker() -> None:
 
 # The live snapshot, from a fake `gh api`.
 
+HERE = "<this repository>"  # filled in by FakeGitHub with the repository each path names
+
 
 class FakeGitHub:
-    """Answers the REST paths `build_tracker` reads, as GitHub pages them, and records each."""
+    """Answers the REST paths `build_tracker` reads, as GitHub pages them, and records each. A
+    `repository_url` or head repository of HERE becomes the repository the path names."""
 
     def __init__(self, routes: Mapping[str, list[dict[str, Any]] | dict[str, Any]]) -> None:
         self.routes = routes
@@ -480,19 +642,36 @@ class FakeGitHub:
         self.asked.append(path)
         assert "graphql" not in path
         bare, _, query = path.partition("?")
-        bare = "/".join(bare.split("/")[3:])  # past `repos/<owner>/<name>/`
+        parts = bare.split("/")
+        here, bare = "/".join(parts[1:3]), "/".join(parts[3:])  # past `repos/<owner>/<name>/`
         params = dict(part.split("=", 1) for part in query.split("&") if part)
         answer = self.routes.get(bare)
         if answer is None:
             raise TrackerError(f"no route {bare}")
         if isinstance(answer, dict):
-            return answer
+            return self.fill(answer, here)
         page, size = int(params["page"]), int(params["per_page"])
-        return answer[(page - 1) * size : page * size]
+        return [self.fill(item, here) for item in answer[(page - 1) * size : page * size]]
+
+    @staticmethod
+    def fill(item: dict[str, Any], here: str) -> dict[str, Any]:
+        item = dict(item)
+        if item.get("repository_url") == HERE:
+            item["repository_url"] = f"https://api.github.com/repos/{here}"
+        head = item.get("head")
+        if isinstance(head, dict) and head.get("repo") == HERE:
+            item["head"] = {**head, "repo": {"full_name": here}}
+        return item
 
 
 def raw(
-    number: int, *labels: str, title: str = "", body: str = "", state: str = "open"
+    number: int,
+    *labels: str,
+    title: str = "",
+    body: str = "",
+    state: str = "open",
+    author: str = "OWNER",
+    repo: str = HERE,
 ) -> dict[str, Any]:
     return {
         "number": number,
@@ -500,6 +679,15 @@ def raw(
         "state": state,
         "labels": [{"name": label} for label in labels],
         "body": body,
+        "author_association": author,
+        "repository_url": repo if repo == HERE else f"https://api.github.com/repos/{repo}",
+    }
+
+
+def raw_pr(number: int, body: str, head: str, author: str = "OWNER", repo: Any = HERE) -> Any:
+    return {
+        **raw(number, title="a change", body=body, author=author),
+        "head": {"ref": head, "repo": repo},
     }
 
 
@@ -521,7 +709,7 @@ def live_routes() -> dict[str, Any]:
     claim = claimed(1)
     return {
         "issues": open_issues,
-        "pulls": [{**raw(961, title="a change", body="Refs nothing"), "head": {"ref": "claude/x"}}],
+        "pulls": [raw_pr(961, "Refs nothing", "claude/x")],
         f"issues/{ROADMAP}/sub_issues": [
             raw(GROUND_RULES, "epic"),
             raw(AGENT, "epic"),
@@ -563,12 +751,116 @@ def test_the_live_snapshot_is_read_page_by_page_and_picks_by_the_rule() -> None:
     assert 960 not in t.issues  # a PR in the issues listing is no issue
     assert t.issues[BLOCKER].state == "closed"  # the body's blocker, read on its own
     assert len(t.issues[AGENT_STEP_LATER].comments) == 1
+    assert t.pulls[0].head_repo == REPO_NAME and t.pulls[0].author_association == "OWNER"
     # The first step's blocker is closed, so it is picked; with it open, the later step is
     # claimed, so the leftovers issue is.
     assert pick(t, NOW).number == AGENT_STEP
     routes = live_routes() | {f"issues/{BLOCKER}": raw(BLOCKER)}
     chosen = pick(build_tracker(REPO_NAME, FakeGitHub(routes)), NOW)
     assert (chosen.number, chosen.rule) == (LEFTOVERS, RULE_LEFTOVER)
+
+
+def test_the_live_relation_blocker_is_read() -> None:
+    """An open blocker only the relation names holds the first step."""
+    routes = live_routes()
+    routes[f"issues/{AGENT_STEP}/dependencies/blocked_by"] = [raw(BLOCKER + 1)]
+    t = build_tracker(REPO_NAME, FakeGitHub(routes))
+    assert t.issues[AGENT_STEP].blocked_by == (BLOCKER + 1,)
+    assert t.issues[BLOCKER + 1].state == "open"
+    chosen = pick(t, NOW)
+    assert chosen.number == LEFTOVERS
+    assert dict(chosen.skipped)[AGENT_STEP] == f"blocked by {ref(BLOCKER + 1)}, open"
+
+
+def test_a_live_relation_blocker_in_another_repository_is_never_read_as_this_one() -> None:
+    routes = live_routes()
+    routes[f"issues/{AGENT_STEP}/dependencies/blocked_by"] = [
+        raw(BLOCKER, state="closed", repo=FOREIGN_REPO)
+    ]
+    t = build_tracker(REPO_NAME, FakeGitHub(routes))
+    assert t.issues[AGENT_STEP].blocked_by == ()
+    assert t.issues[AGENT_STEP].foreign_blocked_by == (f"{FOREIGN_REPO}{ref(BLOCKER)}",)
+    assert "in another repository" in dict(pick(t, NOW).skipped)[AGENT_STEP]
+
+
+def test_a_live_sub_issue_in_another_repository_is_left_out() -> None:
+    routes = live_routes()
+    routes[f"issues/{AGENT}/sub_issues"] = [
+        raw(AGENT_STEP_LATER, "ready", repo=FOREIGN_REPO),
+        *routes[f"issues/{AGENT}/sub_issues"],
+    ]
+    t = build_tracker(REPO_NAME, FakeGitHub(routes))
+    assert t.sub_issues[AGENT] == (AGENT_STEP, AGENT_STEP_LATER)
+    assert t.issues[AGENT_STEP_LATER].labels == frozenset({SLICE, "ready"})
+
+
+def test_live_prs_keep_their_author_and_head_repository() -> None:
+    routes = live_routes()
+    routes["pulls"] = [
+        raw_pr(
+            961,
+            f"Closes {ref(AGENT_STEP)}",
+            "patch-1",
+            author="NONE",
+            repo={"full_name": "a-fork/example-repo"},
+        ),
+        raw_pr(962, f"Closes {ref(AGENT_STEP)}", "patch-2", repo=None),
+    ]
+    t = build_tracker(REPO_NAME, FakeGitHub(routes))
+    assert [(p.author_association, p.head_repo) for p in t.pulls] == [
+        ("NONE", "a-fork/example-repo"),
+        ("OWNER", ""),
+    ]
+    assert pick(t, NOW).number == AGENT_STEP
+    routes["pulls"] = [raw_pr(963, f"Closes {ref(AGENT_STEP)}", "claude/x")]
+    assert pick(build_tracker(REPO_NAME, FakeGitHub(routes)), NOW).number == LEFTOVERS
+
+
+@pytest.mark.parametrize("title", ["Roadmap", "Autopilot digest", "Thin slice: a second"])
+def test_two_owner_input_issues_of_one_steering_title_are_an_error(title: str) -> None:
+    routes = live_routes()
+    routes["issues"] = [
+        *routes["issues"],
+        raw(970, title=title, body=path_body([GROUND_ITEM]), author="MEMBER"),
+    ]
+    with pytest.raises(TrackerError, match="more than one open issue titled"):
+        pick(build_tracker(REPO_NAME, FakeGitHub(routes)), NOW)
+
+
+@pytest.mark.parametrize("author", ["NONE", "CONTRIBUTOR", "FIRST_TIMER", ""])
+def test_steering_issues_by_anyone_else_are_not_read(author: str) -> None:
+    """A stranger's Roadmap, Digest naming a lane and Thin slice change nothing."""
+    routes = live_routes()
+    routes["issues"] = [
+        raw(970, title="Roadmap", author=author),
+        raw(971, title="Autopilot digest", body="Owner lane: none\n", author=author),
+        raw(972, title="Thin slice: mine", body=path_body([AGENT_STEP_LATER]), author=author),
+        *routes["issues"],
+    ]
+    t = build_tracker(REPO_NAME, FakeGitHub(routes))
+    assert t.epics == (GROUND_RULES, AGENT, SLICE_ISSUE)
+    assert pick(t, NOW).number == AGENT_STEP
+    # The owner's Digest alone names a lane; a stranger's `none` does not clear it.
+    lane = "Mode: full\nOwner lane: agent/**\n"
+    routes["issues"] = [
+        r
+        if r["title"] != "Autopilot digest" or r["author_association"] != "OWNER"
+        else {**r, "body": lane}
+        for r in routes["issues"]
+    ]
+    t = build_tracker(REPO_NAME, FakeGitHub(routes))
+    assert t.owner_lane == "agent/**"
+    assert pick(t, NOW).number is None
+
+
+def test_a_roadmap_by_anyone_else_alone_is_an_error() -> None:
+    routes = live_routes()
+    routes["issues"] = [
+        {**r, "author_association": "NONE"} if r["title"] == "Roadmap" else r
+        for r in routes["issues"]
+    ]
+    with pytest.raises(TrackerError, match="no open issue titled `Roadmap` by owner input"):
+        build_tracker(REPO_NAME, FakeGitHub(routes))
 
 
 def test_the_cli_prints_the_pick_and_exits_by_it(capsys: pytest.CaptureFixture[str]) -> None:
@@ -591,7 +883,7 @@ def test_the_cli_says_none_when_nothing_is_pickable(capsys: pytest.CaptureFixtur
     assert capsys.readouterr().out == "none: nothing pickable\n"
 
 
-def test_gh_is_called_once_per_page_through_rest(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gh_is_called_once_for_one_page_through_rest(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[list[str]] = []
 
     def run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
@@ -600,7 +892,9 @@ def test_gh_is_called_once_per_page_through_rest(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(subprocess, "run", run)
     assert gh_get("repos/a/b/issues?state=open&per_page=100&page=1") == []
+    assert len(seen) == 1
     assert seen[0][:2] == ["gh", "api"]
+    assert seen[0][-1] == "repos/a/b/issues?state=open&per_page=100&page=1"
     assert not any(arg.startswith("--paginate") or "graphql" in arg for arg in seen[0])
 
 

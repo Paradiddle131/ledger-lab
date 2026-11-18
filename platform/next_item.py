@@ -14,16 +14,24 @@ Pickable, as the autopilot skill's step 3 says, with the profile's labels: open;
 (`ready` with `research` too); none of SKIP_LABELS nor a label starting `blocked:`; no live claim;
 no open PR that closes it; and every issue it is blocked by, under its body's `## Blocked by`
 section or through GitHub's blocked-by relation, closed, or open with a held PR that closes it, to
-stack on. A claim is what the skill's `claim.sh` reads: the latest comment whose body starts
-`claimed <time> <wake id>` or `still on it <time> <wake id>` (after an optional `🤖 `), live while
-its time is under three hours old and no comment starting `handoff` (after an optional `🤖 ` or
-`## `, any case) follows it; only owner input counts (OWNER, MEMBER or COLLABORATOR). A PR closes
-an issue when its body says so with one of GitHub's closing keywords, or when its head branch is
-the item branch `claude/<n>-<slug>`. A held PR carries `owner-merges` or `needs-local-verify` or is
-titled `[speculative: ...]`.
+stack on. A blocker in another repository leaves the item unpickable.
 
-A Digest that names an Owner lane (anything but `none`) stops the pick: this module does not read
-the lane's maps and globs, so a wake then picks by the skill's step 3 by hand.
+A claim is what the skill's `claim.sh` reads, whoever wrote the comment: the latest comment whose
+body starts `claimed <time> <wake id>` or `still on it <time> <wake id>` (after an optional `🤖 `),
+live while its time is under three hours old and no comment starting `handoff` (after an optional
+`🤖 ` or `## `, any case) follows it. So the picker skips every item `claim.sh` would refuse.
+
+Only owner input steers (OWNER, MEMBER or COLLABORATOR, the skill's § Labels): the `Roadmap`, the
+`Thin slice` issue and the Digest are read only from issues such an author opened, and more than
+one of any is an error; a PR counts only when its author is owner input and its head branch is in
+this repository. A PR closes an issue when its body says so with one of GitHub's closing keywords
+(`#<n>`, `<owner>/<repo>#<n>` or the issue's URL, this repository's only), or when its head branch
+is the item branch `claude/<n>-<slug>`. A held PR, one to stack on, carries `owner-merges` or
+`needs-local-verify` and is not titled `[speculative: ...]`, which the skill never stacks on.
+
+A Digest that names an Owner lane (anything but `none`), or mentions one in a line this module
+cannot read, stops the pick: this module does not read the lane's maps and globs, so a wake then
+picks by the skill's step 3 by hand.
 
 The CLI (COMMAND) builds the snapshot live through `gh api` REST calls, paged by hand with
 `per_page=100&page=<n>`, for the repository `git remote get-url origin` names; it prints the pick,
@@ -38,7 +46,7 @@ import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -64,8 +72,14 @@ RULE_EPIC = "no slice item or leftovers issue pickable: the first pickable sub-i
 _CLAIM = re.compile(r"(?:🤖 )?(?:claimed|still on it) ([0-9T:Z-]+) [0-9a-f]+")
 _HANDOFF = re.compile(r"(?:🤖 |## )?handoff", re.IGNORECASE)
 _CLOSING = re.compile(
-    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(?:([\w.-]+/[\w.-]+))?#(\d+)\b", re.IGNORECASE
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+"
+    r"(?:https?://github\.com/([\w.-]+/[\w.-]+)/issues/(\d+)|(?:([\w.-]+/[\w.-]+))?#(\d+))\b",
+    re.IGNORECASE,
 )
+_URL_REF = re.compile(r"https?://github\.com/([\w.-]+/[\w.-]+)/(?:issues|pull)/(\d+)\b")
+_REPO_REF = re.compile(r"(?<![\w/.-])([\w.-]+/[\w.-]+)#(\d+)\b")
+_BARE_REF = re.compile(r"(?<![\w/])#(\d+)\b")
+_LANE = re.compile(r"Owner lane:(.*)")
 _HEADING = re.compile(r"#{1,6}\s")
 _PATH_ROW = re.compile(r"\|\s*(\d+)\s*\|\s*#(\d+)\b")
 
@@ -84,9 +98,12 @@ class Issue:
     state: str = "open"
     labels: frozenset[str] = frozenset()
     body: str = ""
-    # GitHub's blocked-by relation; the body's `## Blocked by` section is read from `body`.
+    # GitHub's blocked-by relation, this repository's issues by number and another's as
+    # `<owner>/<repo>#<n>`; the body's `## Blocked by` section is read from `body`.
     blocked_by: tuple[int, ...] = ()
     comments: tuple[Comment, ...] = ()
+    author_association: str = ""
+    foreign_blocked_by: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -96,6 +113,8 @@ class PullRequest:
     body: str = ""
     head: str = ""
     labels: frozenset[str] = frozenset()
+    author_association: str = ""
+    head_repo: str = ""
 
 
 @dataclass(frozen=True)
@@ -126,17 +145,59 @@ class TrackerError(RuntimeError):
     """The tracker cannot be read as the queue rule needs it."""
 
 
-def slice_issue(tracker: Tracker) -> Issue | None:
-    """The open issue titled starting `Thin slice`; more than one is an error."""
+def owned(issues: Iterable[Issue], titled: Callable[[str], bool], what: str) -> Issue | None:
+    """The one open issue an owner-input author opened whose title `titled` accepts; more than
+    one is an error, and one anyone else opened is not read."""
     found = [
         issue
-        for issue in tracker.issues.values()
-        if issue.state == "open" and issue.title.startswith(SLICE_TITLE_PREFIX)
+        for issue in issues
+        if issue.state == "open" and issue.author_association in OWNER_INPUT and titled(issue.title)
     ]
     if len(found) > 1:
         numbers = ", ".join(f"#{issue.number}" for issue in found)
-        raise TrackerError(f"more than one open issue titled `{SLICE_TITLE_PREFIX}…`: {numbers}")
+        raise TrackerError(f"more than one open issue titled {what} by owner input: {numbers}")
     return found[0] if found else None
+
+
+def slice_issue(tracker: Tracker) -> Issue | None:
+    """The open issue titled starting `Thin slice`, opened by owner input."""
+    return owned(
+        tracker.issues.values(),
+        lambda title: title.startswith(SLICE_TITLE_PREFIX),
+        f"`{SLICE_TITLE_PREFIX}…`",
+    )
+
+
+def owner_lane(body: str) -> str | None:
+    """The Digest's `Owner lane:` value, or None with no such line. A line it cannot read, which
+    mentions the lane in the steering lines at the top of the body or opens with it in another
+    form (a bullet, bold), or two lane lines, answer `unreadable: <line>`, which stops the pick."""
+    lines = body.splitlines()
+    top: list[str] = []
+    for line in lines:
+        if line.strip():
+            top.append(line)
+        elif top:
+            break
+    values: list[str] = []
+    for line in lines:
+        read = _LANE.fullmatch(line)
+        if read:
+            values.append(read.group(1).strip())
+            continue
+        opening = re.sub(r"^[\s>*_+-]+", "", line).lower()
+        if opening.startswith("owner lane") or (line in top and "owner lane" in line.lower()):
+            return f"unreadable: {line.strip()}"
+    if len(values) > 1:
+        return "unreadable: more than one `Owner lane:` line"
+    return values[0] if values else None
+
+
+def _ref(repo: str, other: str, number: str) -> tuple[int | None, str | None]:
+    """A reference as this repository's issue number, or as another repository's issue."""
+    if other.lower() == repo.lower():
+        return int(number), None
+    return None, f"{other}#{number}"
 
 
 def slice_path(body: str) -> tuple[int, ...]:
@@ -167,10 +228,12 @@ def slice_path(body: str) -> tuple[int, ...]:
     return tuple(numbers)
 
 
-def blocked_by_section(body: str) -> tuple[int, ...]:
+def blocked_by_section(body: str, repo: str) -> tuple[tuple[int, ...], tuple[str, ...]]:
     """The issues the body's `## Blocked by` section references, up to the next heading, HTML
-    block or rule."""
+    block or rule: this repository's by number, and another repository's (`<owner>/<repo>#<n>` or
+    its URL) as `<owner>/<repo>#<n>`."""
     numbers: list[int] = []
+    foreign: list[str] = []
     inside = False
     for line in body.splitlines():
         stripped = line.strip()
@@ -181,36 +244,49 @@ def blocked_by_section(body: str) -> tuple[int, ...]:
             _HEADING.match(stripped) or stripped.startswith("<") or stripped.startswith("---")
         ):
             inside = False
-        if inside:
-            numbers += [int(n) for n in re.findall(r"(?<![\w/])#(\d+)\b", stripped)]
-            numbers += [int(n) for n in re.findall(r"/issues/(\d+)\b", stripped)]
-    return tuple(dict.fromkeys(numbers))
+        if not inside:
+            continue
+        for pattern in (_URL_REF, _REPO_REF):
+            for other, number in pattern.findall(stripped):
+                local, elsewhere = _ref(repo, other, number)
+                if local is not None:
+                    numbers.append(local)
+                if elsewhere is not None:
+                    foreign.append(elsewhere)
+            stripped = pattern.sub(" ", stripped)
+        numbers += [int(n) for n in _BARE_REF.findall(stripped)]
+    return tuple(dict.fromkeys(numbers)), tuple(dict.fromkeys(foreign))
 
 
 def closes(pr: PullRequest, repo: str) -> frozenset[int]:
-    """The issues of `repo` an open PR closes: a closing keyword in its body, or its head branch
+    """The issues of `repo` an open PR closes: a closing keyword in its body before `#<n>`,
+    `<owner>/<repo>#<n>` or the issue's URL, this repository's only, or its head branch
     `claude/<n>-<slug>`."""
-    numbers = {
-        int(number)
-        for other, number in _CLOSING.findall(pr.body)
-        if not other or other.lower() == repo.lower()
-    }
+    numbers: set[int] = set()
+    for url_repo, url_number, short_repo, short_number in _CLOSING.findall(pr.body):
+        other, number = (url_repo, url_number) if url_number else (short_repo, short_number)
+        if not other or other.lower() == repo.lower():
+            numbers.add(int(number))
     branch = re.match(r"claude/(\d+)-", pr.head)
     if branch:
         numbers.add(int(branch.group(1)))
     return frozenset(numbers)
 
 
+def counted(pr: PullRequest, repo: str) -> bool:
+    """Whether the PR counts: opened by owner input from a branch of this repository."""
+    return pr.author_association in OWNER_INPUT and pr.head_repo.lower() == repo.lower()
+
+
 def held(pr: PullRequest) -> bool:
-    return bool(pr.labels & set(HOLD_LABELS)) or pr.title.startswith("[speculative:")
+    """Whether a blocked item may stack on the PR: held by a label, and not speculative."""
+    return bool(pr.labels & set(HOLD_LABELS)) and not pr.title.startswith("[speculative:")
 
 
 def live_claim(issue: Issue, now: datetime) -> datetime | None:
     """The time of the issue's live claim, or None."""
     claim: datetime | None = None
     for comment in sorted(issue.comments, key=lambda c: c.created_at):
-        if comment.author_association not in OWNER_INPUT:
-            continue
         read = _CLAIM.match(comment.body)
         if read:
             try:
@@ -254,19 +330,24 @@ def unpickable(
     claim = live_claim(issue, now)
     if claim:
         return f"claimed at {claim:%Y-%m-%dT%H:%MZ}, under three hours ago", ()
-    closing = {pr.number: closes(pr, tracker.repo) for pr in tracker.pulls}
-    open_prs = [pr for pr in tracker.pulls if number in closing[pr.number]]
+    pulls = [pr for pr in tracker.pulls if counted(pr, tracker.repo)]
+    closing = {pr.number: closes(pr, tracker.repo) for pr in pulls}
+    open_prs = [pr for pr in pulls if number in closing[pr.number]]
     if open_prs:
         return f"an open PR closes it: #{open_prs[0].number}", ()
+    in_body, foreign_in_body = blocked_by_section(issue.body, tracker.repo)
+    foreign = (*foreign_in_body, *issue.foreign_blocked_by)
+    if foreign:
+        return f"blocked by {foreign[0]}, in another repository", ()
     stack: list[int] = []
-    for blocker in dict.fromkeys((*blocked_by_section(issue.body), *issue.blocked_by)):
+    for blocker in dict.fromkeys((*in_body, *issue.blocked_by)):
         if blocker == number:
             continue
         known = tracker.issues.get(blocker)
         if known is None:
             return f"blocked by #{blocker}, whose state the snapshot lacks", ()
         if known.state == "open":
-            holding = [pr for pr in tracker.pulls if blocker in closing[pr.number] and held(pr)]
+            holding = [pr for pr in pulls if blocker in closing[pr.number] and held(pr)]
             if not holding:
                 return f"blocked by #{blocker}, open", ()
             stack.append(holding[0].number)
@@ -284,8 +365,8 @@ def pick(tracker: Tracker, now: datetime, named: int | None = None) -> Pick:
     if lane and lane.lower() != "none":
         return Pick(
             None,
-            "the Digest names an Owner lane, which this picker does not read: pick by the "
-            "skill's step 3 by hand",
+            f"the Digest names an Owner lane ({lane}), which this picker does not read: pick by "
+            "the skill's step 3 by hand",
         )
     the_slice = slice_issue(tracker)
     slice_number = the_slice.number if the_slice else None
@@ -380,7 +461,15 @@ def _issue(raw: Mapping[str, Any]) -> Issue:
         state=str(raw.get("state") or ""),
         labels=frozenset(str(label["name"]) for label in raw.get("labels") or ()),
         body=str(raw.get("body") or ""),
+        author_association=str(raw.get("author_association") or ""),
     )
+
+
+def _repo_of(raw: Mapping[str, Any]) -> str:
+    """The repository an issue in an answer belongs to, from its `repository_url`; empty when it
+    names none, which no repository matches."""
+    read = re.search(r"/repos/([^/]+/[^/]+)$", str(raw.get("repository_url") or ""))
+    return read.group(1) if read else ""
 
 
 def _time(text: str) -> datetime:
@@ -404,30 +493,31 @@ def build_tracker(repo: str, get: Get, named: int | None = None) -> Tracker:
             body=str(raw.get("body") or ""),
             head=str((raw.get("head") or {}).get("ref") or ""),
             labels=frozenset(str(label["name"]) for label in raw.get("labels") or ()),
+            author_association=str(raw.get("author_association") or ""),
+            head_repo=str(((raw.get("head") or {}).get("repo") or {}).get("full_name") or ""),
         )
         for raw in pages(get, f"{base}/pulls?state=open")
     )
-    roadmaps = [i for i in issues.values() if i.title == ROADMAP_TITLE]
-    if len(roadmaps) != 1:
-        raise TrackerError(
-            f"expected one open issue titled `{ROADMAP_TITLE}`, found {len(roadmaps)}"
-        )
+    roadmap = owned(issues.values(), lambda title: title == ROADMAP_TITLE, f"`{ROADMAP_TITLE}`")
+    if roadmap is None:
+        raise TrackerError(f"no open issue titled `{ROADMAP_TITLE}` by owner input")
 
     def children(number: int) -> tuple[int, ...]:
+        """The sub-issues in order; one in another repository is left out, never read as this
+        repository's issue of the same number."""
         found: list[int] = []
         for raw in pages(get, f"{base}/issues/{number}/sub_issues"):
+            if _repo_of(raw).lower() != repo.lower():
+                continue
             child = _issue(raw)
             issues.setdefault(child.number, child)
             found.append(child.number)
         return tuple(found)
 
-    epics = children(roadmaps[0].number)
+    epics = children(roadmap.number)
     sub_issues = {epic: children(epic) for epic in epics}
-    digests = [i for i in issues.values() if i.title == DIGEST_TITLE]
-    lane = None
-    if digests:
-        read = re.search(r"^Owner lane:(.*)$", digests[0].body, re.MULTILINE)
-        lane = read.group(1).strip() if read else None
+    digest = owned(issues.values(), lambda title: title == DIGEST_TITLE, f"`{DIGEST_TITLE}`")
+    lane = owner_lane(digest.body) if digest else None
 
     labels_only = Tracker(repo, epics, sub_issues, issues)
     the_slice = slice_issue(labels_only)
@@ -452,16 +542,18 @@ def build_tracker(repo: str, get: Get, named: int | None = None) -> Tracker:
             )
             for raw in pages(get, f"{base}/issues/{number}/comments")
         )
-        relation = pages(get, f"{base}/issues/{number}/dependencies/blocked_by")
-        blockers = [_issue(raw) for raw in relation]
-        detailed = Issue(
-            issue.number,
-            issue.title,
-            issue.state,
-            issue.labels,
-            issue.body,
-            tuple(b.number for b in blockers),
-            comments,
+        blockers: list[Issue] = []
+        foreign: list[str] = []
+        for raw in pages(get, f"{base}/issues/{number}/dependencies/blocked_by"):
+            if _repo_of(raw).lower() == repo.lower():
+                blockers.append(_issue(raw))
+            else:  # another repository's issue, never read as this one's of the same number
+                foreign.append(f"{_repo_of(raw) or '<unknown repository>'}#{raw['number']}")
+        detailed = replace(
+            issue,
+            blocked_by=tuple(b.number for b in blockers),
+            comments=comments,
+            foreign_blocked_by=tuple(foreign),
         )
         return detailed, blockers
 
@@ -473,7 +565,7 @@ def build_tracker(repo: str, get: Get, named: int | None = None) -> Tracker:
     missing = {
         blocker
         for n in candidates
-        for blocker in blocked_by_section(issues[n].body)
+        for blocker in blocked_by_section(issues[n].body, repo)[0]
         if blocker not in issues
     }
     for blocker in sorted(missing):
@@ -486,7 +578,11 @@ def build_tracker(repo: str, get: Get, named: int | None = None) -> Tracker:
 def main(argv: Sequence[str] | None = None, get: Get = gh_get) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--issue", type=int, help="the issue the routine prompt names")
-    parser.add_argument("--explain", action="store_true", help="also print each skipped issue")
+    parser.add_argument(
+        "--explain",
+        action="store_true",
+        help="also print the candidates passed over before the pick, with their reasons",
+    )
     args = parser.parse_args(argv)
     try:
         url = subprocess.run(

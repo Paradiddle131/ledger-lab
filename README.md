@@ -72,7 +72,7 @@ make check        # lint, types, tests, process-id and owner checks, secret scan
 make fresh-clone  # clone HEAD and prove it holds no secret, identifier or data
 ```
 
-`uv run python platform/next_item.py` prints the next tracker item an unattended wake takes and the rule that chose it (`--explain` lists each skipped issue and why); it only reads the tracker, through `gh api`.
+`uv run python platform/next_item.py` prints the next tracker item an unattended wake takes and the rule that chose it (`--explain` also prints the candidates it passed over before the pick, with their reasons); it only reads the tracker, through `gh api`.
 
 The contract gate (`make contract`) matches every data contract (`*.odcs.yaml`, today [`models/contracts/payments.odcs.yaml`](models/contracts/payments.odcs.yaml)) with the one on `origin/main` as this clone holds it, by contract id, and fails on a change that breaks a consumer, or when `origin/main` is not fetched (`git fetch origin main`); it runs offline after `uv sync`.
 A break the Data Contract CLI grades as an error, or a quality rule gone or changed beyond its wording, passes only under a higher major `version` whose `breakingChanges` custom property lists exactly the breaks the gate reports, each with a reason; under a major version that did not go up the list is not read and every break fails.
