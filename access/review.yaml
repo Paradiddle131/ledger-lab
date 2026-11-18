@@ -24,8 +24,10 @@ accounts:
         permissions:
           - bigquery.config.get
           - bigquery.jobs.create
-      # The reads `make cost-check` makes of the spend fences: the project and its IAM policy, the
-      # kill switch's topic, subscription, workflow, trigger and account.
+      # The project permissions the fence reads of `make cost-check` need (its READS table): the
+      # project and its IAM policy, the budget topic, its subscription, the kill switch's workflow,
+      # trigger and account; the quota read's permission comes from service usage consumer, and
+      # the budget is read on the billing account.
       - id: labFenceReader
         title: Reads the lab's spend fences
         created: by hand
@@ -39,7 +41,7 @@ accounts:
           - iam.serviceAccounts.get
     table_roles_granted_by_hand:
       - role: roles/bigquery.dataViewer
-        table: billing.cost
+        view: the billing export's cost view
     # Each limit is held by a test, of the access rules in tests/platform or of the hand-granted
     # roles in tests/access/test_review.py, except the last, which says what nothing limits.
     limits:
@@ -47,7 +49,7 @@ accounts:
       - Its builder role sets no dataset or table access and deletes no dataset; setting a row access policy's grantees is its one access write.
       - It mints tokens on the persona accounts only, so it acts as a persona and as nobody else, and acting as one it holds that persona's grants alone.
       - None of its declared roles holds a permission that moves a spend fence.
-      - Its roles granted by hand run jobs, read the cost view and read the fences' configuration; none of them changes data, reads a dataset, sets anyone's access, mints a token or moves a spend fence.
+      - Its roles granted by hand run jobs, read the cost view and read the fences' configuration; the project-wide ones hold no BigQuery or Cloud Storage permission but running jobs and reading BigQuery's settings, and none of them writes data, sets anyone's access, mints a token or moves a spend fence.
       - Not limited yet, acting as the proposer and the approver it can enter an entry and approve it alone; that ends with the approval workflow, which gives the proposer and the approver identities no one account acts as both of, and refuses an approval from the identity that drafted the entry.
   - id: kill-switch
     kind: automation

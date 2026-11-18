@@ -422,7 +422,7 @@ def review(docs: Mapping[str, Doc], config: Config) -> list[Reviewed]:
             for role in entry.get("custom_roles_granted_by_hand", [])
         ]
         by_hand += [
-            CloudGrant(grant["role"], f"table {grant['table']}", False)
+            CloudGrant(grant["role"], grant["view"], False)
             for grant in entry.get("table_roles_granted_by_hand", [])
         ]
         rows = sorted(cloud[entry["id"]]) + by_hand

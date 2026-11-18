@@ -55,15 +55,18 @@
             }
           },
           "table_roles_granted_by_hand": {
-            "description": "Predefined roles granted on one table or view outside platform/gcp.",
+            "description": "Predefined roles granted on one table or view outside platform/gcp, each naming what the table is.",
             "type": "array",
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["role", "table"],
+              "required": ["role", "view"],
               "properties": {
                 "role": {"type": "string", "pattern": "^roles/[A-Za-z.]+$"},
-                "table": {"type": "string", "pattern": "^[a-z_]+\\.[a-z_]+$"}
+                "view": {
+                  "description": "The table or view, by what it is, not its configured name, which comes from the environment.",
+                  "$ref": "#/$defs/text"
+                }
               }
             }
           },

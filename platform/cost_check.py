@@ -5,7 +5,8 @@ tool. In a session that carries another lab's `GCP_PROJECT` it calls no GCP tool
 credential is that lab's, and fails, since it has read nothing that shows the lab's cost is $0.00.
 With `LEDGER_LAB_GCP_PROJECT` set and no `GCP_PROJECT` it
 - reads this month's cost, credits included, and the newest export time from the Cloud Billing
-  export named by `LEDGER_LAB_BILLING_EXPORT` (`dataset.table` in the lab project) through `bq`:
+  export through the view `LEDGER_LAB_BILLING_EXPORT` names (`dataset.table` in the lab project;
+  the agent account reads the export only through it) through `bq`:
   a dry run first, then the query under a fixed byte cap; a cost above zero fails, and so does an
   answer that is not the query's one row, or an export that holds no rows for the project;
 - reads each applied fence through its REST API (`curl`; the session's proxy supplies the
@@ -237,6 +238,45 @@ def not_readable(fence: str, error: ReadError) -> Finding | None:
     return Finding("NOT CHECKED", fence, f"the read was refused ({error}): {UNKNOWN}")
 
 
+# Every Google API read the fence checks make, by the URL's shape, with the permission it needs
+# and where that permission is held: `project` reads are what the agent account holds on the lab
+# project, `billing account` reads are on the linked billing account, and `none` methods
+# (`testIamPermissions`) need no permission. A read whose URL matches no row is refused before it
+# is sent, so a new read cannot be made without a row here, where the tests of the agent account's
+# hand-granted roles read it. A read sent with `bill_to` also needs `serviceusage.services.use` on
+# the project it bills.
+API = r"https://[a-z]+\.googleapis\.com/v1(beta1)?/"
+P = r"projects/[^/:]+"
+READS: tuple[tuple[str, str | None, str], ...] = (
+    (rf"{API}{P}/billingInfo", "resourcemanager.projects.get", "project"),
+    (
+        rf"{API}{P}/services/bigquery\.googleapis\.com/consumerQuotaMetrics/[^/]+",
+        "serviceusage.quotas.get",
+        "project",
+    ),
+    (rf"{API}{P}/topics/[^/]+", "pubsub.topics.get", "project"),
+    (rf"{API}{P}/subscriptions/[^/]+", "pubsub.subscriptions.get", "project"),
+    (rf"{API}{P}/locations/[^/]+/workflows/[^/]+", "workflows.workflows.get", "project"),
+    (rf"{API}{P}/locations/[^/]+/triggers/[^/]+", "eventarc.triggers.get", "project"),
+    (rf"{API}{P}/serviceAccounts/[^/:]+", "iam.serviceAccounts.get", "project"),
+    (rf"{API}{P}:getIamPolicy", "resourcemanager.projects.getIamPolicy", "project"),
+    (rf"{API}{P}", "resourcemanager.projects.get", "project"),
+    (rf"{API}billingAccounts/[^/]+/budgets", "billing.budgets.list", "billing account"),
+    (rf"{API}{P}:testIamPermissions", None, "none"),
+    (rf"{API}{P}/serviceAccounts/[^/:]+:testIamPermissions", None, "none"),
+    (rf"{API}billingAccounts/[^/:]+:testIamPermissions", None, "none"),
+)
+BILLED_READ_PERMISSION = "serviceusage.services.use"
+
+
+def read_permission(url: str) -> tuple[str | None, str]:
+    """The permission a read of `url` needs and where it is held; refuses an unlisted read."""
+    matches = [(p, scope) for shape, p, scope in READS if re.fullmatch(shape, url)]
+    if len(matches) != 1:
+        raise ValueError(f"a read the cost check does not list in READS: {len(matches)} rows match")
+    return matches[0]
+
+
 class Fences:
     """The live reads of one lab project, compared with the declaration."""
 
@@ -251,6 +291,7 @@ class Fences:
         self.kill_switch_resource = f"{self.p}/serviceAccounts/{self.kill_switch_account}"
 
     def read(self, url: str, **kwargs: Any) -> dict[str, Any]:
+        read_permission(url)
         return read(self.run, url, **kwargs)
 
     def billing_link(self) -> tuple[Finding, str | None]:

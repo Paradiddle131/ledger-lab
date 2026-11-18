@@ -23,9 +23,11 @@ from cost_check import (
     KILL_SWITCH_ACCOUNT_PERMISSIONS,
     MAX_BYTES_BILLED,
     PROJECT_PERMISSIONS,
+    READS,
     bq_command,
     check,
     month_to_date_sql,
+    read_permission,
 )
 from fences import declared
 
@@ -293,6 +295,24 @@ def test_the_applied_fences_match_their_definitions() -> None:
     assert line_for(out, "budget:").startswith("cost-check: NOT CHECKED "), out
     assert out.splitlines()[-1].startswith("cost-check: passed"), out
     assert all(c[0] in ("bq", "curl") for c in gcp.calls)
+
+
+def test_every_read_is_a_listed_row_and_every_row_is_read() -> None:
+    """Each URL a healthy run reads matches one row of READS, and each row is read by a healthy
+    run or by one whose budget is readable, so READS lists what the check reads and no more."""
+    used: set[str] = set()
+    for gcp in (FakeGCP(), FakeGCP(changes={"budgets": readable_budget()})):
+        code, out = check(ENV, gcp)
+        assert code == 0, out
+        for url in [c[-1] for c in gcp.calls if c[0] == "curl"]:
+            read_permission(url)
+            used |= {shape for shape, _, _ in READS if re.fullmatch(shape, url)}
+    assert used == {shape for shape, _, _ in READS}
+
+
+def test_a_read_no_row_lists_is_refused_before_it_is_sent() -> None:
+    with pytest.raises(ValueError, match="does not list in READS"):
+        read_permission(f"https://monitoring.googleapis.com/v3/projects/{PROJECT}/alertPolicies")
 
 
 def test_another_labs_session_makes_no_call_even_with_the_lab_set() -> None:
