@@ -9,10 +9,11 @@ Every item is one branch and one PR (a new item's branch is `claude/<n>-<slug>`;
 ## Merge policy
 
 The wake merges a PR once its gates and review records pass on its head, unless the skill's holds or the one below hold it.
-The owner keeps what `AGENTS.md` holds for them: a PR that changes a line of `AGENTS.md § Guardrails`, is costly to undo or costs money gets the label `owner-merges` on the PR itself, and its issue gets the decision packet and `needs-owner`.
+The owner keeps the guardrails: a PR whose diff adds, removes or changes any line of `AGENTS.md § Guardrails`, from its heading to its last item, gets the label `owner-merges` on the PR itself, and its issue gets the decision packet and `needs-owner`.
+Every other PR is the wake's to merge once its gates and review records pass, one that is costly to undo included (`AGENTS.md § Decisions while the owner is away`; this narrows the skill's own `owner-merges` examples); a PR that costs money cannot arise, since the $0.00 guardrail refuses the spend.
 `merge.sh` reads the PR's own labels and holds on `owner-merges`; `export AUTOPILOT_HOLD_LABELS=owner-merges` before the scripts keeps that hold with a copy of `merge.sh` that does not list the label itself.
 A wake never removes `owner-merges`; only the owner's own merge lands such a PR.
-The owner confirms this policy, and the merges it lets a wake make, by merging the change that sets it; that change's PR asks them to.
+The owner approved this policy in an attended session on 2026-11-18 and said agents merge the change that sets it.
 
 ## Review
 
@@ -26,11 +27,23 @@ Open owner questions are the `needs-owner` issues.
 
 ## Queue
 
-1. The open issue titled `Roadmap`: its sub-issues are the epics, in order.
-2. Take the first open sub-issue, in epic order then sub-issue order, that is labelled `ready`, carries none of `needs-gcp`, `needs-owner` or `blocked`, has no live claim, and is pickable by the skill's step 3.
+Run `uv run python platform/next_item.py` (add `--issue <n>` when the routine prompt names `#n`, `--explain` to list every skipped issue with its reason): it reads the tracker live, only reading, and prints the item and the rule that chose it, or `none: <reason>` (exit 3); take that item, and name each `warning:` line it prints in the handoff as a `setup` item of **Went wrong:**.
+The rule it runs, which `tests/platform/test_next_item.py` proves on fixture trackers:
+
+1. The open issue titled `Roadmap`: its sub-issues are the epics, in order. The open issue titled starting `Thin slice` holds the slice's path: the rows of its "The path" table, in row order, each a step number then `#<n>`.
+2. Take the first pickable issue labelled `slice`, in path order.
+3. Else the first pickable issue labelled `leftover`, in epic order then sub-issue order: one `Review leftovers: <area>` issue is one item and one PR, its checkboxes the findings it fixes.
+4. Else the first pickable other sub-issue, in epic order then sub-issue order.
+
+Pickable: labelled `ready`, carries none of `needs-gcp`, `needs-owner`, `blocked` or `owner-machine`, and is pickable by the skill's step 3 (open, no live claim, no open PR that closes it, every Blocked by closed or with a held PR to stack on).
+Never picked: an epic (`epic`) and the `Thin slice` issue itself.
+A Digest `Owner lane` other than `none` stops the picker (`none: …`): pick by the skill's step 3 by hand.
 
 Labels: `ready` is the skill's `agent:ready`; `blocked` stands for its `blocked: *` (the reason is the last comment); `research` with `ready` is its `agent:research`; `agent:claimed` is applied by the scripts as the skill says.
+`slice` marks a step of the slice's path, in the order that path gives; `leftover` marks an area's `Review leftovers: <area>` issue; `owner-machine` runs in the session on the owner's computer (live persona identity), so wakes skip it.
 Area labels: `data`, `access`, `semantics`, `agent`, `workflow`, `operations`, `platform`; kind labels: `epic`, `decision`, `research`, `question`, `control`.
+
+**Review leftovers:** a finding the item did not fix (the skill's step 8) goes as a checkbox comment on the open `Review leftovers: <area>` issue of the item's area (its area label, the epic's where it has several), never as a new issue; with none open, the wake opens it with `$AP/scripts/file_issue.sh --epic <the area's epic>`, labelled `leftover`, `ready` and the area's label, its findings as checkboxes.
 
 **An item that turns out to need GCP or the owner:** commit nothing half-done; swap `ready` and `agent:claimed` for `needs-gcp` (the step calls GCP while `LEDGER_LAB_GCP_PROJECT` is unset or empty or a `GCP_PROJECT` is set, or while the Digest says `Mode: offline`, or this lab's own project is missing) or `needs-owner` (a decision packet as the last comment); say why on the issue; `git stash -u`; take the next.
 
