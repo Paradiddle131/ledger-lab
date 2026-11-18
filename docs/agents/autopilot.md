@@ -9,7 +9,6 @@ Every item is one branch and one PR (a new item's branch is `claude/<n>-<slug>`;
 ## Merge policy
 
 The wake merges a PR once its gates and review records pass on its head, unless the skill's holds or the one below hold it.
-The owner keeps the guardrails and the spending: a PR whose diff adds, removes or changes any line of `AGENTS.md § Guardrails`, from its heading to its last item, or a PR that spends money (any paid service, data source, API or tier, GCP or not), gets the label `owner-merges` on the PR itself, and its issue gets the decision packet and `needs-owner`.
 Every other PR is the wake's to merge once its gates and review records pass, one that is costly to undo included (`AGENTS.md § Decisions while the owner is away`; this narrows the skill's own `owner-merges` examples).
 `merge.sh` reads the PR's own labels and holds on `owner-merges`; `export AUTOPILOT_HOLD_LABELS=owner-merges` before the scripts keeps that hold with a copy of `merge.sh` that does not list the label itself.
 A wake never removes `owner-merges`; only the owner's own merge lands such a PR.
