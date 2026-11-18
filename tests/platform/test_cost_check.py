@@ -334,10 +334,29 @@ def test_a_read_no_row_lists_is_refused_before_it_is_sent() -> None:
 
 
 def test_a_project_id_no_row_matches_fails_every_fence_instead_of_crashing() -> None:
+    """Every read is refused before it is sent: each fence fails, saying so, and the budget, whose
+    account comes from the unread billing link, is not checked; nothing is sent."""
     gcp = FakeGCP()
     code, out = check(ENV | {"LEDGER_LAB_GCP_PROJECT": "example.com:the-lab"}, gcp)
     assert code == 1, out
-    assert line_for(out, "billing link").startswith("cost-check: FAIL "), out
+    budget = line_for(out, "budget")
+    assert budget.startswith("cost-check: NOT CHECKED budget: the billing link was not read"), out
+    others = [
+        line_for(out, fence)
+        for fence in (
+            "billing link",
+            "daily query cap",
+            "budget topic",
+            "kill switch workflow",
+            "kill switch trigger",
+            "kill switch account",
+            "kill switch roles",
+            "agent permissions",
+        )
+    ]
+    assert all(line.startswith("cost-check: FAIL ") for line in others), out
+    assert all("a read that was refused" in line for line in others), out
+    assert [c for c in gcp.calls if c[0] == "curl"] == []
 
 
 def test_another_labs_session_makes_no_call_even_with_the_lab_set() -> None:

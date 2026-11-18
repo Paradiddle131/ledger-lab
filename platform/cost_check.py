@@ -273,11 +273,17 @@ READS: tuple[tuple[str, str | None, str], ...] = (
 BILLED_READ_PERMISSION = "serviceusage.services.use"
 
 
+class RefusedRead(ValueError):
+    """A read the cost check does not list in READS, refused before anything is sent."""
+
+
 def read_permission(url: str) -> tuple[str | None, str]:
     """The permission a read of `url` needs and where it is held; refuses an unlisted read."""
     matches = [(p, scope) for shape, p, scope in READS if re.fullmatch(shape, url)]
     if len(matches) != 1:
-        raise ValueError(f"a read the cost check does not list in READS: {len(matches)} rows match")
+        raise RefusedRead(
+            f"a read the cost check does not list in READS: {len(matches)} rows match"
+        )
     return matches[0]
 
 
@@ -289,6 +295,7 @@ class Fences:
         self.run = run
         self.want = want
         self.p = f"projects/{project}"
+        self.link_read = True
         self.topic = f"{self.p}/topics/{want.topic}"
         self.workflow = f"{self.p}/locations/{want.region}/workflows/{want.workflow}"
         self.kill_switch_account = f"{want.kill_switch_account}@{project}.iam.gserviceaccount.com"
@@ -460,7 +467,11 @@ class Fences:
         want = self.want
         if account is None:
             return Finding(
-                "NOT CHECKED", "budget", f"no billing account is linked to read it from: {UNKNOWN}"
+                "NOT CHECKED",
+                "budget",
+                f"no billing account is linked to read it from: {UNKNOWN}"
+                if self.link_read
+                else f"the billing link was not read, so its account is not known: {UNKNOWN}",
             )
         try:
             answer = self.read(
@@ -553,8 +564,10 @@ class Fences:
             link, account = self.billing_link()
         except (ReadError, Shape) as error:
             link = Finding("FAIL", "billing link", f"could not be read ({error})")
-        except ValueError as error:
+            self.link_read = False
+        except RefusedRead as error:
             link = Finding("FAIL", "billing link", f"loose: a read that was refused ({error})")
+            self.link_read = False
         found = [link]
         for fence, judge in (
             ("daily query cap", self.query_cap),
@@ -570,6 +583,8 @@ class Fences:
                 found.append(judge())
             except ReadError as error:
                 found.append(Finding("FAIL", fence, f"loose: could not be read ({error})"))
+            except RefusedRead as error:
+                found.append(Finding("FAIL", fence, f"loose: a read that was refused ({error})"))
             except (KeyError, TypeError, ValueError, AttributeError) as error:
                 shape = error if isinstance(error, Shape) else type(error).__name__
                 found.append(

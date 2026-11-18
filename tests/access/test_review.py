@@ -374,7 +374,7 @@ def test_no_project_wide_hand_role_holds_a_bigquery_or_storage_permission_but_ru
     assert data == set()
 
 
-def test_no_hand_granted_role_writes_data(docs: dict[str, Doc]) -> None:
+def test_no_hand_granted_role_holds_a_listed_data_write_verb(docs: dict[str, Doc]) -> None:
     held = hand_granted_permissions(docs)
     assert {p for perms in held.values() for p in perms if DATA_WRITES.match(p)} == set()
 
@@ -416,7 +416,7 @@ def test_a_hand_role_writing_data_is_refused(docs: dict[str, Doc], extra: str) -
         if role["id"] == "labFenceReader":
             role["permissions"].append(extra)
     with pytest.raises(AssertionError):
-        test_no_hand_granted_role_writes_data(planted)
+        test_no_hand_granted_role_holds_a_listed_data_write_verb(planted)
 
 
 def test_a_hand_made_custom_role_holds_only_the_checks_reads_and_running_queries(
@@ -475,6 +475,19 @@ def test_a_custom_role_minting_tokens_or_setting_access_is_refused(
         test_no_hand_granted_custom_role_mints_tokens_sets_access_or_moves_a_fence(
             planted, "labFenceReader"
         )
+
+
+def test_a_consumer_role_lacking_the_quota_read_is_refused(
+    docs: dict[str, Doc], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    consumer = "roles/serviceusage.serviceUsageConsumer"
+    lacking = {
+        **RECORDED,
+        consumer: [p for p in RECORDED[consumer] if p != "serviceusage.quotas.get"],
+    }
+    monkeypatch.setattr(sys.modules[__name__], "RECORDED", lacking)
+    with pytest.raises(AssertionError):
+        test_the_fence_reader_holds_what_the_cost_checks_reads_need_and_nothing_else(docs)
 
 
 def test_a_hand_made_role_that_platform_gcp_declares_is_refused(
