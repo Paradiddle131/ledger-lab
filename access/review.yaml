@@ -5,27 +5,49 @@
 
 # The service accounts platform/gcp declares or references beside the persona accounts, each by
 # the address of its declaration there, so a test can hold that no account is left out. Their
-# grants are read from platform/gcp, except the project roles the owner granted the agent account
-# by hand when making it, which no file declares and so nothing offline checks; `make cost-check`
-# asks the live project whether that account holds a permission that moves a spend fence.
+# grants are read from platform/gcp, except the roles the owner granted the agent account by hand,
+# on the project and on the billing export's cost view, which no file grants and so nothing offline
+# checks against the live project; `make cost-check` asks the live project whether that account
+# holds a permission that moves a spend fence.
 accounts:
   - id: agent
     kind: automation
     declared: data.google_service_account.agent
     duties: The sessions' credential; builds the warehouse models, lands the verified files and acts as any persona in the tests.
-    reach: The largest concentration of access in the lab; the data editor role granted by hand on the project reads and changes every dataset in it, the billing export's included, and creates datasets; its declared builder role reads and replaces every table of every warehouse dataset; it reads every tagged column in clear, writes the landing bucket and can act as every persona, its own owner and every other owner among them.
+    reach: The largest concentration of access in the lab; its declared builder role reads and replaces every table of every warehouse dataset; it reads every tagged column in clear, writes the landing bucket and can act as every persona, its own owner and every other owner among them; by hand it holds no data role on the project and reads the billing export only through its cost view.
     project_roles_granted_by_hand:
-      - roles/viewer
-      - roles/bigquery.jobUser
-      - roles/bigquery.dataEditor
       - roles/serviceusage.serviceUsageConsumer
-    # Each limit is held by a test of the access rules in tests/platform, except the last, which
-    # says what nothing limits.
+    custom_roles_granted_by_hand:
+      - id: labQueryRunner
+        title: Runs BigQuery queries
+        created: declared
+        permissions:
+          - bigquery.config.get
+          - bigquery.jobs.create
+      # The reads `make cost-check` makes of the spend fences: the project and its IAM policy, the
+      # kill switch's topic, subscription, workflow, trigger and account.
+      - id: labFenceReader
+        title: Reads the lab's spend fences
+        created: by hand
+        permissions:
+          - resourcemanager.projects.get
+          - resourcemanager.projects.getIamPolicy
+          - pubsub.topics.get
+          - pubsub.subscriptions.get
+          - workflows.workflows.get
+          - eventarc.triggers.get
+          - iam.serviceAccounts.get
+    table_roles_granted_by_hand:
+      - role: roles/bigquery.dataViewer
+        table: billing.cost
+    # Each limit is held by a test, of the access rules in tests/platform or of the hand-granted
+    # roles in tests/access/test_review.py, except the last, which says what nothing limits.
     limits:
       - Its declared rights reach only the warehouse datasets, the policy-tag taxonomy and its tags, the landing bucket and the persona accounts, never the project.
       - Its builder role sets no dataset or table access and deletes no dataset; setting a row access policy's grantees is its one access write.
       - It mints tokens on the persona accounts only, so it acts as a persona and as nobody else, and acting as one it holds that persona's grants alone.
       - None of its declared roles holds a permission that moves a spend fence.
+      - Its roles granted by hand run jobs, read the cost view and read the fences' configuration; none of them changes data, reads a dataset, sets anyone's access, mints a token or moves a spend fence.
       - Not limited yet, acting as the proposer and the approver it can enter an entry and approve it alone; that ends with the approval workflow, which gives the proposer and the approver identities no one account acts as both of, and refuses an approval from the identity that drafted the entry.
   - id: kill-switch
     kind: automation
