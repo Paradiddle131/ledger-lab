@@ -15,8 +15,8 @@ carries; the persona queries run off that proxy, on the owner's machine, and eac
 
 A query goes to the `jobs.query` REST method as standard SQL, uncached, under a fixed byte cap no
 setting raises, and runs where the tables it reads are. A refusal reports BigQuery's HTTP status and
-reason, and a failed mint `gcloud`'s exit status, never their messages, which name the project and
-the login.
+reason, and a failed mint `gcloud`'s exit status, or that it timed out or could not run, never
+their messages or the command, which name the project and the accounts.
 """
 
 import re
@@ -71,15 +71,20 @@ def _run(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
 def mint(accounts: Sequence[str], run: Runner = _run) -> str:
     """A short-lived access token for the last account, through the ones before it."""
     gcloud = shutil.which("gcloud") or "gcloud"
-    done = run(
-        [
-            gcloud,
-            "auth",
-            "print-access-token",
-            f"--impersonate-service-account={','.join(accounts)}",
-            "--verbosity=error",
-        ]
-    )
+    command = [
+        gcloud,
+        "auth",
+        "print-access-token",
+        f"--impersonate-service-account={','.join(accounts)}",
+        "--verbosity=error",
+    ]
+    # A timeout's or an OS error's text holds the command, which names the accounts and the project.
+    try:
+        done = run(command)
+    except subprocess.TimeoutExpired:
+        raise PersonaQueryError("minting the persona's token timed out") from None
+    except OSError:
+        raise PersonaQueryError("minting the persona's token could not run gcloud") from None
     if done.returncode != 0:
         raise PersonaQueryError(f"minting the persona's token failed with status {done.returncode}")
     token = done.stdout.strip()
