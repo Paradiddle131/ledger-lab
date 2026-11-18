@@ -29,8 +29,10 @@ from access.bigquery import (
 )
 from access.identities import identity
 
-PERSONA = "auditor@the-lab-001.iam.gserviceaccount.com"
-SECRET_WORDS = ("the-lab-001", "someone@example.com")
+PROJECT = "the-lab"
+# Built, not written out: a fresh clone holds no address on a real domain.
+PERSONA = f"auditor@{PROJECT}.iam.gserviceaccount.com"
+SECRET_WORDS = (PROJECT, "someone@example.com")
 
 
 @pytest.mark.bigquery_persona
@@ -44,18 +46,18 @@ def test_each_human_persona_queries_bigquery_as_its_own_identity(
 
 def test_the_chain_goes_through_the_agent_account_when_it_is_named() -> None:
     env = {AGENT_VARIABLE: "the-agent"}
-    assert chain(PERSONA, "the-lab-001", env) == [
-        "the-agent@the-lab-001.iam.gserviceaccount.com",
+    assert chain(PERSONA, PROJECT, env) == [
+        f"the-agent@{PROJECT}.iam.gserviceaccount.com",
         PERSONA,
     ]
-    assert chain(PERSONA, "the-lab-001", {}) == [PERSONA]
-    assert chain(PERSONA, "the-lab-001", {AGENT_VARIABLE: "  "}) == [PERSONA]
+    assert chain(PERSONA, PROJECT, {}) == [PERSONA]
+    assert chain(PERSONA, PROJECT, {AGENT_VARIABLE: "  "}) == [PERSONA]
 
 
 @pytest.mark.parametrize("account_id", ["Agent", "a@b", "the-agent,other-agent", "ab", "agent-"])
 def test_an_agent_account_that_is_not_an_account_id_is_refused(account_id: str) -> None:
     with pytest.raises(PersonaQueryError, match=AGENT_VARIABLE):
-        chain(PERSONA, "the-lab-001", {AGENT_VARIABLE: account_id})
+        chain(PERSONA, PROJECT, {AGENT_VARIABLE: account_id})
 
 
 def runner(
@@ -84,7 +86,7 @@ def test_the_mint_asks_gcloud_for_the_last_accounts_token_through_the_others() -
 
 
 def test_a_failed_mint_reports_its_status_only() -> None:
-    _, run = runner(1, "", "PERMISSION_DENIED on the-lab-001 for someone@example.com")
+    _, run = runner(1, "", "PERMISSION_DENIED on the-lab for someone@example.com")
     with pytest.raises(PersonaQueryError) as refused:
         mint([PERSONA], run)
     assert str(refused.value) == "minting the persona's token failed with status 1"
@@ -107,7 +109,7 @@ def session(
         return reply(request)
 
     client = httpx.Client(transport=httpx.MockTransport(handle))
-    return seen, PersonaSession("the-lab-001", "ya29.the-token", client)
+    return seen, PersonaSession(PROJECT, "ya29.the-token", client)
 
 
 def test_a_query_is_capped_standard_sql_carrying_the_personas_token() -> None:
@@ -127,7 +129,7 @@ def test_a_query_is_capped_standard_sql_carrying_the_personas_token() -> None:
     (request,) = seen
     assert request.method == "POST"
     assert str(request.url) == (
-        "https://bigquery.googleapis.com/bigquery/v2/projects/the-lab-001/queries"
+        f"https://bigquery.googleapis.com/bigquery/v2/projects/{PROJECT}/queries"
     )
     assert request.headers["authorization"] == "Bearer ya29.the-token"
     assert json.loads(request.content) == {
@@ -148,7 +150,7 @@ def test_an_answer_with_no_rows_reads_as_none() -> None:
 
 
 def test_a_refused_query_reports_status_and_reason_never_the_message() -> None:
-    message = "Access Denied: Table the-lab-001:payments.t: User someone@example.com"
+    message = "Access Denied: Table the-lab:payments.t: User someone@example.com"
     _, persona = session(
         lambda _: httpx.Response(
             403,
