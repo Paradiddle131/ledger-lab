@@ -1,9 +1,10 @@
 """Shared loaders for the catalogues kept as data in the tree, and the persona identities."""
 
 import json
+import logging
 import os
 import shutil
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -13,7 +14,7 @@ import pytest
 import yaml
 from jsonschema import Draft202012Validator
 
-from access.bigquery import PersonaSession, chain, mint
+from access.bigquery import PersonaQueryError, PersonaSession, chain, mint
 from access.compile import open_persona
 from access.identities import identity
 
@@ -153,15 +154,20 @@ def as_persona(
 
 
 @pytest.fixture
-def as_persona_on_bigquery(access: dict[str, Any]) -> Iterator[Callable[[str], PersonaSession]]:
+def as_persona_on_bigquery(
+    access: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Callable[[str], PersonaSession]]:
     """`as_persona_on_bigquery(<id>)`: the BigQuery mode of `as_persona`, a session on the lab's
     BigQuery that carries a token minted for the persona's service account, so the warehouse's own
     grants decide what it sees (`access/bigquery.py`). It needs the lab project, read only through
     `platform/gcp_project.py`, which refuses a session carrying another lab's `GCP_PROJECT`, and a
-    login that may mint the token, off the cloud session's proxy; the tokens live only in memory."""
+    login that may mint the token, off the cloud session's proxy; the tokens live only in memory,
+    and a test using it reports a failure as `pytest_runtest_makereport` below writes it."""
     # Imported here: platform/ is on pytest's path, not on a child process's that loads this file.
     from gcp_project import lab_project
 
+    # httpx logs each request's URL, which names the project, to pytest's captured and live logs.
+    monkeypatch.setattr(logging.getLogger("httpx"), "disabled", True)
     project = lab_project()
     with httpx.Client(timeout=60) as client:
 
@@ -170,3 +176,26 @@ def as_persona_on_bigquery(access: dict[str, Any]) -> Iterator[Callable[[str], P
             return PersonaSession(project, mint(chain(account, project, os.environ)), client)
 
         yield act
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[None]
+) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+    """A failure of a test holding a persona's token, in any phase, reports one line: the test's
+    parameters and either its own verdict (a `pytest.fail`), a `PersonaQueryError`'s text, both
+    worded to name no account or project, or only the type of any other error. pytest would
+    otherwise render a traceback whose frames, locals and chained errors name the project, the
+    accounts, the token and paths under the login's home, under any `--tb`, `-l` or
+    `--full-trace`."""
+    report = yield
+    holds_a_token = (
+        isinstance(item, pytest.Function) and "as_persona_on_bigquery" in item.fixturenames
+    )
+    if holds_a_token and report.failed and call.excinfo:
+        error = call.excinfo.value
+        trusted = isinstance(error, PersonaQueryError | pytest.fail.Exception)
+        said = str(error) if trusted else f"{type(error).__name__}, its message left out"
+        callspec = getattr(item, "callspec", None)
+        report.longrepr = f"{callspec.id if callspec else item.name}: {said}"
+    return report

@@ -153,7 +153,8 @@ Applying takes the project, the billing account and the agent account's id as va
 It runs off the cloud session's proxy, which replaces the token on `*.googleapis.com`, from a login that may mint the agent account's tokens: the mint goes through the agent account, named by its id in `LEDGER_LAB_AGENT_ACCOUNT`, as `gcloud auth print-access-token --impersonate-service-account=<agent>,<persona>`, and needs no key file.
 The owner's login holds that right on the agent account alone, granted by hand (`roles/iam.serviceAccountTokenCreator`).
 Run `make cost-check` before and after it; the target does not run it itself.
-A failing persona fails naming the persona alone, with no traceback, so its output can be quoted.
+A failing persona's report is one line: the persona and either the test's verdict, the wording `access/bigquery.py` gives a failed mint or a refused query (an exit status, an HTTP status and reason, never a message), or only the type of any other error, with no traceback under any `--tb`, `-l` or `--full-trace`.
+httpx's request log, which names the project, is silenced while it runs, so its output names no project, account, token or path under the login's home and can be quoted.
 Before applying, the owner enables the APIs the definitions use, which the agent cannot enable itself: the Service Account Credentials API, which minting a persona's token needs, the Data Catalog API, which holds the policy tags, and the BigQuery Data Policy API, which holds the masking rules (`gcloud services enable iamcredentials.googleapis.com datacatalog.googleapis.com bigquerydatapolicy.googleapis.com`).
 The Data Lineage API (`datalineage.googleapis.com`) and the Dataplex API (`dataplex.googleapis.com`) stay off: lineage parsing and lineage metadata are billed.
 Each persona account's id is its id in `access/personas.yaml`, so renaming or removing a persona there deletes that account at the next apply, and a rename creates a new one in its place.

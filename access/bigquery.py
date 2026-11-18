@@ -106,7 +106,8 @@ class PersonaSession:
 
     def __init__(self, project: str, token: str, client: httpx.Client) -> None:
         self._url = ENDPOINT.format(project=quote(project, safe=""))
-        self._headers = {"Authorization": f"Bearer {token}"}
+        # httpx.Headers masks the Authorization value in its repr, which a traceback's locals show.
+        self._headers = httpx.Headers({"Authorization": f"Bearer {token}"})
         self._client = client
 
     def query(self, sql: str) -> Answer:

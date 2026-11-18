@@ -7,16 +7,18 @@ answer with the persona's account, and process no bytes. Behind the cloud sessio
 token is replaced on the way, so it runs on the owner's machine (`make bigquery-personas`), with
 the lab project set and no `GCP_PROJECT`. The proposer, an agent persona with no warehouse grant,
 holds no query role, so it is not among them. The other tests hold, offline, what the mint asks
-`gcloud` for and what a query sends and reads back, against stubs, that a failure names no
-account or project, and that neither a plain run nor another lab's session reaches GCP.
+`gcloud` for and what a query sends and reads back, against stubs, that a failure of the live
+test names no account, project, token or path under the login's home under every report option,
+and that neither a plain run nor another lab's session reaches GCP.
 """
 
 import json
-import os
+import shlex
 import subprocess
 import sys
 import tomllib
 from collections.abc import Callable, Sequence
+from itertools import takewhile
 from pathlib import Path
 from typing import Any
 
@@ -45,21 +47,19 @@ SECRET_WORDS = (PROJECT, "someone@example.com")
 def test_each_human_persona_queries_bigquery_as_its_own_identity(
     as_persona_on_bigquery: Callable[[str], PersonaSession], access: dict[str, Any], human: str
 ) -> None:
-    # Every failure is a `pytest.fail` with no traceback, naming the persona alone: an assert's
-    # rewrite, or a traceback's frame arguments, would print the accounts and the project.
-    try:
-        answer = as_persona_on_bigquery(human).query("SELECT SESSION_USER()")
-    except PersonaQueryError as refused:
-        pytest.fail(f"{human}: {refused}", pytrace=False)
-    itself = answer.rows == [(identity(access, human).service_account(lab_project()),)]
-    if not itself:
-        pytest.fail(f"{human}: BigQuery answered as another identity", pytrace=False)
+    # A failure reports the persona and one scrubbed line, never a traceback
+    # (`pytest_runtest_makereport` in tests/conftest.py): its frames, locals and chained errors
+    # would name the project, the accounts, the token and paths under the login's home.
+    answer = as_persona_on_bigquery(human).query("SELECT SESSION_USER()")
+    if answer.rows != [(identity(access, human).service_account(lab_project()),)]:
+        pytest.fail("BigQuery answered as another identity")
     if answer.bytes_processed != 0:
-        pytest.fail(f"{human}: the query processed bytes", pytrace=False)
+        pytest.fail("the query processed bytes")
 
 
 # Stubs for gcloud and BigQuery, loaded as a plugin into a pytest run of the live test: one failure
-# per persona below, the other personas pass. No call leaves the machine.
+# per persona below, the other persona passes. The stubs sit under httpx's client, at its transport,
+# so the request runs through httpx as it would live. No call leaves the machine.
 STUBS = """
 import os, socket, subprocess, httpx, pytest
 
@@ -82,20 +82,28 @@ def _stubs(request, monkeypatch):
             raise subprocess.TimeoutExpired(command, 120)
         if mode == "mint-fails":
             return subprocess.CompletedProcess(command, 1, "", "denied for " + command[3])
-        return subprocess.CompletedProcess(command, 0, "tok:" + command[3].rsplit(",", 1)[-1], "")
+        token = "stub-token:" + command[3].rsplit(",", 1)[-1]
+        return subprocess.CompletedProcess(command, 0, token, "")
 
-    def send(self, request, **kwargs):
-        who = request.headers["authorization"].rsplit(":", 1)[-1]
+    def handle(self, request):
+        token = request.headers["authorization"]
+        who = token.rsplit(":", 1)[-1]
+        if mode == "unreachable":
+            raise httpx.ConnectError(f"cannot reach {request.url} with {token}", request=request)
+        if mode == "not-json":
+            return httpx.Response(200, text=f"<html>{request.url} {token}</html>")
         if mode == "refused":
             error = {"reason": "accessDenied", "message": "Access Denied: " + who}
-            return httpx.Response(403, json={"error": {"errors": [error]}}, request=request)
+            return httpx.Response(403, json={"error": {"errors": [error]}})
         answer = {"jobComplete": True, "totalBytesProcessed": "10" if mode == "bytes" else "0",
                   "rows": [{"f": [{"v": AGENT if mode == "another" else who}]}]}
-        return httpx.Response(200, json=answer, request=request)
+        return httpx.Response(200, json=answer)
 
     monkeypatch.setattr(subprocess, "run", run)
-    monkeypatch.setattr(httpx.Client, "send", send)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle)
 """
+# The scrubbed line each failing persona's report must hold; any error that is not the test's
+# own verdict or a `PersonaQueryError` is named by its type alone.
 FAILURES = {
     "accountant-chicago": ("mint-fails", "minting the persona's token failed with status 1"),
     "accountant-uk-transport": ("timeout", "minting the persona's token timed out"),
@@ -103,13 +111,46 @@ FAILURES = {
     "group-controller": ("another", "BigQuery answered as another identity"),
     "payables-clerk": ("bytes", "the query processed bytes"),
     "approver": ("refused", "BigQuery refused the query: HTTP 403, reason accessDenied"),
+    "metric-owner": ("unreachable", "ConnectError, its message left out"),
+    "auditor": ("not-json", "JSONDecodeError, its message left out"),
 }
+# Every option that adds to a failure's report: tracebacks at their longest, with each frame's
+# locals, pytest's own frames, captured and live logs at every level, and every summary (`-rA`).
+WORST_CASE = [
+    "--tb=long",
+    "-l",
+    "--full-trace",
+    "--log-level=DEBUG",
+    "--log-cli-level=DEBUG",
+    "-rA",
+]
+
+
+def recipe_pytest_arguments() -> list[str]:
+    """The pytest arguments `make bigquery-personas` runs, read from its one recipe line."""
+    lines = (REPO / "Makefile").read_text().splitlines()
+    target = lines.index(next(line for line in lines if line.startswith("bigquery-personas:")))
+    (command,) = takewhile(lambda line: line.startswith("\t"), lines[target + 1 :])
+    uv, run, *arguments = shlex.split(command)
+    assert [uv, run, arguments[0]] == ["uv", "run", "pytest"], command
+    return arguments[1:]
 
 
 def test_a_failing_persona_query_names_the_persona_alone(tmp_path: Path) -> None:
     (tmp_path / "persona_stubs.py").write_text(STUBS)
-    env = {k: v for k, v in os.environ.items() if k not in {"GCP_PROJECT", "PYTEST_ADDOPTS"}}
-    env |= {
+    # The child is hermetic: its PATH holds only a gcloud that logs its call and fails, its gcloud
+    # configuration is empty, and it inherits no credential, proxy or GCP variable, so a stub that
+    # drifted could reach neither the real gcloud nor the network.
+    bin_dir, config, gcloud_log = tmp_path / "bin", tmp_path / "gcloud-config", tmp_path / "ran"
+    bin_dir.mkdir()
+    config.mkdir()
+    (bin_dir / "gcloud").write_text(
+        f'#!/bin/sh\necho "$@" >> {shlex.quote(str(gcloud_log))}\nexit 1\n'
+    )
+    (bin_dir / "gcloud").chmod(0o755)
+    env = {
+        "PATH": str(bin_dir),
+        "CLOUDSDK_CONFIG": str(config),
         "LEDGER_LAB_GCP_PROJECT": PROJECT,
         "LEDGER_LAB_AGENT_ACCOUNT": "the-agent",
         "PYTHONPATH": str(tmp_path),
@@ -120,13 +161,12 @@ def test_a_failing_persona_query_names_the_persona_alone(tmp_path: Path) -> None
             sys.executable,
             "-m",
             "pytest",
+            *recipe_pytest_arguments(),
             "-p",
             "persona_stubs",
             "-p",
             "no:cacheprovider",
-            "-m",
-            "bigquery_persona",
-            "tests/access/test_bigquery_personas.py",
+            *WORST_CASE,
         ],
         capture_output=True,
         text=True,
@@ -136,12 +176,14 @@ def test_a_failing_persona_query_names_the_persona_alone(tmp_path: Path) -> None
         check=False,
     )
     report = run.stdout + run.stderr
-    assert "6 failed, 3 passed" in report, report[-2000:]
+    assert not gcloud_log.exists(), "the child ran gcloud"
+    assert "8 failed, 1 passed" in report, report[-2000:]
     for persona, (_, words) in FAILURES.items():
         assert f"{persona}: {words}" in report, persona
-    # Neither the project nor the agent account appears anywhere in the rendered report.
-    assert PROJECT not in report
-    assert "the-agent" not in report
+    # Neither the project, the agent account, a token nor a path under the login's home appears
+    # anywhere in the rendered report.
+    for word in (PROJECT, "the-agent", "stub-token", str(Path.home())):
+        assert word not in report, word
 
 
 def test_the_live_test_carries_its_marker() -> None:
@@ -264,6 +306,12 @@ def session(
 
     client = httpx.Client(transport=httpx.MockTransport(handle))
     return seen, PersonaSession(PROJECT, "ya29.the-token", client)
+
+
+def test_nothing_the_session_holds_shows_its_token_in_a_repr() -> None:
+    # A traceback's locals show reprs: the headers handed to httpx are among them.
+    _, persona = session(lambda _: httpx.Response(200, json={"jobComplete": True}))
+    assert "ya29.the-token" not in repr(vars(persona))
 
 
 def test_a_query_is_capped_standard_sql_carrying_the_personas_token() -> None:
