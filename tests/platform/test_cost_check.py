@@ -299,7 +299,7 @@ def test_the_applied_fences_match_their_definitions() -> None:
 
 def test_every_read_is_a_listed_row_and_every_row_is_read() -> None:
     """Each URL a healthy run reads matches one row of READS, and each row is read by a healthy
-    run or by one whose budget is readable, so READS lists what the check reads and no more."""
+    run or by a run whose budget is readable, so READS lists what the check reads and no more."""
     used: set[str] = set()
     for gcp in (FakeGCP(), FakeGCP(changes={"budgets": readable_budget()})):
         code, out = check(ENV, gcp)
@@ -310,9 +310,34 @@ def test_every_read_is_a_listed_row_and_every_row_is_read() -> None:
     assert used == {shape for shape, _, _ in READS}
 
 
-def test_a_read_no_row_lists_is_refused_before_it_is_sent() -> None:
-    with pytest.raises(ValueError, match="does not list in READS"):
+def test_read_permission_refuses_a_read_no_row_lists_or_two_rows_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValueError, match="0 rows match"):
         read_permission(f"https://monitoring.googleapis.com/v3/projects/{PROJECT}/alertPolicies")
+    import cost_check
+
+    doubled = (*cost_check.READS, cost_check.READS[0])
+    monkeypatch.setattr(cost_check, "READS", doubled)
+    with pytest.raises(ValueError, match="2 rows match"):
+        read_permission(f"https://cloudbilling.googleapis.com/v1/projects/{PROJECT}/billingInfo")
+
+
+def test_a_read_no_row_lists_is_refused_before_it_is_sent() -> None:
+    import cost_check
+
+    sent: list[list[str]] = []
+    fences = cost_check.Fences(PROJECT, lambda c: (sent.append(list(c)), "{}")[1], declared())
+    with pytest.raises(ValueError, match="does not list in READS"):
+        fences.read(f"https://monitoring.googleapis.com/v3/projects/{PROJECT}/alertPolicies")
+    assert sent == []
+
+
+def test_a_project_id_no_row_matches_fails_every_fence_instead_of_crashing() -> None:
+    gcp = FakeGCP()
+    code, out = check(ENV | {"LEDGER_LAB_GCP_PROJECT": "example.com:the-lab"}, gcp)
+    assert code == 1, out
+    assert line_for(out, "billing link").startswith("cost-check: FAIL "), out
 
 
 def test_another_labs_session_makes_no_call_even_with_the_lab_set() -> None:

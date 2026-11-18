@@ -81,6 +81,10 @@ BILLING_PERMISSIONS = (
 # re-grant it.
 KILL_SWITCH_ACCOUNT_PERMISSIONS = (
     "iam.serviceAccounts.getAccessToken",
+    "iam.serviceAccounts.getOpenIdToken",
+    "iam.serviceAccounts.signJwt",
+    "iam.serviceAccounts.signBlob",
+    "iam.serviceAccounts.implicitDelegation",
     "iam.serviceAccountKeys.create",
     "iam.serviceAccounts.actAs",
     "iam.serviceAccounts.setIamPolicy",
@@ -549,6 +553,8 @@ class Fences:
             link, account = self.billing_link()
         except (ReadError, Shape) as error:
             link = Finding("FAIL", "billing link", f"could not be read ({error})")
+        except ValueError as error:
+            link = Finding("FAIL", "billing link", f"loose: a read that was refused ({error})")
         found = [link]
         for fence, judge in (
             ("daily query cap", self.query_cap),
@@ -645,7 +651,10 @@ def check(env: Mapping[str, str], run: Runner = run_tool) -> tuple[int, str]:
         )
     export = env.get(EXPORT_VARIABLE, "").strip()
     if not export:
-        return 1, f"cost-check: set {EXPORT_VARIABLE} to the billing export's dataset.table"
+        return 1, (
+            f"cost-check: set {EXPORT_VARIABLE} to the view over the billing export that the agent "
+            "account reads, as dataset.table in the lab project"
+        )
     zero, cost_line = month_to_date(project, export, run)
     findings = Fences(project, run, declared()).findings()
     lines = [cost_line, *(f.line() for f in findings)]
