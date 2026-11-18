@@ -318,6 +318,7 @@ def pick(tracker: Tracker, now: datetime, named: int | None = None) -> Pick:
         chosen = first([named], lambda _: True, RULE_NAMED)
         if chosen:
             return chosen
+        warnings.append(f"the named #{named} is not pickable: {skipped[named]}")
     for n in path:
         issue = tracker.issues.get(n)
         if issue is not None and issue.state == "open" and SLICE not in issue.labels:

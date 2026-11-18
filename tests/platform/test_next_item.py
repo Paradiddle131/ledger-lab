@@ -374,7 +374,9 @@ def test_a_named_issue_comes_first_when_pickable() -> None:
         RULE_NAMED,
     )
     held = replace(GROUND, labels=GROUND.labels | {"needs-gcp"})
-    assert pick(tracker(AGENT_SLICE, held), NOW, GROUND_ITEM).number == AGENT_STEP
+    chosen = pick(tracker(AGENT_SLICE, held), NOW, GROUND_ITEM)
+    assert (chosen.number, chosen.rule) == (AGENT_STEP, RULE_SLICE)
+    assert f"the named {ref(GROUND_ITEM)} is not pickable: labelled `needs-gcp`" in chosen.warnings
 
 
 @pytest.mark.parametrize("lane", [None, "", "none", "None"])
@@ -607,7 +609,7 @@ def test_gh_is_called_once_per_page_through_rest(monkeypatch: pytest.MonkeyPatch
     [
         f"https://github.com/{REPO_NAME}.git",
         f"https://github.com/{REPO_NAME}",
-        f"git@github.com:{REPO_NAME}.git",
+        f"git@example.com:{REPO_NAME}.git",  # the ssh form, on a reserved example domain
         f"http://local_proxy@127.0.0.1:45000/git/{REPO_NAME}\n",
     ],
 )
