@@ -13,8 +13,8 @@ With `LEDGER_LAB_GCP_PROJECT` set and no `GCP_PROJECT` it
   `platform/gcp` (`fences.py`); a fence that is missing, differs or answers in an unexpected shape
   fails. Where the environment hands gcloud its token (`CLOUDSDK_AUTH_ACCESS_TOKEN`, as a cloud
   session does), curl sends no credential and the session's proxy supplies it; elsewhere curl sends
-  the token of gcloud's own login, never a key file, and a read that login is refused is not
-  checked rather than failed;
+  the token of gcloud's own login, never a key file, and a read that login lacks the permission
+  for is not checked rather than failed, while any other refusal still fails;
 - asks `testIamPermissions` whether this account itself could move a fence, and fails if it can;
   off the proxy this account is gcloud's login, not the agent account, so it is not asked;
 - reports a fence this account may not read (the budget, the kill switch's project roles) as not
@@ -23,14 +23,17 @@ Every call reads; none creates, changes or deletes anything. The output names ea
 role and never prints a project, billing account, service account or an API's error message.
 """
 
+import contextlib
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+import threading
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -233,8 +236,9 @@ def read(
 ) -> dict[str, Any]:
     """GET a Google API resource, or POST a read-only method such as `testIamPermissions`."""
     command = ["curl", "-sS", "--max-time", "60"]
-    if credential is not None:
-        command += credential.curl_arguments()
+    if credential is not None and not credential.injected:
+        # `-q`, first: no curlrc, whose trace or header-dump options would write the token out.
+        command = ["curl", "-q", *command[1:], *credential.curl_arguments()]
     if bill_to is not None:
         command += ["-H", f"x-goog-user-project: {bill_to}"]
     if body is not None:
@@ -371,9 +375,14 @@ class Fences:
         return read(self.run, url, credential=self.credential, **kwargs)
 
     def refused_to_login(self, fence: str, error: ReadError) -> Finding | None:
-        """Off the proxy, a read gcloud's login is refused: not checked; else None."""
+        """Off the proxy, a read gcloud's login lacks the permission for: not checked; else None.
+        Any other refusal, such as an API that is off (`SERVICE_DISABLED`), still fails."""
         login = self.credential is not None and not self.credential.injected
-        return not_readable(fence, error) if login else None
+        lacks_permission = error.status == "PERMISSION_DENIED" and error.reason in (
+            None,
+            "IAM_PERMISSION_DENIED",
+        )
+        return not_readable(fence, error) if login and lacks_permission else None
 
     def unread(self, fence: str, error: ReadError, failed: str = "loose: ") -> Finding:
         """A read that failed: off the proxy, one the login is refused is not checked."""
@@ -740,6 +749,25 @@ def month_to_date(project: str, export: str, run: Runner) -> tuple[bool, str]:
     )
 
 
+@contextlib.contextmanager
+def removed_on_termination(credential: Credential) -> Iterator[None]:
+    """A SIGTERM or SIGHUP (a `timeout`, a closed terminal) ends the run through Python's exit, so
+    the header file is removed; a SIGKILL cannot be caught, and leaves it, at mode 0600."""
+    if credential.injected or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def leave(signum: int, frame: object) -> None:
+        raise SystemExit(128 + signum)
+
+    previous = {s: signal.signal(s, leave) for s in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        yield
+    finally:
+        for s, handler in previous.items():
+            signal.signal(s, handler)
+
+
 def check(env: Mapping[str, str], run: Runner = run_tool) -> tuple[int, str]:
     """The exit code and the lines to print."""
     if foreign_session(env):
@@ -762,7 +790,8 @@ def check(env: Mapping[str, str], run: Runner = run_tool) -> tuple[int, str]:
     zero, cost_line = month_to_date(project, export, run)
     credential = Credential(env, run)
     try:
-        findings = Fences(project, run, declared(), credential).findings()
+        with removed_on_termination(credential):
+            findings = Fences(project, run, declared(), credential).findings()
     finally:
         credential.close()
     lines = [cost_line, *(f.line() for f in findings)]

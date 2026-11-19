@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -826,20 +827,22 @@ def test_off_the_proxy_every_read_sends_the_logins_token_from_a_file() -> None:
 
 
 def test_the_header_file_is_readable_by_this_user_only_and_removed_after() -> None:
-    seen: list[tuple[Path, int]] = []
+    seen: list[tuple[Path, int, int]] = []
     gcp = FakeGCP()
 
     def run(command: Sequence[str]) -> str:
         for value in command:
             if value.startswith("@"):
-                seen.append((Path(value[1:]), Path(value[1:]).stat().st_mode & 0o777))
+                header = Path(value[1:])
+                modes = header.stat().st_mode & 0o777, header.parent.stat().st_mode & 0o777
+                seen.append((header, *modes))
         return gcp(command)
 
     check(OFF_PROXY, run)
     assert seen
-    assert {mode for _, mode in seen} == {0o600}
-    assert len({path for path, _ in seen}) == 1
-    assert not any(path.exists() or path.parent.exists() for path, _ in seen)
+    assert {(file, folder) for _, file, folder in seen} == {(0o600, 0o700)}
+    assert len({path for path, _, _ in seen}) == 1
+    assert not any(path.exists() or path.parent.exists() for path, _, _ in seen)
 
 
 @pytest.mark.parametrize(
@@ -852,7 +855,7 @@ def test_the_header_file_is_readable_by_this_user_only_and_removed_after() -> No
     ],
     ids=["gcloud-fails", "no-gcloud", "empty", "not-one-token"],
 )
-def test_off_the_proxy_without_a_login_token_every_fence_fails_and_nothing_is_sent(
+def test_off_the_proxy_without_a_login_token_every_read_fence_fails_and_nothing_is_sent(
     token: str | Exception,
 ) -> None:
     gcp = FakeGCP(token=token)
@@ -906,3 +909,58 @@ def test_off_the_proxy_an_unauthenticated_read_still_fails(read: str) -> None:
     code, out = check(OFF_PROXY, FakeGCP(changes={read: unauthenticated}))
     assert code != 0, out
     assert line_for(out, FENCE_OF[read]).startswith("cost-check: FAIL "), out
+
+
+def test_off_the_proxy_curl_reads_no_curlrc_and_behind_it_the_command_is_unchanged() -> None:
+    """`-q` must come first; a curlrc's trace or header-dump options would write the token out."""
+    off, behind = FakeGCP(), FakeGCP()
+    check(OFF_PROXY, off)
+    check(ENV, behind)
+    assert {c[1] for c in off.calls if c[0] == "curl"} == {"-q"}
+    assert {tuple(c[1:4]) for c in behind.calls if c[0] == "curl"} == {("-sS", "--max-time", "60")}
+
+
+@pytest.mark.parametrize("reason", ["SERVICE_DISABLED", "USER_PROJECT_DENIED", "ACCESS_DENIED"])
+@pytest.mark.parametrize("read", sorted(set(FENCE_OF) - PERMISSION_READS - {"iam policy"}))
+def test_off_the_proxy_a_refusal_that_is_not_a_missing_permission_still_fails(
+    read: str, reason: str
+) -> None:
+    refused = copy.deepcopy(SERVICE_DISABLED)
+    refused["error"]["details"][0]["reason"] = reason
+    code, out = check(OFF_PROXY, FakeGCP(changes={read: refused}))
+    assert code != 0, out
+    assert line_for(out, FENCE_OF[read]).startswith("cost-check: FAIL "), out
+
+
+def test_off_the_proxy_a_loose_trigger_fails_though_its_subscription_is_refused() -> None:
+    loose = changed("trigger", lambda t: t.update(serviceAccount="other@x.iam.gserviceaccount.com"))
+    code, out = check(OFF_PROXY, FakeGCP(changes={"trigger": loose, "subscription": DENIED}))
+    assert code != 0, out
+    assert line_for(out, "kill switch trigger").startswith("cost-check: FAIL "), out
+
+
+@pytest.mark.parametrize("value", ["", "  "])
+def test_an_empty_injected_token_is_not_the_proxy(value: str) -> None:
+    gcp = FakeGCP()
+    check(OFF_PROXY | {"CLOUDSDK_AUTH_ACCESS_TOKEN": value}, gcp)
+    assert len(gcp.headers) == len([c for c in gcp.calls if c[0] == "curl"]) > 0
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+def test_a_terminated_run_removes_the_header_file_and_restores_the_handlers(signum: int) -> None:
+    before = signal.getsignal(signum)
+    seen: list[Path] = []
+    gcp = FakeGCP()
+
+    def run(command: Sequence[str]) -> str:
+        seen.extend(Path(v[1:]) for v in command if v.startswith("@"))
+        if seen:
+            os.kill(os.getpid(), signum)
+        return gcp(command)
+
+    with pytest.raises(SystemExit) as stopped:
+        check(OFF_PROXY, run)
+    assert stopped.value.code == 128 + signum
+    assert seen
+    assert not any(path.exists() or path.parent.exists() for path in seen)
+    assert signal.getsignal(signum) == before
