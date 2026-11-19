@@ -711,6 +711,23 @@ def test_the_pickable_line_names_every_skip_label_and_the_stacking_rule() -> Non
     assert "Blocked by in this repository and closed" in pickable[0]
 
 
+def test_an_owner_machine_items_pr_carries_the_hold_that_merge_reads() -> None:
+    """An `owner-machine` item's PR is held by a label on the PR, where `merge.sh` reads holds."""
+    lines = profile_section("## Queue").splitlines()
+    rule = [line for line in lines if line.startswith("An open PR for an `owner-machine` item ")]
+    assert len(rule) == 1
+    for words in (
+        "carries `needs-local-verify` on the PR itself",
+        "treats it as held, so wakes leave it",
+        "`merge.sh` holds on it",
+        "§ Local resume",
+    ):
+        assert words in rule[0], words
+    assert "needs-local-verify" in HOLDS
+    merge_policy = profile_section("## Merge policy")
+    assert "an `owner-machine` item's PR carries `needs-local-verify`" in merge_policy
+
+
 def test_the_command_names_the_picker_script() -> None:
     assert COMMAND.endswith(" platform/next_item.py")
 
