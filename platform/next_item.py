@@ -64,8 +64,7 @@ READY = "ready"
 EPIC = "epic"
 SLICE = "slice"
 LEFTOVER = "leftover"
-OWNER_MACHINE = "owner-machine"
-SKIP_LABELS = ("needs-gcp", "needs-owner", "blocked", OWNER_MACHINE)
+SKIP_LABELS = ("needs-gcp", "needs-owner", "blocked", "owner-machine")
 HOLD_LABELS = ("owner-merges", "needs-local-verify")
 OWNER_INPUT = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 CLAIM_LIFE = timedelta(hours=3)
@@ -295,23 +294,6 @@ def held(pr: PullRequest) -> bool:
     return bool(pr.labels & set(HOLD_LABELS)) and not speculative(pr)
 
 
-def unheld_owner_machine_prs(tracker: Tracker) -> list[str]:
-    """A warning for each counted open PR that closes an open `owner-machine` issue but does not
-    carry the label itself, the only place the merge policy reads that hold."""
-    warnings = []
-    for pr in tracker.pulls:
-        if not counted(pr, tracker.repo) or OWNER_MACHINE in pr.labels:
-            continue
-        for n in sorted(closes(pr, tracker.repo)):
-            issue = tracker.issues.get(n)
-            if issue is not None and issue.state == "open" and OWNER_MACHINE in issue.labels:
-                warnings.append(
-                    f"PR #{pr.number} closes `{OWNER_MACHINE}` #{n} without carrying "
-                    f"`{OWNER_MACHINE}` itself: put the label on the PR before resuming any PR"
-                )
-    return warnings
-
-
 def live_claim(issue: Issue, now: datetime) -> datetime | None:
     """The time of the issue's live claim, or None."""
     claim: datetime | None = None
@@ -400,7 +382,7 @@ def pick(tracker: Tracker, now: datetime, named: int | None = None) -> Pick:
     the_slice = slice_issue(tracker)
     slice_number = the_slice.number if the_slice else None
     path = slice_path(the_slice.body) if the_slice else ()
-    warnings: list[str] = unheld_owner_machine_prs(tracker)
+    warnings: list[str] = []
     if the_slice is None:
         warnings.append(f"no open issue titled `{SLICE_TITLE_PREFIX}…`: no slice path")
     labelled = sorted(
