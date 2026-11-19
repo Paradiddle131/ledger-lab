@@ -25,8 +25,23 @@ typecheck: sync
 
 # LOADOUT reaches pytest for the cross-check with the review skill's tier.sh
 # (tests/test_review_routing.py), which skips, saying so, without it.
+# In the lab's own environment, as `platform/gcp_project.py` decides it (`own`), the one recipe line
+# reads the cost before pytest and again after it, in order, since they are one shell line: a failed
+# read before stops pytest from running; the read after runs whatever pytest's exit, and the line
+# fails if either read or pytest fails. Elsewhere (`elsewhere`: the lab variable unset or blank, or
+# a GCP_PROJECT set) the line is pytest alone. Any other answer stops make. The word is read when
+# make expands this recipe, after `sync`. Limits: an interrupt (Ctrl-C) stops the line, after-read
+# included; pytest runs other than this target's (`stack-test`, `reconcile-landed` and the like)
+# are not bracketed.
+PYTEST = LOADOUT='$(LOADOUT)' uv run pytest
+COST_CHECK = uv run --no-sync python platform/cost_check.py
+LAB_ENVIRONMENT = $(shell uv run --no-sync python platform/gcp_project.py)
+cost_bracketed = $(COST_CHECK) || exit 1; $(PYTEST); tests=$$?; $(COST_CHECK) || exit 1; exit $$tests
+test_line = $(if $(filter own,$1),$(cost_bracketed),$(if $(filter elsewhere,$1),$(PYTEST),$(error \
+	test: platform/gcp_project.py answered neither own nor elsewhere)))
+
 test: sync
-	LOADOUT='$(LOADOUT)' uv run pytest
+	$(call test_line,$(LAB_ENVIRONMENT))
 
 ids:
 	@test -f $(GUARDS)/check-process-ids.py || { echo "ids: no rules collection at $(LOADOUT); pass LOADOUT=<clone>" >&2; exit 1; }
@@ -101,7 +116,7 @@ stack-test: sync stack-up
 # call, while LEDGER_LAB_GCP_PROJECT is unset; no GCP call and a failure, not checked, in a session
 # that carries another lab's GCP_PROJECT.
 cost-check:
-	@uv run --no-sync python platform/cost_check.py
+	@$(COST_CHECK)
 
 # The reconciliation of Chicago's payments to their contracts' awards over the landed files: every
 # class's count and dollars, and each break class's digest, must equal the reviewed baseline. Needs
