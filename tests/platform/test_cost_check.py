@@ -35,7 +35,15 @@ REPO = Path(__file__).resolve().parents[2]
 TOOLS = ("gcloud", "bq", "gsutil", "curl")
 PROJECT = "the-lab"
 ACCOUNT = "billingAccounts/the-account"
-ENV = {"LEDGER_LAB_GCP_PROJECT": PROJECT, "LEDGER_LAB_BILLING_EXPORT": "billing.export_v1"}
+# The lab's own cloud environment: gcloud is handed its token, and the proxy authenticates curl.
+ENV = {
+    "LEDGER_LAB_GCP_PROJECT": PROJECT,
+    "LEDGER_LAB_BILLING_EXPORT": "billing.export_v1",
+    "CLOUDSDK_AUTH_ACCESS_TOKEN": "proxy-injected",
+}
+# A machine off the proxy: gcloud's own login holds the credential.
+OFF_PROXY = {k: v for k, v in ENV.items() if k != "CLOUDSDK_AUTH_ACCESS_TOKEN"}
+LOGIN_CREDENTIAL = "the-logins-fake-credential"
 D = declared()
 P = f"projects/{PROJECT}"
 KILL_SWITCH_ACCOUNT = f"{D.kill_switch_account}@{PROJECT}.iam.gserviceaccount.com"
@@ -176,8 +184,11 @@ class FakeGCP:
         dry_run_bytes: int = 448448,
         changes: dict[str, Any] | None = None,
         rows: Any = None,
+        token: str | Exception = LOGIN_CREDENTIAL,
     ) -> None:
         self.rows = [HEALTHY_ROW | {"cost": cost}] if rows is None else rows
+        self.token = token
+        self.headers: list[str] = []
         self.dry_run_bytes = dry_run_bytes
         self.answers = healthy() | (changes or {})
         self.calls: list[list[str]] = []
@@ -188,7 +199,14 @@ class FakeGCP:
             if "--dry_run" in command:
                 return json.dumps({"statistics": {"totalBytesProcessed": str(self.dry_run_bytes)}})
             return self.rows if isinstance(self.rows, str) else json.dumps(self.rows)
+        if list(command) == ["gcloud", "auth", "print-access-token"]:
+            if isinstance(self.token, Exception):
+                raise self.token
+            return self.token + "\n"
         assert command[0] == "curl", command
+        for flag, value in zip(command, command[1:], strict=False):
+            if flag == "-H" and value.startswith("@"):
+                self.headers.append(Path(value[1:]).read_text())
         answer = self.answers[route(command)]
         return answer if isinstance(answer, str) else json.dumps(answer)
 
@@ -225,7 +243,8 @@ def cost_check(tmp_path: Path, **env: str) -> tuple[int, str, str]:
     base = {
         k: v
         for k, v in os.environ.items()
-        if not k.startswith("LEDGER_LAB_") and k != "GCP_PROJECT"
+        if not k.startswith("LEDGER_LAB_")
+        and k not in ("GCP_PROJECT", "CLOUDSDK_AUTH_ACCESS_TOKEN")
     }
     base["PATH"] = f"{tmp_path}{os.pathsep}{base['PATH']}"
     make = shutil.which("make")
@@ -781,3 +800,96 @@ def test_the_query_is_capped_and_scoped_to_the_project() -> None:
     assert f"--maximum_bytes_billed={MAX_BYTES_BILLED}" in command
     assert f"--parameter=project:STRING:{PROJECT}" in command
     assert f"`{PROJECT}.billing.export_v1`" in command[-1]
+
+
+# Off the proxy: curl sends the token of gcloud's own login.
+
+
+def test_behind_the_proxy_curl_sends_no_credential_and_gcloud_is_not_asked() -> None:
+    gcp = FakeGCP()
+    code, out = check(ENV, gcp)
+    assert code == 0, out
+    assert [c for c in gcp.calls if c[0] == "gcloud"] == []
+    assert not any("-H" in c and any(a.startswith("@") for a in c) for c in gcp.calls)
+
+
+def test_off_the_proxy_every_read_sends_the_logins_token_from_a_file() -> None:
+    gcp = FakeGCP()
+    code, out = check(OFF_PROXY, gcp)
+    assert code == 0, out
+    curls = [c for c in gcp.calls if c[0] == "curl"]
+    assert len(gcp.headers) == len(curls) > 0
+    assert set(gcp.headers) == {f"Authorization: Bearer {LOGIN_CREDENTIAL}\n"}
+    assert [c for c in gcp.calls if c[0] == "gcloud"] == [["gcloud", "auth", "print-access-token"]]
+    assert not any(LOGIN_CREDENTIAL in " ".join(c) for c in gcp.calls)
+    assert LOGIN_CREDENTIAL not in out
+
+
+def test_the_header_file_is_readable_by_this_user_only_and_removed_after() -> None:
+    seen: list[tuple[Path, int]] = []
+    gcp = FakeGCP()
+
+    def run(command: Sequence[str]) -> str:
+        for value in command:
+            if value.startswith("@"):
+                seen.append((Path(value[1:]), Path(value[1:]).stat().st_mode & 0o777))
+        return gcp(command)
+
+    check(OFF_PROXY, run)
+    assert seen
+    assert {mode for _, mode in seen} == {0o600}
+    assert len({path for path, _ in seen}) == 1
+    assert not any(path.exists() or path.parent.exists() for path, _ in seen)
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        subprocess.CalledProcessError(1, ["gcloud"], "", "a message naming an account"),
+        FileNotFoundError(2, "No such file"),
+        "",
+        "two words",
+    ],
+    ids=["gcloud-fails", "no-gcloud", "empty", "not-one-token"],
+)
+def test_off_the_proxy_without_a_login_token_every_fence_fails_and_nothing_is_sent(
+    token: str | Exception,
+) -> None:
+    gcp = FakeGCP(token=token)
+    code, out = check(OFF_PROXY, gcp)
+    assert code != 0, out
+    assert line_for(out, "billing link").startswith(
+        "cost-check: FAIL billing link: could not be read (no login token"
+    )
+    for fence in ("daily query cap", "kill switch workflow", "agent permissions"):
+        assert "no login token" in line_for(out, fence), out
+    assert [c for c in gcp.calls if c[0] == "curl"] == []
+    assert len([c for c in gcp.calls if c[0] == "gcloud"]) == 1
+    assert "account" not in out.split("no login token")[1].split(")")[0]
+
+
+@pytest.mark.parametrize("read", sorted(FENCE_OF))
+def test_off_the_proxy_a_read_the_login_is_refused_is_not_checked(read: str) -> None:
+    code, out = check(OFF_PROXY, FakeGCP(changes={read: DENIED}))
+    line = line_for(out, FENCE_OF[read])
+    assert line.startswith(
+        f"cost-check: NOT CHECKED {FENCE_OF[read]}: not readable by this account"
+    ), out
+    assert code == 0, out
+
+
+@pytest.mark.parametrize("read", sorted(set(FENCE_OF) - {"iam policy"}))
+def test_behind_the_proxy_a_refused_read_still_fails(read: str) -> None:
+    """The agent account is granted every read but the roles' and the budget's (their tests
+    above), so a refusal behind the proxy means a grant has gone."""
+    code, out = check(ENV, FakeGCP(changes={read: DENIED}))
+    assert code != 0, out
+    assert line_for(out, FENCE_OF[read]).startswith("cost-check: FAIL "), out
+
+
+@pytest.mark.parametrize("read", sorted(FENCE_OF))
+def test_off_the_proxy_an_unauthenticated_read_still_fails(read: str) -> None:
+    unauthenticated = {"error": {"code": 401, "message": "m", "status": "UNAUTHENTICATED"}}
+    code, out = check(OFF_PROXY, FakeGCP(changes={read: unauthenticated}))
+    assert code != 0, out
+    assert line_for(out, FENCE_OF[read]).startswith("cost-check: FAIL "), out
