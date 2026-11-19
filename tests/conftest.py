@@ -202,6 +202,8 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
     try:
         return (yield)
     except KeyboardInterrupt:
+        import signal
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         stop = pytest.exit.Exception(
             f"{persona_test_id(item)}: interrupted", returncode=pytest.ExitCode.INTERRUPTED
         )
