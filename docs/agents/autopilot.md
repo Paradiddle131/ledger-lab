@@ -44,7 +44,6 @@ A Digest `Owner lane` other than `none` stops the picker (`none: …`): pick by 
 
 Labels: `ready` is the skill's `agent:ready`; `blocked` stands for its `blocked: *` (the reason is the last comment); `research` with `ready` is its `agent:research`; `agent:claimed` is applied by the scripts as the skill says.
 `slice` marks a step of the slice's path, in the order that path gives, or an issue a step waits on, such as a leftover that blocks it (taken after the path's steps; the picker warns that it is off the path); `leftover` marks an area's `Review leftovers: <area>` issue; `owner-machine` runs in the session on the owner's computer (live persona identity, work off the cloud proxy, or the owner's own hand step), so wakes skip it.
-Wakes also leave an open agent PR whose issue carries `owner-machine`, even one with work to do (the skill's step 2): the session on the owner's computer resumes it.
 Area labels: `data`, `access`, `semantics`, `agent`, `workflow`, `operations`, `platform`; kind labels: `epic`, `decision`, `research`, `question`, `control`.
 
 **Review leftovers:** a finding the item did not fix (the skill's step 8) goes as a checkbox comment on the open `Review leftovers: <area>` issue of the item's area (its area label, the epic's where it has several), never as a new issue; with none open, the wake opens it with `$AP/scripts/file_issue.sh --epic <the area's epic>`, labelled `leftover`, `ready` and the area's label, its findings as checkboxes.
