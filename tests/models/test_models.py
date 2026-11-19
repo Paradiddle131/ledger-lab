@@ -26,7 +26,7 @@ from ingest import load
 from ingest.load import free_regions
 from models.contracts import engine, warehouse
 from tests.models import bigquery_parity
-from tests.models.dbt_build import DBT, PROJECT, Build, dbt, query
+from tests.models.dbt_build import DBT, PROJECT, Build, dbt, query, run_dbt
 
 GIT = shutil.which("git") or "git"
 
@@ -382,15 +382,12 @@ def test_a_build_with_the_default_database_path_needs_no_folder_made_first(tmp_p
     unset = {"LEDGER_LAB_GCP_PROJECT", "LEDGER_LAB_DUCKDB_PATH", "DBT_TARGET_PATH", "DBT_LOG_PATH"}
     env = {k: v for k, v in os.environ.items() if k not in unset}
     env["DBT_SEND_ANONYMOUS_USAGE_STATS"] = "false"
-    result = subprocess.run(
+    result = run_dbt(
         [str(DBT), "build", "--project-dir", "models", "--profiles-dir", "models"]
         + ["--target", "local", "--select", "fiscal_year_starts"]
         + ["--vars", json.dumps({"source_rows": "sample"})],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-        cwd=clone,
+        env,
+        clone,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert (clone / LOCAL_DATABASE).is_file()
