@@ -5,7 +5,7 @@ login of the machine the test runs on, never from a key file, and lives only in 
 identity `platform/gcp/identities.tf` lets mint persona tokens is the agent account, so the login
 reaches the persona's account through it: the chain is the agent account, named by its account id
 (the part before the @) in `LEDGER_LAB_AGENT_ACCOUNT`, then the persona's account, and the login
-needs token creation on the agent account alone. With the variable unset the login mints the
+needs only `iam.serviceAccounts.implicitDelegation` on the agent account. With the variable unset the login mints the
 persona's token itself, which only the agent account may do.
 
 Behind the cloud session's proxy the Authorization header on `*.googleapis.com` is replaced with
