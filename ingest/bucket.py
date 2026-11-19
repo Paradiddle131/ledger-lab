@@ -30,8 +30,8 @@ object beside a new one. Once the lock is deleted, the next landing of those nam
 stale `.new.` uploads, which are never the only copy of a landed file, and keeps every `.old.` copy,
 which may be: it reports them (`left_behind`) for an operator to delete by hand.
 
-The credential is the one the session's network proxy adds to every request to Cloud Storage, as
-for `make cost-check`; the client sends none of its own.
+The credential is the one the session's network proxy adds to every request to Cloud Storage; the
+client sends none of its own.
 """
 
 import contextlib
