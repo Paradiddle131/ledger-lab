@@ -711,21 +711,61 @@ def test_the_pickable_line_names_every_skip_label_and_the_stacking_rule() -> Non
     assert "Blocked by in this repository and closed" in pickable[0]
 
 
-def test_an_owner_machine_items_pr_carries_the_hold_that_merge_reads() -> None:
-    """An `owner-machine` item's PR is held by a label on the PR, where `merge.sh` reads holds."""
-    lines = profile_section("## Queue").splitlines()
-    rule = [line for line in lines if line.startswith("An open PR for an `owner-machine` item ")]
-    assert len(rule) == 1
-    for words in (
-        "carries `needs-local-verify` on the PR itself",
-        "treats it as held, so wakes leave it",
-        "`merge.sh` holds on it",
-        "§ Local resume",
-    ):
-        assert words in rule[0], words
-    assert "needs-local-verify" in HOLDS
+OWNER_MACHINE_RULE = (
+    "An open PR for an `owner-machine` item gets `owner-machine` on the PR itself too, from "
+    "whoever opens it or labels its issue: the merge policy holds a PR carrying it, so wakes "
+    "neither resume nor merge it (the skill's step 2 still answers owner input on it and "
+    "retargets it once its base merges), and no blocked item stacks on it. A wake never removes "
+    "it; the session on the owner's computer removes it only to merge that head itself, after "
+    "the item's live runs pass on that head. The picker prints a `warning:` for each open PR "
+    "that closes an `owner-machine` item without carrying the label, so a wake runs it before "
+    "the skill's step 2 and puts the label on each PR a warning names."
+)
+
+
+def test_the_profile_holds_an_owner_machine_items_pr_by_its_own_label() -> None:
+    """The rule line and the merge policy's two clauses, word for word: a reworded hold fails."""
+    queue = profile_section("## Queue").splitlines()
+    assert [line for line in queue if line.startswith("An open PR for an ")] == [OWNER_MACHINE_RULE]
     merge_policy = profile_section("## Merge policy")
-    assert "an `owner-machine` item's PR carries `needs-local-verify`" in merge_policy
+    assert (
+        "pass and no hold label is on it (an `owner-machine` item's PR gets `owner-machine`, "
+        "§ Queue)" in merge_policy
+    )
+    assert 'export AUTOPILOT_HOLD_LABELS="owner-merges owner-machine"' in merge_policy
+    assert "owner-machine" not in HOLDS  # held from merges, never a PR to stack on
+
+
+@pytest.mark.parametrize(
+    ("pr_labels", "issue_labels", "warned"),
+    [
+        ((), ("owner-machine",), True),
+        (("owner-machine",), ("owner-machine",), False),
+        (("needs-local-verify",), ("owner-machine",), True),
+        ((), (), False),
+    ],
+)
+def test_the_picker_warns_of_an_owner_machine_items_pr_without_the_label(
+    pr_labels: tuple[str, ...], issue_labels: tuple[str, ...], warned: bool
+) -> None:
+    item = issue(BLOCKER, "access", *issue_labels)
+    chosen = pick(
+        tracker(AGENT_SLICE, item, pulls=[pr(970, f"Closes {ref(BLOCKER)}", *pr_labels)]), NOW
+    )
+    expected = (
+        f"PR {ref(970)} closes `owner-machine` {ref(BLOCKER)} "
+        "without carrying `owner-machine` itself"
+    )
+    assert any(w.startswith(expected) for w in chosen.warnings) is warned
+    assert chosen.number == AGENT_STEP
+
+
+def test_an_item_blocked_by_an_owner_machine_item_does_not_stack_on_its_held_pr() -> None:
+    item = replace(AGENT_SLICE, blocked_by=(BLOCKER,))
+    blocker = issue(BLOCKER, "ready", "owner-machine")
+    closing = pr(970, f"Closes {ref(BLOCKER)}", "owner-machine")
+    chosen = pick(tracker(item, blocker, pulls=[closing]), NOW)
+    assert (chosen.number, chosen.stack_on) == (None, ())
 
 
 def test_the_command_names_the_picker_script() -> None:
