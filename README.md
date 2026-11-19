@@ -156,7 +156,7 @@ It runs off the cloud session's proxy, which replaces the token on `*.googleapis
 The owner's login holds that right on the agent account alone, granted by hand (`roles/iam.serviceAccountTokenCreator`).
 Run `make cost-check` before and after it; the target does not run it itself.
 A failing persona's report is one line: the persona and either the test's verdict, a `PersonaQueryError`'s fixed wording from `access/bigquery.py` (at most an exit status, or an HTTP status and BigQuery's reason, never a message), or only the type of any other error, with no traceback under any `--tb`, `-l` or `--full-trace`.
-An interrupt (Ctrl-C) while a persona's test runs ends the run with one line naming the persona.
+An interrupt (Ctrl-C) while a persona's test runs ends the run with one line naming the persona, and an interrupt or error in the cleanup that follows with one more line.
 httpx's and httpcore's request logs, which name the project and its host, are silenced while it runs, so under those options its output names no project, account, token or path under the login's home and can be quoted; `-v` or a log format with the record's path still print paths under the checkout.
 Before applying, the owner enables the APIs the definitions use, which the agent cannot enable itself: the Service Account Credentials API, which minting a persona's token needs, the Data Catalog API, which holds the policy tags, and the BigQuery Data Policy API, which holds the masking rules (`gcloud services enable iamcredentials.googleapis.com datacatalog.googleapis.com bigquerydatapolicy.googleapis.com`).
 The Data Lineage API (`datalineage.googleapis.com`) and the Dataplex API (`dataplex.googleapis.com`) stay off: lineage parsing and lineage metadata are billed.

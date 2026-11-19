@@ -59,32 +59,60 @@ def test_each_human_persona_queries_bigquery_as_its_own_identity(
 
 
 # Stubs for gcloud and BigQuery, loaded as a plugin into a pytest run of the live test: one failure
-# per persona below, the other persona passes. The stubs sit under httpx's client, at its transport,
-# so the request runs through httpx's client as it would live, but not through httpcore. No call
-# leaves the machine. The plugin writes the names of the variables the child was given beside
-# itself, so the test holds that the child inherits none.
+# per persona below, the others pass. A failing persona's stub sits under httpx's client, at its
+# transport; a passing persona's query runs through httpx and httpcore as it would live, to a
+# server on the loopback address whose answer carries the project and the agent account in a
+# header, so a log of the exchange would show them. No call leaves the machine. The plugin writes
+# the names of the variables the child was given beside itself, so the test holds that the child
+# inherits none.
 STUBS = """
-import os, socket, subprocess, httpx, pytest
+import http.server, json, os, socket, subprocess, threading, httpx, pytest
+import access.bigquery
 
-def _refuse(*args, **kwargs):
-    raise RuntimeError("no network in this run")
+_connect = socket.create_connection
 
-socket.create_connection = _refuse
+def _loopback_only(address, *args, **kwargs):
+    if address[0] != "127.0.0.1":
+        raise RuntimeError("no network in this run")
+    return _connect(address, *args, **kwargs)
+
+socket.create_connection = _loopback_only
 AGENT = f"the-agent@{os.environ['LEDGER_LAB_GCP_PROJECT']}.iam.gserviceaccount.com"
 with open(os.path.join(os.path.dirname(__file__), "variables"), "w") as names:
-    # pytest sets its own PYTEST_ variables, and Python sets LC_CTYPE when it coerces a C locale.
-    own = [k for k in os.environ if not k.startswith("PYTEST_") and k != "LC_CTYPE"]
-    names.write("\\n".join(sorted(own)))
+    # pytest's own variables, and LC_CTYPE, which Python sets when it coerces a C locale.
+    own = {"PYTEST_CURRENT_TEST", "PYTEST_VERSION", "LC_CTYPE"}
+    names.write("\\n".join(sorted(k for k in os.environ if k not in own)))
+
+class _BigQuery(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers["Content-Length"]))
+        who = self.headers["Authorization"].rsplit(":", 1)[-1]
+        answer = {"jobComplete": True, "totalBytesProcessed": "0", "rows": [{"f": [{"v": who}]}]}
+        body = json.dumps(answer).encode()
+        self.send_response(200)
+        self.send_header("X-Probe", f"{os.environ['LEDGER_LAB_GCP_PROJECT']} {AGENT}")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+_server = http.server.HTTPServer(("127.0.0.1", 0), _BigQuery)
+threading.Thread(target=_server.serve_forever, daemon=True).start()
+LOOPBACK = f"http://127.0.0.1:{_server.server_port}/bigquery/v2/projects/{{project}}/queries"
 
 @pytest.fixture(autouse=True)
 def _stubs(request, monkeypatch):
     human = request.node.callspec.params["human"]
     mode = os.environ["STUB_MODES"].split(",")
-    mode = dict(m.split("=") for m in mode).get(human, "ok")
+    mode = dict(m.split("=") for m in mode if m).get(human, "ok")
     if mode == "bad-agent":
         monkeypatch.setenv("LEDGER_LAB_AGENT_ACCOUNT", "Bad_Agent")
     if mode == "setup-fails":
         raise RuntimeError(f"no setup for {AGENT} in {os.getcwd()}")
+    if mode == "ok":
+        monkeypatch.setattr(access.bigquery, "ENDPOINT", LOOPBACK)
 
     def run(command, *args, **kwargs):
         if mode == "interrupt-mint":
@@ -99,7 +127,7 @@ def _stubs(request, monkeypatch):
     def handle(self, request):
         token = request.headers["authorization"]
         who = token.rsplit(":", 1)[-1]
-        if mode == "interrupt-query":
+        if mode in ("interrupt-query", "interrupt-twice"):
             raise KeyboardInterrupt
         if mode == "unreachable":
             raise httpx.ConnectError(f"cannot reach {request.url} with {token}", request=request)
@@ -113,7 +141,13 @@ def _stubs(request, monkeypatch):
         return httpx.Response(200, json=answer)
 
     monkeypatch.setattr(subprocess, "run", run)
-    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle)
+    if mode != "ok":
+        monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle)
+    yield
+    if mode == "teardown-fails":
+        raise RuntimeError(f"no teardown for {AGENT} in {os.getcwd()}")
+    if mode == "interrupt-twice":
+        raise KeyboardInterrupt
 """
 # The scrubbed line each failing persona's report must hold; any error that is not the test's
 # own verdict or a `PersonaQueryError` is named by its type alone.
@@ -208,17 +242,33 @@ def test_a_failing_persona_query_names_the_persona_alone(tmp_path: Path) -> None
         assert f"{persona}: {words}" in report, persona
 
 
-def test_a_persona_test_failing_in_its_setup_names_the_persona_alone(tmp_path: Path) -> None:
-    code, report = run_over_stubs(tmp_path, {"auditor": "setup-fails"})
+@pytest.mark.parametrize("mode", ["setup-fails", "teardown-fails"])
+def test_a_persona_test_failing_in_its_setup_or_teardown_names_the_persona_alone(
+    tmp_path: Path, mode: str
+) -> None:
+    code, report = run_over_stubs(tmp_path, {"auditor": mode})
     assert code == pytest.ExitCode.TESTS_FAILED, report[-2000:]
     assert "auditor: RuntimeError, its message left out" in report, report[-2000:]
 
 
-@pytest.mark.parametrize("mode", ["interrupt-mint", "interrupt-query"])
+def test_a_passing_persona_query_through_httpcore_logs_nothing_of_the_exchange(
+    tmp_path: Path,
+) -> None:
+    """The passing personas' queries reach the loopback server through httpx and httpcore, under
+    DEBUG logs and `-rA`; the server's header names the project and the agent account, which
+    `run_over_stubs` holds out of the report."""
+    code, report = run_over_stubs(tmp_path, {})
+    assert code == pytest.ExitCode.OK, report[-2000:]
+    assert "9 passed" in report, report[-2000:]
+    assert "httpcore" not in report, report[-2000:]
+
+
+@pytest.mark.parametrize("mode", ["interrupt-mint", "interrupt-query", "interrupt-twice"])
 def test_an_interrupted_persona_test_ends_the_run_naming_the_persona_alone(
     tmp_path: Path, mode: str
 ) -> None:
-    """Ctrl-C reaches the run as the KeyboardInterrupt the stub raises in the mint or the query."""
+    """Ctrl-C reaches the run as the KeyboardInterrupt the stub raises in the mint or the query,
+    and, for `interrupt-twice`, again in the fixture's teardown at the session's end."""
     code, report = run_over_stubs(tmp_path, {"auditor": mode})
     assert code == pytest.ExitCode.INTERRUPTED, report[-2000:]
     assert "auditor: interrupted" in report, report[-2000:]

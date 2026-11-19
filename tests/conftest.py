@@ -168,17 +168,25 @@ def as_persona_on_bigquery(
 
     # httpx logs each request's URL, which names the project, to pytest's captured and live logs;
     # httpcore logs each connection's host and the answer's headers, and a log format with the
-    # record's path prints the checkout's, so both are silenced.
-    for logger in ("httpx", "httpcore"):
-        monkeypatch.setattr(logging.getLogger(logger), "disabled", True)
+    # record's path prints the checkout's. httpcore logs through child loggers, which a parent's
+    # `disabled` does not reach, so both are held at WARNING, a level every child without its own
+    # inherits.
+    loggers = [logging.getLogger(name) for name in ("httpx", "httpcore")]
+    levels = [logger.level for logger in loggers]
+    for logger in loggers:
+        logger.setLevel(logging.WARNING)
     project = lab_project()
-    with httpx.Client(timeout=60) as client:
+    try:
+        with httpx.Client(timeout=60) as client:
 
-        def act(persona: str) -> PersonaSession:
-            account = identity(access, persona).service_account(project)
-            return PersonaSession(project, mint(chain(account, project, os.environ)), client)
+            def act(persona: str) -> PersonaSession:
+                account = identity(access, persona).service_account(project)
+                return PersonaSession(project, mint(chain(account, project, os.environ)), client)
 
-        yield act
+            yield act
+    finally:
+        for logger, level in zip(loggers, levels, strict=True):
+            logger.setLevel(level)
 
 
 def holds_a_persona_token(item: pytest.Item) -> bool:
@@ -202,8 +210,29 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
     try:
         return (yield)
     except KeyboardInterrupt:
+        item.config.stash[PERSONA_INTERRUPTED] = True
         stop = pytest.exit.Exception(
             f"{persona_test_id(item)}: interrupted", returncode=pytest.ExitCode.INTERRUPTED
+        )
+        raise stop from None
+
+
+PERSONA_INTERRUPTED = pytest.StashKey[bool]()
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> Generator[None]:
+    """After an interrupted persona test, pytest tears its fixtures down here, at the session's
+    end, past both hooks above; a second interrupt or an error there would print a traceback
+    through the checkout. It ends the run with one line instead, which pytest prints as such."""
+    try:
+        return (yield)
+    except BaseException as error:
+        if not session.config.stash.get(PERSONA_INTERRUPTED, False):
+            raise
+        stop = pytest.exit.Exception(
+            f"a persona test's cleanup after the interrupt failed: {type(error).__name__}",
+            returncode=pytest.ExitCode.INTERRUPTED,
         )
         raise stop from None
 
