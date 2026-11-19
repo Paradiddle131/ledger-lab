@@ -16,6 +16,7 @@ With `LEDGER_LAB_GCP_PROJECT` set and no `GCP_PROJECT` it
   the token of gcloud's own login, never a key file, and a read that login is refused is not
   checked rather than failed;
 - asks `testIamPermissions` whether this account itself could move a fence, and fails if it can;
+  off the proxy this account is gcloud's login, not the agent account, so it is not asked;
 - reports a fence this account may not read (the budget, the kill switch's project roles) as not
   checked, which neither passes nor fails.
 Every call reads; none creates, changes or deletes anything. The output names each fence by its
@@ -609,6 +610,14 @@ class Fences:
         return held
 
     def agent_permissions(self, account: str | None) -> Finding:
+        if self.credential is not None and not self.credential.injected:
+            # testIamPermissions answers for the caller, which off the proxy is gcloud's login.
+            return Finding(
+                "NOT CHECKED",
+                "agent permissions",
+                "off the proxy this account is the machine's gcloud login, not the agent account, "
+                f"so what it may do says nothing of the agent's: {UNKNOWN}",
+            )
         held = self.held(
             f"https://cloudresourcemanager.googleapis.com/v1/{self.p}:testIamPermissions",
             PROJECT_PERMISSIONS,

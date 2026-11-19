@@ -861,14 +861,27 @@ def test_off_the_proxy_without_a_login_token_every_fence_fails_and_nothing_is_se
     assert line_for(out, "billing link").startswith(
         "cost-check: FAIL billing link: could not be read (no login token"
     )
-    for fence in ("daily query cap", "kill switch workflow", "agent permissions"):
+    for fence in ("daily query cap", "kill switch workflow", "kill switch account"):
         assert "no login token" in line_for(out, fence), out
     assert [c for c in gcp.calls if c[0] == "curl"] == []
     assert len([c for c in gcp.calls if c[0] == "gcloud"]) == 1
     assert "account" not in out.split("no login token")[1].split(")")[0]
 
 
-@pytest.mark.parametrize("read", sorted(FENCE_OF))
+PERMISSION_READS = {"project permissions", "billing permissions", "account permissions"}
+
+
+def test_off_the_proxy_the_agents_permissions_are_not_checked_and_not_asked() -> None:
+    """testIamPermissions answers for the caller, which off the proxy is the machine's login."""
+    gcp = FakeGCP(changes={"project permissions": {"permissions": list(PROJECT_PERMISSIONS)}})
+    code, out = check(OFF_PROXY, gcp)
+    assert code == 0, out
+    line = line_for(out, "agent permissions")
+    assert line.startswith("cost-check: NOT CHECKED agent permissions: off the proxy"), out
+    assert not [c for c in gcp.calls if c[-1].endswith(":testIamPermissions")]
+
+
+@pytest.mark.parametrize("read", sorted(set(FENCE_OF) - PERMISSION_READS))
 def test_off_the_proxy_a_read_the_login_is_refused_is_not_checked(read: str) -> None:
     code, out = check(OFF_PROXY, FakeGCP(changes={read: DENIED}))
     line = line_for(out, FENCE_OF[read])
@@ -887,7 +900,7 @@ def test_behind_the_proxy_a_refused_read_still_fails(read: str) -> None:
     assert line_for(out, FENCE_OF[read]).startswith("cost-check: FAIL "), out
 
 
-@pytest.mark.parametrize("read", sorted(FENCE_OF))
+@pytest.mark.parametrize("read", sorted(set(FENCE_OF) - PERMISSION_READS))
 def test_off_the_proxy_an_unauthenticated_read_still_fails(read: str) -> None:
     unauthenticated = {"error": {"code": 401, "message": "m", "status": "UNAUTHENTICATED"}}
     code, out = check(OFF_PROXY, FakeGCP(changes={read: unauthenticated}))
