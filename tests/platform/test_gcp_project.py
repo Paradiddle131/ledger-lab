@@ -1,6 +1,7 @@
 """The lab's project comes only from its own variable, never from the session's foreign one, and
 not at all while the session carries the foreign one."""
 
+import gcp_project
 import pytest
 from gcp_project import NoLabProjectError, foreign_session, lab_project, lab_project_or_none
 
@@ -50,3 +51,19 @@ def test_no_lab_project_raises(env: dict[str, str]) -> None:
 
 def test_the_foreign_project_is_never_returned() -> None:
     assert lab_project_or_none({"GCP_PROJECT": "another-lab"}) is None
+
+
+@pytest.mark.parametrize(
+    ("env", "word"),
+    [
+        ({"LEDGER_LAB_GCP_PROJECT": "the-lab"}, "own"),
+        ({}, "elsewhere"),
+        ({"LEDGER_LAB_GCP_PROJECT": " "}, "elsewhere"),
+        ({"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": "another-lab"}, "elsewhere"),
+    ],
+)
+def test_run_as_a_script_it_prints_one_word_and_no_project(
+    env: dict[str, str], word: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert gcp_project.main(env) == 0
+    assert capsys.readouterr().out == f"{word}\n"

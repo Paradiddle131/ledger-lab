@@ -25,8 +25,26 @@ typecheck: sync
 
 # LOADOUT reaches pytest for the cross-check with the review skill's tier.sh
 # (tests/test_review_routing.py), which skips, saying so, without it.
+# After `sync`, the recipe asks `platform/gcp_project.py` whether this is the lab's own environment.
+# It asks in the recipe's own shell, so the decider sees the environment pytest gets, variables
+# given on make's command line included. By the answer it runs:
+# - `own`: the cost read (`platform/cost_check.py`), pytest, then the cost read again, in that
+#   order on one shell line. A failed read before stops pytest from running; the read after also
+#   runs after a failed pytest; the line fails if either read or pytest fails.
+# - `elsewhere` (the lab variable unset or blank, or GCP_PROJECT set): pytest alone.
+# - any other output, the empty output of a failed decider included: a message, a failure, no pytest.
+# tests/platform/test_cost_read_around_tests.py checks these over a stub `uv`. Limits: an interrupt
+# (Ctrl-C) stops the line, the read after included; pytest runs in other targets (`stack-test`,
+# `reconcile-landed`, `bigquery-personas` and the like) have no cost read around them.
+PYTEST = LOADOUT='$(LOADOUT)' uv run pytest
+COST_CHECK = uv run --no-sync python platform/cost_check.py
+
 test: sync
-	LOADOUT='$(LOADOUT)' uv run pytest
+	case "$$(uv run --no-sync python platform/gcp_project.py)" in \
+	own) $(COST_CHECK) || exit 1; $(PYTEST); tests=$$?; $(COST_CHECK) || exit 1; exit $$tests ;; \
+	elsewhere) $(PYTEST) ;; \
+	*) echo "test: platform/gcp_project.py answered neither own nor elsewhere" >&2; exit 1 ;; \
+	esac
 
 ids:
 	@test -f $(GUARDS)/check-process-ids.py || { echo "ids: no rules collection at $(LOADOUT); pass LOADOUT=<clone>" >&2; exit 1; }
@@ -101,7 +119,7 @@ stack-test: sync stack-up
 # call, while LEDGER_LAB_GCP_PROJECT is unset; no GCP call and a failure, not checked, in a session
 # that carries another lab's GCP_PROJECT.
 cost-check:
-	@uv run --no-sync python platform/cost_check.py
+	@$(COST_CHECK)
 
 # The reconciliation of Chicago's payments to their contracts' awards over the landed files: every
 # class's count and dollars, and each break class's digest, must equal the reviewed baseline. Needs
