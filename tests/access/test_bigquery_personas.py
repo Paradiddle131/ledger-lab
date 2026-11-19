@@ -66,7 +66,7 @@ def test_each_human_persona_queries_bigquery_as_its_own_identity(
 # the names of the variables the child was given beside itself, so the test holds that the child
 # inherits none.
 STUBS = """
-import http.server, json, os, socket, subprocess, threading, httpx, pytest
+import http.server, json, os, signal, socket, subprocess, threading, httpx, pytest
 import access.bigquery
 
 _connect = socket.create_connection
@@ -101,6 +101,11 @@ class _BigQuery(http.server.BaseHTTPRequestHandler):
 _server = http.server.HTTPServer(("127.0.0.1", 0), _BigQuery)
 threading.Thread(target=_server.serve_forever, daemon=True).start()
 LOOPBACK = f"http://127.0.0.1:{_server.server_port}/bigquery/v2/projects/{{project}}/queries"
+
+def pytest_keyboard_interrupt(excinfo):
+    # A real second Ctrl-C while pytest renders the first, in `interrupt-twice`.
+    if "interrupt-twice" in os.environ["STUB_MODES"]:
+        os.kill(os.getpid(), signal.SIGINT)
 
 @pytest.fixture(autouse=True)
 def _stubs(request, monkeypatch):
@@ -268,7 +273,8 @@ def test_an_interrupted_persona_test_ends_the_run_naming_the_persona_alone(
     tmp_path: Path, mode: str
 ) -> None:
     """Ctrl-C reaches the run as the KeyboardInterrupt the stub raises in the mint or the query,
-    and, for `interrupt-twice`, again in the fixture's teardown at the session's end."""
+    and, for `interrupt-twice`, by a real SIGINT while pytest reports the first and again in the
+    fixture's teardown at the session's end."""
     code, report = run_over_stubs(tmp_path, {"auditor": mode})
     assert code == pytest.ExitCode.INTERRUPTED, report[-2000:]
     assert "auditor: interrupted" in report, report[-2000:]

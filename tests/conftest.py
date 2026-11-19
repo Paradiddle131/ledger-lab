@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 from collections.abc import Callable, Generator, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -210,6 +211,9 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
     try:
         return (yield)
     except KeyboardInterrupt:
+        # A second Ctrl-C, common on a hung mint, would land while pytest still renders this one,
+        # past every hook here: the run is ending, so later ones are ignored.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         item.config.stash[PERSONA_INTERRUPTED] = True
         stop = pytest.exit.Exception(
             f"{persona_test_id(item)}: interrupted", returncode=pytest.ExitCode.INTERRUPTED
