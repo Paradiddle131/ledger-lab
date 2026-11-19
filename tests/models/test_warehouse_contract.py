@@ -7,6 +7,7 @@ stubs of the engine's command and of the CLI. The run itself needs the lab proje
 
 import copy
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -69,7 +70,80 @@ def test_the_copy_changes_only_the_servers_and_the_physical_types() -> None:
 def test_a_type_with_no_bigquery_type_stops_the_copy() -> None:
     changed = contract()
     changed["schema"][0]["properties"][0]["physicalType"] = "HUGEINT"
-    with pytest.raises(ValueError, match="no BigQuery type for HUGEINT"):
+    with pytest.raises(ValueError, match="no BigQuery type for 'HUGEINT'"):
+        warehouse.for_bigquery(changed, "the-region")
+
+
+def column_without_type(c: dict) -> None:
+    del c["schema"][0]["properties"][0]["physicalType"]
+
+
+def column_typed(value: Any) -> Any:
+    def change(c: dict) -> None:
+        c["schema"][0]["properties"][0]["physicalType"] = value
+
+    return change
+
+
+def column_holding(key: str) -> Any:
+    def change(c: dict) -> None:
+        c["schema"][0]["properties"][0][key] = [{"name": "inner", "physicalType": "VARCHAR"}]
+
+    return change
+
+
+def schema_set(value: Any) -> Any:
+    def change(c: dict) -> None:
+        c["schema"] = value
+
+    return change
+
+
+def columns_set(value: Any) -> Any:
+    def change(c: dict) -> None:
+        c["schema"][0]["properties"] = value
+
+    return change
+
+
+def without(key: str) -> Any:
+    def change(c: dict) -> None:
+        del c[key]
+
+    return change
+
+
+def schema_without_columns(c: dict) -> None:
+    del c["schema"][0]["properties"]
+
+
+def column_replaced(c: dict) -> None:
+    c["schema"][0]["properties"][0] = "payment_key"
+
+
+UNCOPIED = {
+    "no physicalType": (column_without_type, "payment_key: no physicalType"),
+    "a null physicalType": (column_typed(None), "payment_key: no physicalType"),
+    "an empty physicalType": (column_typed(""), "no BigQuery type for ''"),
+    "a list as physicalType": (column_typed(["VARCHAR"]), "no BigQuery type for"),
+    "a number as physicalType": (column_typed(1), "no BigQuery type for 1"),
+    "nested properties": (column_holding("properties"), "payment_key: nested columns"),
+    "nested items": (column_holding("items"), "payment_key: nested columns"),
+    "a column that is no mapping": (column_replaced, "a column that is no mapping"),
+    "an empty schema": (schema_set([]), "no schema to copy"),
+    "no schema": (without("schema"), "no schema to copy"),
+    "a schema that is no list": (schema_set({"name": "payments"}), "no schema to copy"),
+    "a schema entry that is no mapping": (schema_set(["payments"]), "no columns to copy"),
+    "a schema entry with no columns": (schema_without_columns, "no columns to copy"),
+    "a schema entry with empty columns": (columns_set([]), "no columns to copy"),
+}
+
+
+@pytest.mark.parametrize("change, refusal", UNCOPIED.values(), ids=UNCOPIED.keys())
+def test_a_contract_the_copy_cannot_type_in_full_stops_the_copy(change: Any, refusal: str) -> None:
+    changed = contract()
+    change(changed)
+    with pytest.raises(ValueError, match=re.escape(refusal)):
         warehouse.for_bigquery(changed, "the-region")
 
 

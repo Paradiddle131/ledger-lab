@@ -13,9 +13,10 @@ A shadow holds only what that connection could already read or write as literals
 reach is read through qualified names, `system.main.current_database()` and
 `"<persona>"."<schema>"."<table>"`, which no temporary object can shadow.
 
-On BigQuery a test will impersonate the persona's service account,
-`<persona>@<project>.iam.gserviceaccount.com`, and the warehouse's own rules decide what it sees;
-the caller passes the project, which comes only from `platform/gcp_project.py`.
+On BigQuery a test impersonates the persona's service account,
+`<persona>@<project>.iam.gserviceaccount.com` (`access/bigquery.py`, the `as_persona_on_bigquery`
+fixture), and the warehouse's own rules decide what it sees; the caller passes the project, which
+comes only from `platform/gcp_project.py`.
 """
 
 from collections.abc import Mapping

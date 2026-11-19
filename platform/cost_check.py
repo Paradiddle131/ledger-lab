@@ -5,25 +5,35 @@ tool. In a session that carries another lab's `GCP_PROJECT` it calls no GCP tool
 credential is that lab's, and fails, since it has read nothing that shows the lab's cost is $0.00.
 With `LEDGER_LAB_GCP_PROJECT` set and no `GCP_PROJECT` it
 - reads this month's cost, credits included, and the newest export time from the Cloud Billing
-  export named by `LEDGER_LAB_BILLING_EXPORT` (`dataset.table` in the lab project) through `bq`:
+  export through the view `LEDGER_LAB_BILLING_EXPORT` names (`dataset.table` in the lab project;
+  the agent account reads the export only through it) through `bq`:
   a dry run first, then the query under a fixed byte cap; a cost above zero fails, and so does an
   answer that is not the query's one row, or an export that holds no rows for the project;
-- reads each applied fence through its REST API (`curl`; the session's proxy supplies the
-  credential) and compares it with its declaration in `platform/gcp` (`fences.py`); a fence that
-  is missing, differs or answers in an unexpected shape fails;
+- reads each applied fence through its REST API (`curl`) and compares it with its declaration in
+  `platform/gcp` (`fences.py`); a fence that is missing, differs or answers in an unexpected shape
+  fails. Where the environment hands gcloud its token (`CLOUDSDK_AUTH_ACCESS_TOKEN`, as a cloud
+  session does), curl sends no credential and the session's proxy supplies it; elsewhere curl sends
+  the token of gcloud's own login, never a key file, and a read that login lacks the permission
+  for is not checked rather than failed, while any other refusal still fails;
 - asks `testIamPermissions` whether this account itself could move a fence, and fails if it can;
+  off the proxy this account is gcloud's login, not the agent account, so it is not asked;
 - reports a fence this account may not read (the budget, the kill switch's project roles) as not
   checked, which neither passes nor fails.
 Every call reads; none creates, changes or deletes anything. The output names each fence by its
 role and never prints a project, billing account, service account or an API's error message.
 """
 
+import contextlib
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
-from collections.abc import Callable, Mapping, Sequence
+import tempfile
+import threading
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -80,6 +90,10 @@ BILLING_PERMISSIONS = (
 # re-grant it.
 KILL_SWITCH_ACCOUNT_PERMISSIONS = (
     "iam.serviceAccounts.getAccessToken",
+    "iam.serviceAccounts.getOpenIdToken",
+    "iam.serviceAccounts.signJwt",
+    "iam.serviceAccounts.signBlob",
+    "iam.serviceAccounts.implicitDelegation",
     "iam.serviceAccountKeys.create",
     "iam.serviceAccounts.actAs",
     "iam.serviceAccounts.setIamPolicy",
@@ -88,6 +102,11 @@ KILL_SWITCH_ACCOUNT_PERMISSIONS = (
 )
 
 Runner = Callable[[Sequence[str]], str]
+
+# Set where the environment, not gcloud's own login, gives gcloud its token; behind the cloud
+# session's proxy it holds a placeholder and the proxy puts the credential on every request.
+INJECTED_VARIABLE = "CLOUDSDK_AUTH_ACCESS_TOKEN"
+LOGIN_TOKEN_COMMAND = ("gcloud", "auth", "print-access-token")
 
 
 def month_to_date_sql(project: str, export: str) -> str:
@@ -163,11 +182,63 @@ def error_reason(error: dict[str, Any]) -> str | None:
     return None
 
 
+class Credential:
+    """What curl sends to authenticate a read.
+
+    With the token injected by the environment, nothing: the proxy authenticates the request.
+    Otherwise the token of gcloud's own login, asked for once and written to a header file only this
+    user can read, which curl reads with `-H @file`, so the token is on no command line.
+    """
+
+    def __init__(self, env: Mapping[str, str], run: Runner) -> None:
+        self.injected = bool(env.get(INJECTED_VARIABLE, "").strip())
+        self.run = run
+        self.folder: str | None = None
+        self.header: str | None = None
+        self.failure: ReadError | None = None
+
+    def curl_arguments(self) -> list[str]:
+        if self.injected:
+            return []
+        if self.header is None and self.failure is None:
+            self.header, self.failure = self.write_header()
+        if self.header is None:
+            raise self.failure or ReadError("no login token")
+        return ["-H", f"@{self.header}"]
+
+    def write_header(self) -> tuple[str | None, ReadError | None]:
+        try:
+            token = self.run(LOGIN_TOKEN_COMMAND).strip()
+        except (OSError, subprocess.SubprocessError) as failed:
+            return None, ReadError(f"no login token (gcloud {tool_failure(failed)})")
+        if not token or any(c.isspace() or not c.isprintable() for c in token):
+            return None, ReadError("no login token (gcloud printed none)")
+        self.folder = tempfile.mkdtemp(prefix="cost-check-")
+        header = os.path.join(self.folder, "authorization")
+        descriptor = os.open(header, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as file:
+            file.write(f"Authorization: Bearer {token}\n")
+        return header, None
+
+    def close(self) -> None:
+        if self.folder is not None:
+            shutil.rmtree(self.folder, ignore_errors=True)
+            self.folder = self.header = None
+
+
 def read(
-    run: Runner, url: str, *, body: dict[str, Any] | None = None, bill_to: str | None = None
+    run: Runner,
+    url: str,
+    *,
+    body: dict[str, Any] | None = None,
+    bill_to: str | None = None,
+    credential: Credential | None = None,
 ) -> dict[str, Any]:
     """GET a Google API resource, or POST a read-only method such as `testIamPermissions`."""
     command = ["curl", "-sS", "--max-time", "60"]
+    if credential is not None and not credential.injected:
+        # `-q`, first: no curlrc, whose trace or header-dump options would write the token out.
+        command = ["curl", "-q", *command[1:], *credential.curl_arguments()]
     if bill_to is not None:
         command += ["-H", f"x-goog-user-project: {bill_to}"]
     if body is not None:
@@ -237,21 +308,86 @@ def not_readable(fence: str, error: ReadError) -> Finding | None:
     return Finding("NOT CHECKED", fence, f"the read was refused ({error}): {UNKNOWN}")
 
 
+# Every Google API read the fence checks make, by the URL's shape, with the permission it needs
+# and where that permission is held: `project` reads are what the agent account holds on the lab
+# project, `billing account` reads are on the linked billing account, and `none` methods
+# (`testIamPermissions`) need no permission. A read whose URL matches no row is refused before it
+# is sent, so a new read cannot be made without a row here, where the tests of the agent account's
+# hand-granted roles read it. A read sent with `bill_to` also needs `serviceusage.services.use` on
+# the project it bills.
+API = r"https://[a-z]+\.googleapis\.com/v1(beta1)?/"
+P = r"projects/[^/:]+"
+READS: tuple[tuple[str, str | None, str], ...] = (
+    (rf"{API}{P}/billingInfo", "resourcemanager.projects.get", "project"),
+    (
+        rf"{API}{P}/services/bigquery\.googleapis\.com/consumerQuotaMetrics/[^/]+",
+        "serviceusage.quotas.get",
+        "project",
+    ),
+    (rf"{API}{P}/topics/[^/]+", "pubsub.topics.get", "project"),
+    (rf"{API}{P}/subscriptions/[^/]+", "pubsub.subscriptions.get", "project"),
+    (rf"{API}{P}/locations/[^/]+/workflows/[^/]+", "workflows.workflows.get", "project"),
+    (rf"{API}{P}/locations/[^/]+/triggers/[^/]+", "eventarc.triggers.get", "project"),
+    (rf"{API}{P}/serviceAccounts/[^/:]+", "iam.serviceAccounts.get", "project"),
+    (rf"{API}{P}:getIamPolicy", "resourcemanager.projects.getIamPolicy", "project"),
+    (rf"{API}{P}", "resourcemanager.projects.get", "project"),
+    (rf"{API}billingAccounts/[^/]+/budgets", "billing.budgets.list", "billing account"),
+    (rf"{API}{P}:testIamPermissions", None, "none"),
+    (rf"{API}{P}/serviceAccounts/[^/:]+:testIamPermissions", None, "none"),
+    (rf"{API}billingAccounts/[^/:]+:testIamPermissions", None, "none"),
+)
+BILLED_READ_PERMISSION = "serviceusage.services.use"
+
+
+class RefusedRead(ValueError):
+    """A read the cost check does not list in READS, refused before anything is sent."""
+
+
+def read_permission(url: str) -> tuple[str | None, str]:
+    """The permission a read of `url` needs and where it is held; refuses an unlisted read."""
+    matches = [(p, scope) for shape, p, scope in READS if re.fullmatch(shape, url)]
+    if len(matches) != 1:
+        raise RefusedRead(
+            f"a read the cost check does not list in READS: {len(matches)} rows match"
+        )
+    return matches[0]
+
+
 class Fences:
     """The live reads of one lab project, compared with the declaration."""
 
-    def __init__(self, project: str, run: Runner, want: Declared) -> None:
+    def __init__(
+        self, project: str, run: Runner, want: Declared, credential: Credential | None = None
+    ) -> None:
         self.project = project
         self.run = run
         self.want = want
+        self.credential = credential
         self.p = f"projects/{project}"
+        self.link_read = True
         self.topic = f"{self.p}/topics/{want.topic}"
         self.workflow = f"{self.p}/locations/{want.region}/workflows/{want.workflow}"
         self.kill_switch_account = f"{want.kill_switch_account}@{project}.iam.gserviceaccount.com"
         self.kill_switch_resource = f"{self.p}/serviceAccounts/{self.kill_switch_account}"
 
     def read(self, url: str, **kwargs: Any) -> dict[str, Any]:
-        return read(self.run, url, **kwargs)
+        read_permission(url)
+        return read(self.run, url, credential=self.credential, **kwargs)
+
+    def refused_to_login(self, fence: str, error: ReadError) -> Finding | None:
+        """Off the proxy, a read gcloud's login lacks the permission for: not checked; else None.
+        Any other refusal, such as an API that is off (`SERVICE_DISABLED`), still fails."""
+        login = self.credential is not None and not self.credential.injected
+        lacks_permission = error.status == "PERMISSION_DENIED" and error.reason in (
+            None,
+            "IAM_PERMISSION_DENIED",
+        )
+        return not_readable(fence, error) if login and lacks_permission else None
+
+    def unread(self, fence: str, error: ReadError, failed: str = "loose: ") -> Finding:
+        """A read that failed: off the proxy, one the login is refused is not checked."""
+        refused = self.refused_to_login(fence, error)
+        return refused or Finding("FAIL", fence, f"{failed}could not be read ({error})")
 
     def billing_link(self) -> tuple[Finding, str | None]:
         info = self.read(f"https://cloudbilling.googleapis.com/v1/{self.p}/billingInfo")
@@ -367,6 +503,9 @@ class Fences:
             try:
                 delivers = self.read(f"https://pubsub.googleapis.com/v1/{subscription}")
             except ReadError as error:
+                refused = self.refused_to_login("kill switch trigger", error)
+                if refused is not None and not problems:
+                    return refused
                 problems.append(f"its subscription could not be read ({error})")
             else:
                 if delivers.get("name") != subscription or delivers.get("topic") != self.topic:
@@ -415,7 +554,11 @@ class Fences:
         want = self.want
         if account is None:
             return Finding(
-                "NOT CHECKED", "budget", f"no billing account is linked to read it from: {UNKNOWN}"
+                "NOT CHECKED",
+                "budget",
+                f"no billing account is linked to read it from: {UNKNOWN}"
+                if self.link_read
+                else f"the billing link was not read, so its account is not known: {UNKNOWN}",
             )
         try:
             answer = self.read(
@@ -476,6 +619,14 @@ class Fences:
         return held
 
     def agent_permissions(self, account: str | None) -> Finding:
+        if self.credential is not None and not self.credential.injected:
+            # testIamPermissions answers for the caller, which off the proxy is gcloud's login.
+            return Finding(
+                "NOT CHECKED",
+                "agent permissions",
+                "off the proxy this account is the machine's gcloud login, not the agent account, "
+                f"so what it may do says nothing of the agent's: {UNKNOWN}",
+            )
         held = self.held(
             f"https://cloudresourcemanager.googleapis.com/v1/{self.p}:testIamPermissions",
             PROJECT_PERMISSIONS,
@@ -506,8 +657,15 @@ class Fences:
         account: str | None = None
         try:
             link, account = self.billing_link()
-        except (ReadError, Shape) as error:
+        except ReadError as error:
+            link = self.unread("billing link", error, failed="")
+            self.link_read = False
+        except Shape as error:
             link = Finding("FAIL", "billing link", f"could not be read ({error})")
+            self.link_read = False
+        except RefusedRead as error:
+            link = Finding("FAIL", "billing link", f"loose: a read that was refused ({error})")
+            self.link_read = False
         found = [link]
         for fence, judge in (
             ("daily query cap", self.query_cap),
@@ -522,7 +680,9 @@ class Fences:
             try:
                 found.append(judge())
             except ReadError as error:
-                found.append(Finding("FAIL", fence, f"loose: could not be read ({error})"))
+                found.append(self.unread(fence, error))
+            except RefusedRead as error:
+                found.append(Finding("FAIL", fence, f"loose: a read that was refused ({error})"))
             except (KeyError, TypeError, ValueError, AttributeError) as error:
                 shape = error if isinstance(error, Shape) else type(error).__name__
                 found.append(
@@ -589,6 +749,25 @@ def month_to_date(project: str, export: str, run: Runner) -> tuple[bool, str]:
     )
 
 
+@contextlib.contextmanager
+def removed_on_termination(credential: Credential) -> Iterator[None]:
+    """A SIGTERM or SIGHUP (a `timeout`, a closed terminal) ends the run through Python's exit, so
+    the header file is removed; a SIGKILL cannot be caught, and leaves it, at mode 0600."""
+    if credential.injected or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def leave(signum: int, frame: object) -> None:
+        raise SystemExit(128 + signum)
+
+    previous = {s: signal.signal(s, leave) for s in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        yield
+    finally:
+        for s, handler in previous.items():
+            signal.signal(s, handler)
+
+
 def check(env: Mapping[str, str], run: Runner = run_tool) -> tuple[int, str]:
     """The exit code and the lines to print."""
     if foreign_session(env):
@@ -604,9 +783,17 @@ def check(env: Mapping[str, str], run: Runner = run_tool) -> tuple[int, str]:
         )
     export = env.get(EXPORT_VARIABLE, "").strip()
     if not export:
-        return 1, f"cost-check: set {EXPORT_VARIABLE} to the billing export's dataset.table"
+        return 1, (
+            f"cost-check: set {EXPORT_VARIABLE} to the view over the billing export that the agent "
+            "account reads, as dataset.table in the lab project"
+        )
     zero, cost_line = month_to_date(project, export, run)
-    findings = Fences(project, run, declared()).findings()
+    credential = Credential(env, run)
+    try:
+        with removed_on_termination(credential):
+            findings = Fences(project, run, declared(), credential).findings()
+    finally:
+        credential.close()
     lines = [cost_line, *(f.line() for f in findings)]
     failed = [f.fence for f in findings if f.state == "FAIL"]
     unchecked = [f.fence for f in findings if f.state == "NOT CHECKED"]
