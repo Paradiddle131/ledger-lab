@@ -66,7 +66,7 @@ warehouse-parity: sync
 # Each human persona's query on BigQuery, as the persona's own service account, by a token minted by
 # impersonation from this machine's login through the agent account (`LEDGER_LAB_AGENT_ACCOUNT`,
 # access/bigquery.py); off the cloud proxy, which replaces the token, so `make check` runs it only over
-# stubs, with every report option, to hold that a failure names the persona alone.
+# stubs, under the report options that add most, to hold that a failure names the persona alone.
 bigquery-personas: sync
 	uv run pytest -m bigquery_persona tests/access/test_bigquery_personas.py
 

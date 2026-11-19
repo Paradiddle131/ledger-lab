@@ -8,7 +8,8 @@ token is replaced on the way, so it runs on the owner's machine (`make bigquery-
 the lab project set and no `GCP_PROJECT`. The proposer, an agent persona with no warehouse grant,
 holds no query role, so it is not among them. The other tests hold, offline, what the mint asks
 `gcloud` for and what a query sends and reads back, against stubs, that a failure of the live
-test names no account, project, token or path under the login's home under every report option,
+test names no account, project, token or path under the login's home under the report options
+that add most to it, that an interrupt ends the run naming the persona alone,
 and that neither a plain run nor another lab's session reaches GCP.
 """
 
@@ -59,7 +60,9 @@ def test_each_human_persona_queries_bigquery_as_its_own_identity(
 
 # Stubs for gcloud and BigQuery, loaded as a plugin into a pytest run of the live test: one failure
 # per persona below, the other persona passes. The stubs sit under httpx's client, at its transport,
-# so the request runs through httpx as it would live. No call leaves the machine.
+# so the request runs through httpx's client as it would live, but not through httpcore. No call
+# leaves the machine. The plugin writes the names of the variables the child was given beside
+# itself, so the test holds that the child inherits none.
 STUBS = """
 import os, socket, subprocess, httpx, pytest
 
@@ -68,6 +71,10 @@ def _refuse(*args, **kwargs):
 
 socket.create_connection = _refuse
 AGENT = f"the-agent@{os.environ['LEDGER_LAB_GCP_PROJECT']}.iam.gserviceaccount.com"
+with open(os.path.join(os.path.dirname(__file__), "variables"), "w") as names:
+    # pytest sets its own PYTEST_ variables, and Python sets LC_CTYPE when it coerces a C locale.
+    own = [k for k in os.environ if not k.startswith("PYTEST_") and k != "LC_CTYPE"]
+    names.write("\\n".join(sorted(own)))
 
 @pytest.fixture(autouse=True)
 def _stubs(request, monkeypatch):
@@ -76,8 +83,12 @@ def _stubs(request, monkeypatch):
     mode = dict(m.split("=") for m in mode).get(human, "ok")
     if mode == "bad-agent":
         monkeypatch.setenv("LEDGER_LAB_AGENT_ACCOUNT", "Bad_Agent")
+    if mode == "setup-fails":
+        raise RuntimeError(f"no setup for {AGENT} in {os.getcwd()}")
 
     def run(command, *args, **kwargs):
+        if mode == "interrupt-mint":
+            raise KeyboardInterrupt
         if mode == "timeout":
             raise subprocess.TimeoutExpired(command, 120)
         if mode == "mint-fails":
@@ -88,6 +99,8 @@ def _stubs(request, monkeypatch):
     def handle(self, request):
         token = request.headers["authorization"]
         who = token.rsplit(":", 1)[-1]
+        if mode == "interrupt-query":
+            raise KeyboardInterrupt
         if mode == "unreachable":
             raise httpx.ConnectError(f"cannot reach {request.url} with {token}", request=request)
         if mode == "not-json":
@@ -114,7 +127,7 @@ FAILURES = {
     "metric-owner": ("unreachable", "ConnectError, its message left out"),
     "auditor": ("not-json", "JSONDecodeError, its message left out"),
 }
-# Every option that adds to a failure's report: tracebacks at their longest, with each frame's
+# The options that add most to a failure's report: tracebacks at their longest, with each frame's
 # locals, pytest's own frames, captured and live logs at every level, and every summary (`-rA`).
 WORST_CASE = [
     "--tb=long",
@@ -136,7 +149,9 @@ def recipe_pytest_arguments() -> list[str]:
     return arguments[1:]
 
 
-def test_a_failing_persona_query_names_the_persona_alone(tmp_path: Path) -> None:
+def run_over_stubs(tmp_path: Path, modes: dict[str, str]) -> tuple[int, str]:
+    """`make bigquery-personas`'s pytest run under WORST_CASE, over the stubs, each persona failing
+    the way `modes` names; its exit status and rendered report."""
     (tmp_path / "persona_stubs.py").write_text(STUBS)
     # The child is hermetic: its PATH holds only a gcloud that logs its call and fails, its gcloud
     # configuration is empty, and it inherits no credential, proxy or GCP variable, so a stub that
@@ -154,7 +169,7 @@ def test_a_failing_persona_query_names_the_persona_alone(tmp_path: Path) -> None
         "LEDGER_LAB_GCP_PROJECT": PROJECT,
         "LEDGER_LAB_AGENT_ACCOUNT": "the-agent",
         "PYTHONPATH": str(tmp_path),
-        "STUB_MODES": ",".join(f"{p}={mode}" for p, (mode, _) in FAILURES.items()),
+        "STUB_MODES": ",".join(f"{p}={mode}" for p, mode in modes.items()),
     }
     run = subprocess.run(  # noqa: S603
         [
@@ -177,13 +192,37 @@ def test_a_failing_persona_query_names_the_persona_alone(tmp_path: Path) -> None
     )
     report = run.stdout + run.stderr
     assert not gcloud_log.exists(), "the child ran gcloud"
+    given = (tmp_path / "variables").read_text().split("\n")
+    assert given == sorted(env), "the child inherited a variable it was not given"
+    # Neither the project, the agent account, a token, a path under the login's home nor one
+    # under the checkout appears anywhere in the rendered report.
+    for word in (PROJECT, "the-agent", "stub-token", str(Path.home()), str(REPO)):
+        assert word not in report, word
+    return run.returncode, report
+
+
+def test_a_failing_persona_query_names_the_persona_alone(tmp_path: Path) -> None:
+    _, report = run_over_stubs(tmp_path, {p: mode for p, (mode, _) in FAILURES.items()})
     assert "8 failed, 1 passed" in report, report[-2000:]
     for persona, (_, words) in FAILURES.items():
         assert f"{persona}: {words}" in report, persona
-    # Neither the project, the agent account, a token nor a path under the login's home appears
-    # anywhere in the rendered report.
-    for word in (PROJECT, "the-agent", "stub-token", str(Path.home())):
-        assert word not in report, word
+
+
+def test_a_persona_test_failing_in_its_setup_names_the_persona_alone(tmp_path: Path) -> None:
+    code, report = run_over_stubs(tmp_path, {"auditor": "setup-fails"})
+    assert code == pytest.ExitCode.TESTS_FAILED, report[-2000:]
+    assert "auditor: RuntimeError, its message left out" in report, report[-2000:]
+
+
+@pytest.mark.parametrize("mode", ["interrupt-mint", "interrupt-query"])
+def test_an_interrupted_persona_test_ends_the_run_naming_the_persona_alone(
+    tmp_path: Path, mode: str
+) -> None:
+    """Ctrl-C reaches the run as the KeyboardInterrupt the stub raises in the mint or the query."""
+    code, report = run_over_stubs(tmp_path, {"auditor": mode})
+    assert code == pytest.ExitCode.INTERRUPTED, report[-2000:]
+    assert "auditor: interrupted" in report, report[-2000:]
+    assert "Traceback" not in report, report[-2000:]
 
 
 def test_the_live_test_carries_its_marker() -> None:

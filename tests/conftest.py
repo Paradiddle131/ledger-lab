@@ -166,8 +166,11 @@ def as_persona_on_bigquery(
     # Imported here: platform/ is on pytest's path, not on a child process's that loads this file.
     from gcp_project import lab_project
 
-    # httpx logs each request's URL, which names the project, to pytest's captured and live logs.
-    monkeypatch.setattr(logging.getLogger("httpx"), "disabled", True)
+    # httpx logs each request's URL, which names the project, to pytest's captured and live logs;
+    # httpcore logs each connection's host and the answer's headers, and a log format with the
+    # record's path prints the checkout's, so both are silenced.
+    for logger in ("httpx", "httpcore"):
+        monkeypatch.setattr(logging.getLogger(logger), "disabled", True)
     project = lab_project()
     with httpx.Client(timeout=60) as client:
 
@@ -176,6 +179,33 @@ def as_persona_on_bigquery(
             return PersonaSession(project, mint(chain(account, project, os.environ)), client)
 
         yield act
+
+
+def holds_a_persona_token(item: pytest.Item) -> bool:
+    return isinstance(item, pytest.Function) and "as_persona_on_bigquery" in item.fixturenames
+
+
+def persona_test_id(item: pytest.Item) -> str:
+    callspec = getattr(item, "callspec", None)
+    return callspec.id if callspec else item.name
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> Generator[None]:
+    """An interrupt (Ctrl-C) while a test holding a persona's token runs ends the run with one
+    line naming the test, exit status 2. pytest would otherwise report the interrupt itself, past
+    `pytest_runtest_makereport`: the interrupted frame's path, which on the owner's machine is
+    under the login's home, and under `--full-trace` every frame's arguments, which name the
+    project and the accounts. An interrupt between tests is pytest's own and holds neither."""
+    if not holds_a_persona_token(item):
+        return (yield)
+    try:
+        return (yield)
+    except KeyboardInterrupt:
+        stop = pytest.exit.Exception(
+            f"{persona_test_id(item)}: interrupted", returncode=pytest.ExitCode.INTERRUPTED
+        )
+        raise stop from None
 
 
 @pytest.hookimpl(wrapper=True)
@@ -189,13 +219,9 @@ def pytest_runtest_makereport(
     accounts, the token and paths under the login's home, under any `--tb`, `-l` or
     `--full-trace`."""
     report = yield
-    holds_a_token = (
-        isinstance(item, pytest.Function) and "as_persona_on_bigquery" in item.fixturenames
-    )
-    if holds_a_token and report.failed and call.excinfo:
+    if holds_a_persona_token(item) and report.failed and call.excinfo:
         error = call.excinfo.value
         trusted = isinstance(error, PersonaQueryError | pytest.fail.Exception)
         said = str(error) if trusted else f"{type(error).__name__}, its message left out"
-        callspec = getattr(item, "callspec", None)
-        report.longrepr = f"{callspec.id if callspec else item.name}: {said}"
+        report.longrepr = f"{persona_test_id(item)}: {said}"
     return report
