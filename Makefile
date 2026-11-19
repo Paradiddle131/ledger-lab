@@ -25,23 +25,26 @@ typecheck: sync
 
 # LOADOUT reaches pytest for the cross-check with the review skill's tier.sh
 # (tests/test_review_routing.py), which skips, saying so, without it.
-# In the lab's own environment, as `platform/gcp_project.py` decides it (`own`), the one recipe line
-# reads the cost before pytest and again after it, in order, since they are one shell line: a failed
-# read before stops pytest from running; the read after runs whatever pytest's exit, and the line
-# fails if either read or pytest fails. Elsewhere (`elsewhere`: the lab variable unset or blank, or
-# a GCP_PROJECT set) the line is pytest alone. Any other answer stops make. The word is read when
-# make expands this recipe, after `sync`. Limits: an interrupt (Ctrl-C) stops the line, after-read
-# included; pytest runs other than this target's (`stack-test`, `reconcile-landed` and the like)
-# are not bracketed.
+# After `sync`, the recipe asks `platform/gcp_project.py` whether this is the lab's own environment.
+# It asks in the recipe's own shell, so the decider sees the environment pytest gets, variables
+# given on make's command line included. By the answer it runs:
+# - `own`: the cost read (`platform/cost_check.py`), pytest, then the cost read again, in that
+#   order on one shell line. A failed read before stops pytest from running; the read after also
+#   runs after a failed pytest; the line fails if either read or pytest fails.
+# - `elsewhere` (the lab variable unset or blank, or GCP_PROJECT set): pytest alone.
+# - any other output, the empty output of a failed decider included: a message, a failure, no pytest.
+# tests/platform/test_cost_read_around_tests.py checks these over a stub `uv`. Limits: an interrupt
+# (Ctrl-C) stops the line, the read after included; pytest runs in other targets (`stack-test`,
+# `reconcile-landed`, `bigquery-personas` and the like) have no cost read around them.
 PYTEST = LOADOUT='$(LOADOUT)' uv run pytest
 COST_CHECK = uv run --no-sync python platform/cost_check.py
-LAB_ENVIRONMENT = $(shell uv run --no-sync python platform/gcp_project.py)
-cost_bracketed = $(COST_CHECK) || exit 1; $(PYTEST); tests=$$?; $(COST_CHECK) || exit 1; exit $$tests
-test_line = $(if $(filter own,$1),$(cost_bracketed),$(if $(filter elsewhere,$1),$(PYTEST),$(error \
-	test: platform/gcp_project.py answered neither own nor elsewhere)))
 
 test: sync
-	$(call test_line,$(LAB_ENVIRONMENT))
+	case "$$(uv run --no-sync python platform/gcp_project.py)" in \
+	own) $(COST_CHECK) || exit 1; $(PYTEST); tests=$$?; $(COST_CHECK) || exit 1; exit $$tests ;; \
+	elsewhere) $(PYTEST) ;; \
+	*) echo "test: platform/gcp_project.py answered neither own nor elsewhere" >&2; exit 1 ;; \
+	esac
 
 ids:
 	@test -f $(GUARDS)/check-process-ids.py || { echo "ids: no rules collection at $(LOADOUT); pass LOADOUT=<clone>" >&2; exit 1; }
