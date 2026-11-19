@@ -933,7 +933,10 @@ def test_off_the_proxy_a_refusal_that_is_not_a_missing_permission_still_fails(
 
 
 def test_off_the_proxy_a_loose_trigger_fails_though_its_subscription_is_refused() -> None:
-    loose = changed("trigger", lambda t: t.update(serviceAccount="other@x.iam.gserviceaccount.com"))
+    loose = changed(
+        "trigger",
+        lambda t: t.update(serviceAccount=f"another-account@{PROJECT}.iam.gserviceaccount.com"),
+    )
     code, out = check(OFF_PROXY, FakeGCP(changes={"trigger": loose, "subscription": DENIED}))
     assert code != 0, out
     assert line_for(out, "kill switch trigger").startswith("cost-check: FAIL "), out
