@@ -26,7 +26,7 @@ from conftest import load_checked
 
 from ingest.fetch import landing_path
 from semantics.offline.refusal import REFUSED
-from tests.models.dbt_build import DBT, PROJECT, Build, built, query
+from tests.models.dbt_build import DBT, PROJECT, Build, built, query, run_dbt
 from tests.models.test_group_totals import worked_out
 from tests.semantics.metric_cli import MF, manifest, mf, mf_env, mf_query
 
@@ -193,14 +193,11 @@ def parsed_with(tmp_path: Path, meta: str | None) -> dict[str, Any]:
         "DBT_LOG_PATH": str(tmp_path / "logs"),
         "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
     }
-    result = subprocess.run(
+    result = run_dbt(
         [str(DBT), "parse", "--project-dir", str(copied / PROJECT.name)]
         + ["--profiles-dir", str(copied / PROJECT.name), "--target", "local"],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-        cwd=tmp_path,
+        env,
+        tmp_path,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     return json.loads((tmp_path / "target" / "semantic_manifest.json").read_text())
