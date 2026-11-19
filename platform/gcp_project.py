@@ -47,3 +47,14 @@ def lab_project(env: Mapping[str, str] | None = None) -> str:
     if project is None:
         raise NoLabProjectError(f"{VARIABLE} is unset: the lab has no GCP project yet")
     return project
+
+
+def main(env: Mapping[str, str] | None = None) -> int:
+    """Print `own` in the lab's own environment and `elsewhere` otherwise, never the project id;
+    the Makefile's `test` target reads the word to decide whether to read the cost around pytest."""
+    print("own" if lab_project_or_none(env) is not None else "elsewhere")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
