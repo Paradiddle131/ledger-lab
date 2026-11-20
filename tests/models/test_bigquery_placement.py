@@ -35,9 +35,50 @@ def copy_project(into: Path) -> Path:
 def outcome(tree: Path, work: Path) -> list[str]:
     child = versions.start_bigquery(tree, work)
     try:
-        return versions.bigquery_refusals(child, work)
+        return versions.bigquery_refusals(child, work, lambda: versions.start_bigquery(tree, work))
     finally:
         versions.end(child)
+
+
+CLOCK_STEP = Path(__file__).resolve().parent / "clock_step.py"
+
+
+def stepped(monkeypatch: pytest.MonkeyPatch, count: Path, runs: int) -> None:
+    """The BigQuery parses run through `clock_step.py`: the first `runs` of them leave each
+    semantic model's `node_relation` unset, as a backward step of the clock does."""
+    stand_in = ("python", str(CLOCK_STEP), str(count), str(runs), "bigquery")
+    monkeypatch.setattr(
+        versions,
+        "bigquery_command",
+        lambda project, work: versions.offline_command(*stand_in, str(project), str(work)),
+    )
+
+
+def parses(count: Path) -> int:
+    return len(count.read_text().splitlines()) if count.exists() else 0
+
+
+def test_the_bigquery_parse_runs_once_more_after_an_unset_node_relation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    count = tmp_path / "runs"
+    stepped(monkeypatch, count, 1)
+    assert outcome(copy_project(tmp_path / "tree"), tmp_path / "bigquery") == []
+    assert parses(count) == 2
+
+
+def test_the_bigquery_parse_fails_when_its_second_run_leaves_node_relation_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    count = tmp_path / "runs"
+    stepped(monkeypatch, count, 2)
+    with pytest.raises(versions.Unreadable) as raised:
+        outcome(copy_project(tmp_path / "tree"), tmp_path / "bigquery")
+    assert parses(count) == 2
+    assert str(raised.value) == (
+        "dbt could not parse the working tree on a BigQuery target (ValidationError), on a second"
+        " parse after the first left a semantic model's node_relation unset"
+    )
 
 
 def test_the_offline_environment_refuses_the_network() -> None:

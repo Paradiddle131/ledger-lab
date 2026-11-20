@@ -133,9 +133,10 @@ The gate fails when:
   or snapshot a semantic model reads or a time spine is (dbt renders that Jinja with the
   environment, command-line variables and the clock);
 - dbt cannot parse either tree, or the working tree on the BigQuery target: the message names the
-  tree and dbt's error class, never dbt's own output; a local parse that fails only by leaving a
-  semantic model's `node_relation` unset, which a backward step of the wall clock during the parse
-  causes, is run once more first, and the message says when the failure is that second parse's;
+  tree and dbt's error class, never dbt's own output; a parse, local or BigQuery, that fails only
+  by leaving a semantic model's `node_relation` unset, which a backward step of the wall clock
+  during the parse causes, is run once more first, and the message says when the failure is that
+  second parse's;
 - the lock's `bigquery` group is not in uv's cache (above);
 - a metric `origin/main` defines is gone from the working tree or renamed;
 - a metric's definition changed and its version did not go up, or its version went down;
@@ -164,6 +165,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -313,6 +315,10 @@ NODE_RELATION_UNSET = re.compile(
 def node_relation_unset(output: str) -> bool:
     """Whether dbt's output, or its error's text, holds the error of an unset `node_relation`."""
     return NODE_RELATION_UNSET.search(output) is not None
+
+
+# What a parse's failure message adds when it is the second parse's (`once_more`).
+SECOND_PARSE = ", on a second parse after the first left a semantic model's node_relation unset"
 
 
 def once_more[R](run: Callable[[], R], again: Callable[[R], bool]) -> tuple[R, bool]:
@@ -593,11 +599,7 @@ def parse(tree: Path, work: Path, which: str, routed: bool = False) -> Parsed:
         return json.loads(report.read_text()).get("node_relation_unset") is True
 
     result, second = once_more(run, unset)
-    retried = (
-        ", on a second parse after the first left a semantic model's node_relation unset"
-        if second
-        else ""
-    )
+    retried = SECOND_PARSE if second else ""
     if result.returncode != 0 or not report.is_file():
         raise Unreadable(
             f"dbt could not parse the {which} tree (the parse ended with exit status"
@@ -864,6 +866,14 @@ def probe_profile(tree: Path, project: str, location: str) -> Block:
     return {name: {"target": output, "outputs": {output: target}}}
 
 
+def bigquery_command(project: Path, work: Path) -> list[str]:
+    """The command of one BigQuery parse: this file, in the `bigquery` group
+    (`parse_on_bigquery`)."""
+    return offline_command(
+        "python", str(Path(__file__).resolve()), "--bigquery-parse", str(project), str(work)
+    )
+
+
 def start_bigquery(
     tree: Path, work: Path, probe: tuple[str, str] = PROBES[0]
 ) -> subprocess.Popen[str]:
@@ -873,11 +883,8 @@ def start_bigquery(
     (work / "profiles").mkdir(parents=True, exist_ok=True)
     profile = probe_profile(tree, *probe)
     (work / "profiles" / "profiles.yml").write_text(yaml.safe_dump(profile))
-    command = offline_command(
-        "python", str(Path(__file__).resolve()), "--bigquery-parse", str(tree / PROJECT), str(work)
-    )
     return subprocess.Popen(  # noqa: S603
-        command,
+        bigquery_command(tree / PROJECT, work),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
@@ -894,24 +901,61 @@ def end(child: subprocess.Popen[str]) -> None:
         child.wait()
 
 
-def bigquery_refusals(child: subprocess.Popen[str], work: Path) -> list[str]:
-    """What the BigQuery parse found off the gate's routing, each marked as BigQuery's; GateError
-    when the `bigquery` group cannot run, Unreadable when dbt cannot parse the tree on BigQuery.
-    The message never carries dbt's own output."""
+@dataclass(frozen=True)
+class Finished:
+    """A finished BigQuery parse: the report it wrote (None when it wrote none or failed), its
+    exit status and its standard error."""
+
+    found: Block | None
+    status: int
+    stderr: str
+
+
+def bigquery_report(child: subprocess.Popen[str], work: Path) -> Finished:
+    """The BigQuery parse `child`, waited for."""
     _, stderr = child.communicate()
     report = work / "report.json"
-    if child.returncode != 0 or not report.is_file():
-        reason = group_failure(stderr or "")
+    ok = child.returncode == 0 and report.is_file()
+    found = json.loads(report.read_text()) if ok else None
+    return Finished(found, child.returncode, stderr or "")
+
+
+def bigquery_refusals(
+    child: subprocess.Popen[str], work: Path, restart: Callable[[], subprocess.Popen[str]]
+) -> list[str]:
+    """What the BigQuery parse found off the gate's routing, each marked as BigQuery's; GateError
+    when the `bigquery` group cannot run, Unreadable when dbt cannot parse the tree on BigQuery. A
+    parse whose only error is an unset `node_relation` is run once more, by `restart`. The message
+    never carries dbt's own output."""
+    started = [child]
+
+    def run() -> Finished:
+        if started:
+            return bigquery_report(started.pop(), work)
+        (work / "report.json").unlink(missing_ok=True)
+        again = restart()
+        try:
+            return bigquery_report(again, work)
+        finally:
+            end(again)
+
+    def unset(done: Finished) -> bool:
+        return done.found is not None and done.found.get("node_relation_unset") is True
+
+    done, second = once_more(run, unset)
+    retried = SECOND_PARSE if second else ""
+    found = done.found
+    if found is None:
+        reason = group_failure(done.stderr)
         if reason:
             raise GateError(reason)
         raise Unreadable(
             "dbt could not parse the working tree on a BigQuery target (the parse ended with exit"
-            f" status {child.returncode})"
+            f" status {done.status}){retried}"
         )
-    found = json.loads(report.read_text())
     if found.get("error"):
         raise Unreadable(
-            f"dbt could not parse the working tree on a BigQuery target ({found['error']})"
+            f"dbt could not parse the working tree on a BigQuery target ({found['error']}){retried}"
         )
     return [f"on BigQuery, {line}" for line in found["refused"]]
 
@@ -939,7 +983,9 @@ def parse_on_bigquery(project: Path, work: Path) -> int:
     manifest = result.result
     report = work / "report.json"
     if not result.success or not isinstance(manifest, Manifest):
-        report.write_text(json.dumps({"error": failure(result.exception, project, tree)}))
+        error = failure(result.exception, project, tree)
+        unset = node_relation_unset(str(result.exception))
+        report.write_text(json.dumps({"error": error, "node_relation_unset": unset}))
         return 0
     root = manifest.metadata.project_name
     nodes = [
@@ -1428,20 +1474,28 @@ def check(repo: Path = REPO, base: str = BASE) -> tuple[bool, str]:
         published = published_metrics(repo, commit, base, Path(scratch) / "base")
         tree = Path(scratch) / "work" / "tree"
         tree.mkdir()
-        children: list[tuple[subprocess.Popen[str], Path]] = []
+        children: list[tuple[subprocess.Popen[str], Path, tuple[str, str]]] = []
         try:
             export_working(repo, tree)
             for n, probe in enumerate(PROBES):
                 work = Path(scratch) / f"bigquery-{n}"
-                children.append((start_bigquery(tree, work, probe), work))
+                children.append((start_bigquery(tree, work, probe), work, probe))
             current = read(tree, Path(scratch) / "work", "working", routed=True)
-            refused = sorted({line for c, w in children for line in bigquery_refusals(c, w)})
+            refused = sorted(
+                {
+                    line
+                    for child, folder, probe in children
+                    for line in bigquery_refusals(
+                        child, folder, partial(start_bigquery, tree, folder, probe)
+                    )
+                }
+            )
             if refused:
                 raise Unreadable("; ".join(refused))
         except Unreadable as e:
             return False, f"metric-versions: the working tree's metrics cannot be read: {e}"
         finally:
-            for child, _ in children:
+            for child, _, _ in children:
                 end(child)
     return compare(published, current, base)
 
