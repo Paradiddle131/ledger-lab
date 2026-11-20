@@ -1,0 +1,191 @@
+# Verified queries: the common finance questions, each answered by one SQL query over the dbt
+# build on the local engine (DuckDB), owned by its metric's owner. Each names the MetricFlow metric
+# it answers (`semantics/metricflow/`, a `role: headline` metric), the metric's version and owner
+# as its `config.meta` holds them, and the grain (`group_by`, MetricFlow's group-by names, which are
+# also the SQL's column names beside the metric's) and filter (`where`, MetricFlow's syntax) the
+# SQL answers at. tests/semantics/test_verified_queries.py runs each SQL and `mf query` for the
+# same metric, grain and filter over the sample build and holds the two results equal.
+# Shape: semantics/verified_queries.schema.json.
+
+verified_queries:
+  - id: spend-against-award
+    question: What share of the City of Chicago's fixed contract awards has been paid?
+    metric: spend_against_award
+    version: 1
+    owner: payables-clerk
+    group_by: []
+    sql: |
+      select
+        cast(sum(case when award_held_to > 0 then paid end) as double)
+          / cast(nullif(sum(case when award_held_to > 0 then award_held_to end), 0) as double)
+          as spend_against_award
+      from chicago_contract_reconciliation
+
+  - id: spend-against-award-by-approval-year
+    question: >-
+      What share of the fixed awards of the contracts Chicago first approved in each year has been
+      paid?
+    metric: spend_against_award
+    version: 1
+    owner: payables-clerk
+    group_by: [metric_time__year]
+    sql: |
+      select
+        date_trunc('year', first_approved_on) as metric_time__year,
+        cast(sum(case when award_held_to > 0 then paid end) as double)
+          / cast(nullif(sum(case when award_held_to > 0 then award_held_to end), 0) as double)
+          as spend_against_award
+      from chicago_contract_reconciliation
+      group by date_trunc('year', first_approved_on)
+
+  - id: remaining-commitment
+    question: How much of the City of Chicago's fixed contract awards is not yet paid?
+    metric: remaining_commitment
+    version: 1
+    owner: payables-clerk
+    group_by: []
+    sql: |
+      select
+        sum(
+          case when award_held_to > 0 then
+            case when paid < award_held_to then award_held_to - paid else 0 end
+          end
+        ) as remaining_commitment
+      from chicago_contract_reconciliation
+
+  - id: remaining-commitment-on-running-contracts
+    question: >-
+      How much of the fixed awards of Chicago's contracts still running on 31 October 2026 is not
+      yet paid?
+    metric: remaining_commitment
+    version: 1
+    owner: payables-clerk
+    group_by: []
+    where: "{{ TimeDimension('contract__last_ends_on', 'day') }} >= '2026-10-31'"
+    sql: |
+      select
+        sum(
+          case when award_held_to > 0 then
+            case when paid < award_held_to then award_held_to - paid else 0 end
+          end
+        ) as remaining_commitment
+      from chicago_contract_reconciliation
+      where last_ends_on >= date '2026-10-31'
+
+  - id: paid-over-award-by-break-class
+    question: >-
+      How much did Chicago pay beyond the award on its fixed-award contracts, by the
+      reconciliation's break class?
+    metric: paid_over_award
+    version: 1
+    owner: payables-clerk
+    group_by: [contract__break_class]
+    sql: |
+      select
+        break_class as contract__break_class,
+        sum(
+          case when award_held_to > 0 then
+            case when difference > 0 then difference else 0 end
+          end
+        ) as paid_over_award
+      from chicago_contract_reconciliation
+      group by break_class
+
+  - id: duplicate-payment-rate
+    question: What share of the City of Chicago's served payment rows repeat another served row?
+    metric: duplicate_payment_rate
+    version: 1
+    owner: payables-clerk
+    group_by: []
+    sql: |
+      select
+        cast(sum(case when is_repeat then 1 else 0 end) as double)
+          / cast(nullif(count(payment_key), 0) as double) as duplicate_payment_rate
+      from payments
+      where entity_id = 'chicago'
+
+  - id: duplicate-payment-rate-by-month
+    question: >-
+      By month of payment date, what share of the City of Chicago's served payment rows repeat
+      another served row?
+    metric: duplicate_payment_rate
+    version: 1
+    owner: payables-clerk
+    group_by: [metric_time__month]
+    sql: |
+      select
+        date_trunc('month', payment_date) as metric_time__month,
+        cast(sum(case when is_repeat then 1 else 0 end) as double)
+          / cast(nullif(count(payment_key), 0) as double) as duplicate_payment_rate
+      from payments
+      where entity_id = 'chicago'
+      group by date_trunc('month', payment_date)
+
+  - id: duplicate-payment-amount-rate
+    question: >-
+      What share of the dollars of the City of Chicago's served payment rows sits on rows that
+      repeat another served row?
+    metric: duplicate_payment_amount_rate
+    version: 1
+    owner: payables-clerk
+    group_by: []
+    sql: |
+      select
+        cast(sum(case when is_repeat then amount else 0 end) as double)
+          / cast(nullif(sum(amount), 0) as double) as duplicate_payment_amount_rate
+      from payments
+      where entity_id = 'chicago'
+
+  - id: constant-currency-spend-by-basis
+    question: What was spent on each basis, in euros at constant rates?
+    metric: constant_currency_spend
+    version: 1
+    owner: group-controller
+    group_by: [group_total__basis]
+    sql: |
+      select
+        basis as group_total__basis,
+        case
+          when count(distinct case when fiscal_period is not null then basis end)
+            + count(distinct case when fiscal_period is null then basis end) = 1
+          then coalesce(sum(amount_at_constant_rates), 0)
+        end as constant_currency_spend
+      from group_totals
+      group by basis
+
+  - id: constant-currency-spend-by-entity
+    question: >-
+      What did each entity spend, in euros at constant rates, where all its figures share one
+      basis?
+    metric: constant_currency_spend
+    version: 1
+    owner: group-controller
+    group_by: [group_total__entity_id]
+    sql: |
+      select
+        entity_id as group_total__entity_id,
+        case
+          when count(distinct case when fiscal_period is not null then basis end)
+            + count(distinct case when fiscal_period is null then basis end) = 1
+          then coalesce(sum(amount_at_constant_rates), 0)
+        end as constant_currency_spend
+      from group_totals
+      group by entity_id
+
+  - id: constant-currency-spend-by-basis-and-fiscal-year
+    question: What was spent on each basis in each fiscal year, in euros at constant rates?
+    metric: constant_currency_spend
+    version: 1
+    owner: group-controller
+    group_by: [group_total__basis, group_total__fiscal_year]
+    sql: |
+      select
+        basis as group_total__basis,
+        fiscal_year as group_total__fiscal_year,
+        case
+          when count(distinct case when fiscal_period is not null then basis end)
+            + count(distinct case when fiscal_period is null then basis end) = 1
+          then coalesce(sum(amount_at_constant_rates), 0)
+        end as constant_currency_spend
+      from group_totals
+      group by basis, fiscal_year

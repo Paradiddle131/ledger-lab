@@ -26,7 +26,7 @@ from conftest import load_checked
 
 from ingest.fetch import landing_path
 from semantics.offline.refusal import REFUSED
-from tests.models.dbt_build import DBT, PROJECT, Build, built, query
+from tests.models.dbt_build import DBT, PROJECT, Build, built, query, run_dbt
 from tests.models.test_group_totals import worked_out
 from tests.semantics.metric_cli import MF, manifest, mf, mf_env, mf_query
 
@@ -193,14 +193,11 @@ def parsed_with(tmp_path: Path, meta: str | None) -> dict[str, Any]:
         "DBT_LOG_PATH": str(tmp_path / "logs"),
         "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
     }
-    result = subprocess.run(
+    result = run_dbt(
         [str(DBT), "parse", "--project-dir", str(copied / PROJECT.name)]
         + ["--profiles-dir", str(copied / PROJECT.name), "--target", "local"],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-        cwd=tmp_path,
+        env,
+        tmp_path,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     return json.loads((tmp_path / "target" / "semantic_manifest.json").read_text())
@@ -504,26 +501,31 @@ def test_constant_currency_spend_over_the_samples(build: Build) -> None:
 
 
 # Invented contracts, labelled as invented, in the reconciliation's columns: the award held to,
-# the award after revisions, what was paid, the difference and the class. The samples hold no
-# contract paid over a fixed award, none held to an award other than its award after revisions
-# and no negative award, so these are what prove the contract metrics' rules.
+# the award after revisions, what was paid, the class and the latest end date (the difference is
+# what was paid less the award held to). The samples hold no contract paid over a fixed award,
+# none held to an award other than its award after revisions and no negative award, so these are
+# what prove the contract metrics' rules. A negative award refunded below it (`REFUNDED`) has an
+# award less what was paid above 0, which no metric may count. The end dates put an underpaid
+# contract exactly on 31 October 2026, underpaid, overpaid and refunded ones after it and an
+# underpaid one the day before (`ENDED`), so a filter on the latest end date from that day keeps
+# each kind and its edge decides a figure.
 INVENTED = [
-    ("UNDER", 1000, 1000, 300.25, "unspent"),
-    ("OVER", 500, 500, 650, "unexplained"),
-    ("NETZERO", 800, 0, 900, "unexplained"),
-    ("NETZEROUNDER", 400, 0, 100, "unspent"),
-    ("BLANKET", 0, 0, 40, "no_fixed_award"),
-    ("NEVERFIXED", 0, 0, 10, "unexplained"),
-    ("NEGATIVE", -20, -20, 10, "negative_award"),
-    ("NOTFOUND", None, None, 99, "contract_not_found"),
+    ("UNDER", 1000, 1000, 300.25, "unspent", "2026-10-31"),
+    ("OVER", 500, 500, 650, "unexplained", "2027-06-30"),
+    ("NETZERO", 800, 0, 900, "unexplained", "2028-01-01"),
+    ("NETZEROUNDER", 400, 0, 100, "unspent", "2027-03-31"),
+    ("ENDED", 200, 200, 50, "unspent", "2026-10-30"),
+    ("BLANKET", 0, 0, 40, "no_fixed_award", "2026-12-31"),
+    ("NEVERFIXED", 0, 0, 10, "unexplained", None),
+    ("NEGATIVE", -20, -20, 10, "negative_award", "2027-01-01"),
+    ("REFUNDED", -20, -20, -30, "negative_award", "2027-01-01"),
+    ("NOTFOUND", None, None, 99, "contract_not_found", None),
 ]
 
 
-def test_the_contract_metrics_over_invented_contracts(build: Build, tmp_path: Path) -> None:
-    """Over the invented contracts: only an award held to above 0 is fixed (held to, not the award
-    after revisions), the unpaid part and the part paid over are each floored at 0 per contract
-    and never netted, and a blanket, a negative award, an award never above 0 and a number the
-    contracts table lacks stay out."""
+def invented_contracts(build: Build, tmp_path: Path) -> Build:
+    """A build in `tmp_path` whose database holds the invented contracts as the contract
+    reconciliation, and nothing else, read through the sample build's semantic manifest."""
     (tmp_path / "target").mkdir()
     shutil.copy(build.cwd / "target" / "semantic_manifest.json", tmp_path / "target")
     database = tmp_path / "ledger_lab.duckdb"
@@ -537,19 +539,27 @@ def test_the_contract_metrics_over_invented_contracts(build: Build, tmp_path: Pa
         )
         db.executemany(
             "insert into chicago_contract_reconciliation values"
-            " (?, ?, ?, ?, ? - ?, ?, false, false, ? is not null, date '2020-01-02', null)",
-            [(c, h, a, p, p, h, k, h) for c, h, a, p, k in INVENTED],
+            " (?, ?, ?, ?, ? - ?, ?, false, false, ? is not null, date '2020-01-02', ?::date)",
+            [(c, h, a, p, p, h, k, h, e) for c, h, a, p, k, e in INVENTED],
         )
-    invented = Build(
-        "", database, {}, build.env | {"LEDGER_LAB_DUCKDB_PATH": str(database)}, tmp_path
-    )
-    (row,) = mf_query(invented, CONTRACT_METRICS)
+    return Build("", database, {}, build.env | {"LEDGER_LAB_DUCKDB_PATH": str(database)}, tmp_path)
+
+
+def test_the_contract_metrics_over_invented_contracts(build: Build, tmp_path: Path) -> None:
+    """Over the invented contracts: only an award held to above 0 is fixed (held to, not the award
+    after revisions), the unpaid part and the part paid over are each floored at 0 per contract
+    and never netted, and a blanket, a negative award, an award never above 0 and a number the
+    contracts table lacks stay out."""
+    (row,) = mf_query(invented_contracts(build, tmp_path), CONTRACT_METRICS)
     got = {k: Decimal(v) for k, v in row.items()}
-    assert got["fixed_award"] == Decimal("2700")
-    assert got["paid_against_fixed_award"] == Decimal("1950.25")
-    assert got["remaining_commitment"] == Decimal("999.75")
+    # Fixed: UNDER 1000, OVER 500, NETZERO 800 and NETZEROUNDER 400 (held to, not 0), ENDED 200.
+    assert got["fixed_award"] == Decimal("2900")
+    assert got["paid_against_fixed_award"] == Decimal("2000.25")
+    # Unpaid: UNDER 699.75, NETZEROUNDER 300, ENDED 150; OVER and NETZERO 0, not netted.
+    assert got["remaining_commitment"] == Decimal("1149.75")
+    # Paid over: OVER 150, NETZERO 100.
     assert got["paid_over_award"] == Decimal("250")
-    assert abs(got["spend_against_award"] - Decimal("1950.25") / 2700) < Decimal("1e-12")
+    assert abs(got["spend_against_award"] - Decimal("2000.25") / 2900) < Decimal("1e-12")
 
 
 def test_a_process_on_the_mf_path_refuses_a_network_call_before_it_is_made(

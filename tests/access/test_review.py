@@ -12,12 +12,20 @@ import json
 import re
 import subprocess
 import sys
+from collections.abc import Callable
 from typing import Any
 
 import fences
 import hcl2
 import pytest
-from cost_check import BILLING_PERMISSIONS, KILL_SWITCH_ACCOUNT_PERMISSIONS, PROJECT_PERMISSIONS
+import yaml
+from cost_check import (
+    BILLED_READ_PERMISSION,
+    BILLING_PERMISSIONS,
+    KILL_SWITCH_ACCOUNT_PERMISSIONS,
+    PROJECT_PERMISSIONS,
+    READS,
+)
 from jsonschema import Draft202012Validator
 
 from access.review import (
@@ -25,12 +33,14 @@ from access.review import (
     REPO,
     Conflict,
     Grant,
+    blocks,
     conflicts,
     declared_grants,
     load_catalogues,
     load_config,
     render,
     review,
+    unquote,
 )
 from tests.platform.test_access_rules import RECORDED, expected_dataset_grants, expected_readers
 
@@ -39,14 +49,18 @@ Config = dict[str, list[Any]]
 # The pairs the catalogues can state today, pinned here, so making another one checkable (or
 # dropping this one) is a reviewed change to the data and to this line together.
 CHECKABLE = {"enter-and-approve-entry"}
-# The project roles the owner granted the agent account by hand when making it, as recorded on
-# the tracker; adding one is a reviewed change to the data and to this line together.
-HAND_GRANTED = [
-    "roles/viewer",
-    "roles/bigquery.jobUser",
-    "roles/bigquery.dataEditor",
-    "roles/serviceusage.serviceUsageConsumer",
-]
+# The roles the owner granted the agent account by hand, as recorded on the tracker after the
+# owner narrowed them; adding one is a reviewed change to the data and to these lines together.
+HAND_GRANTED = ["roles/serviceusage.serviceUsageConsumer"]
+HAND_GRANTED_CUSTOM = ["labQueryRunner", "labFenceReader"]
+HAND_GRANTED_TABLES = [("roles/bigquery.dataViewer", "the billing export's cost view")]
+# The project permissions the cost check's REST reads need, from its own table of every read.
+CHECK_READS = {p for _, p, scope in READS if scope == "project" and p is not None}
+# What service usage consumer gives the check: its quota read and billing a read to the project.
+CONSUMER_SERVES = {"serviceusage.quotas.get", BILLED_READ_PERMISSION}
+# The only BigQuery permissions a project-wide hand grant may hold: running jobs, for the cost
+# query, and reading BigQuery's settings.
+QUERY_PERMISSIONS = {"bigquery.jobs.create", "bigquery.config.get"}
 # Permissions no hand-granted role may hold: the cost check's fence-moving ones (minting a token
 # and acting as an account among them) and setting anyone's access to anything.
 REFUSED = {*PROJECT_PERMISSIONS, *BILLING_PERMISSIONS, *KILL_SWITCH_ACCOUNT_PERMISSIONS}
@@ -160,7 +174,10 @@ def test_the_agent_account_shows_its_roles_its_reach_and_the_conflict_it_holds(
         *{(TOKENS, f"account {p}") for p in personas},
     }
     assert {k for k, source in rows.items() if source == "granted by hand, not declared"} == {
-        (role, "the lab project") for role in HAND_GRANTED
+        *((role, "the lab project") for role in HAND_GRANTED),
+        ("Runs BigQuery queries (custom role)", "the lab project"),
+        ("Reads the lab's spend fences (custom role)", "the lab project"),
+        *HAND_GRANTED_TABLES,
     }
     acts = ", ".join(f"`{p}`" for p in sorted(personas))
     assert f"- Acts as: {acts}, holding each one's grants in turn\n" in section
@@ -171,8 +188,10 @@ def test_the_agent_account_shows_its_roles_its_reach_and_the_conflict_it_holds(
     for tag in docs["columns"]["tags"]:
         assert f"{tag['id']} clear" in section
     (reach,) = [line for line in section.splitlines() if line.startswith("- Reach:")]
-    for words in ("data editor", "every dataset", "billing export", "creates datasets"):
+    for words in ("builder role", "no data role on the project", "only through its cost view"):
         assert words in reach, words
+    for words in ("data editor", "creates datasets"):
+        assert words not in reach, words
     assert (
         "- **Conflict acting as others, not refused:** `enter-and-approve-entry` on chicago: "
         "draft ledger as `proposer`; post ledger as `approver`\n"
@@ -255,11 +274,256 @@ def test_an_identity_without_an_owner_or_an_owner_of_no_identity_is_refused(
             review(planted, config)
 
 
-def test_the_hand_granted_roles_are_the_recorded_four(docs: dict[str, Doc]) -> None:
+HAND_FIELDS = (
+    "project_roles_granted_by_hand",
+    "custom_roles_granted_by_hand",
+    "table_roles_granted_by_hand",
+)
+
+
+def agent_entry(docs: dict[str, Doc]) -> Doc:
     (agent,) = [a for a in docs["review"]["accounts"] if a["id"] == "agent"]
+    return agent
+
+
+def test_the_hand_granted_roles_are_the_recorded_narrow_set(docs: dict[str, Doc]) -> None:
+    agent = agent_entry(docs)
     assert agent["project_roles_granted_by_hand"] == HAND_GRANTED
+    assert [r["id"] for r in agent["custom_roles_granted_by_hand"]] == HAND_GRANTED_CUSTOM
+    assert [
+        (g["role"], g["view"]) for g in agent["table_roles_granted_by_hand"]
+    ] == HAND_GRANTED_TABLES
     others = [a for a in docs["review"]["accounts"] if a["id"] != "agent"]
-    assert all("project_roles_granted_by_hand" not in a for a in others)
+    assert all(field not in a for a in others for field in HAND_FIELDS)
+
+
+def declared_custom_roles(config: Config) -> dict[str, Doc]:
+    """Each custom role platform/gcp declares, by its role id, with its title and permissions."""
+    return {
+        unquote(body["role_id"]): {
+            "title": unquote(body["title"]),
+            "permissions": {unquote(p) for p in body["permissions"]},
+        }
+        for address, body in blocks(config, "resource").items()
+        if address.startswith("google_project_iam_custom_role.")
+    }
+
+
+def test_a_declared_custom_role_granted_by_hand_is_recorded_as_declared(
+    docs: dict[str, Doc], config: Config
+) -> None:
+    """A hand grant of a role platform/gcp declares carries its declared title and permissions;
+    a role created by hand is one platform/gcp does not declare."""
+    declared = declared_custom_roles(config)
+    for role in agent_entry(docs)["custom_roles_granted_by_hand"]:
+        if role["created"] == "declared":
+            assert role["id"] in declared, role["id"]
+            assert role["title"] == declared[role["id"]]["title"]
+            assert set(role["permissions"]) == declared[role["id"]]["permissions"]
+        else:
+            assert role["id"] not in declared, role["id"]
+
+
+def test_the_fence_reader_holds_what_the_cost_checks_reads_need_and_nothing_else(
+    docs: dict[str, Doc],
+) -> None:
+    """The fence reader holds the project permissions of the cost check's listed reads, less those
+    service usage consumer serves, which the recorded consumer role holds; the cost check refuses
+    a read its table does not list (tests/platform/test_cost_check.py)."""
+    (reader,) = [
+        r for r in agent_entry(docs)["custom_roles_granted_by_hand"] if r["id"] == "labFenceReader"
+    ]
+    assert set(reader["permissions"]) == CHECK_READS - CONSUMER_SERVES
+    assert set(RECORDED["roles/serviceusage.serviceUsageConsumer"]) >= CONSUMER_SERVES
+
+
+def hand_granted_permissions(docs: dict[str, Doc]) -> dict[str, set[str]]:
+    """Each role the agent holds by hand with the permissions it holds; an unrecorded predefined
+    role holds a marker the pin and the token and access checks refuse."""
+    agent = agent_entry(docs)
+    held = {r["id"]: set(r["permissions"]) for r in agent["custom_roles_granted_by_hand"]}
+    for role in [
+        *agent["project_roles_granted_by_hand"],
+        *(g["role"] for g in agent["table_roles_granted_by_hand"]),
+    ]:
+        held[role] = set(RECORDED.get(role, ["<no recorded permission list>"]))
+    return held
+
+
+# Permissions ending in one of these verbs on a BigQuery or Cloud Storage resource other than jobs
+# (what a job may write is granted on the datasets); a backstop beside the allowlist of what a
+# project-wide hand role may hold, not a list of every write.
+DATA_WRITES = re.compile(
+    r"^(bigquery|storage)\.(?!jobs\.)[A-Za-z]+\.(create|delete|update|updateData|updateTag|setCategory|"
+    r"overrideTimeTravelRestrictions|restore|undelete)$"
+)
+
+
+def test_no_project_wide_hand_role_holds_a_bigquery_or_storage_permission_but_running_queries(
+    docs: dict[str, Doc],
+) -> None:
+    """A project-wide hand grant holds no BigQuery permission but running jobs and reading
+    BigQuery's settings, and no Cloud Storage permission."""
+    held = hand_granted_permissions(docs)
+    data = {
+        p
+        for role in [*HAND_GRANTED, *HAND_GRANTED_CUSTOM]
+        for p in held[role]
+        if p.split(".")[0] in ("bigquery", "storage") and p not in QUERY_PERMISSIONS
+    }
+    assert data == set()
+
+
+def test_no_hand_granted_role_holds_a_listed_data_write_verb(docs: dict[str, Doc]) -> None:
+    held = hand_granted_permissions(docs)
+    assert {p for perms in held.values() for p in perms if DATA_WRITES.match(p)} == set()
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "bigquery.tables.getData",
+        "bigquery.routines.get",
+        "bigquery.models.getData",
+        "bigquery.rowAccessPolicies.list",
+        "storage.objects.get",
+    ],
+)
+def test_a_project_wide_hand_role_reading_data_is_refused(docs: dict[str, Doc], extra: str) -> None:
+    planted = copy.deepcopy(docs)
+    for role in agent_entry(planted)["custom_roles_granted_by_hand"]:
+        if role["id"] == "labFenceReader":
+            role["permissions"].append(extra)
+    with pytest.raises(AssertionError):
+        test_no_project_wide_hand_role_holds_a_bigquery_or_storage_permission_but_running_queries(
+            planted
+        )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "bigquery.models.delete",
+        "bigquery.rowAccessPolicies.delete",
+        "storage.objects.create",
+        "bigquery.tables.updateData",
+        "bigquery.datasets.update",
+    ],
+)
+def test_a_hand_role_writing_data_is_refused(docs: dict[str, Doc], extra: str) -> None:
+    planted = copy.deepcopy(docs)
+    for role in agent_entry(planted)["custom_roles_granted_by_hand"]:
+        if role["id"] == "labFenceReader":
+            role["permissions"].append(extra)
+    with pytest.raises(AssertionError):
+        test_no_hand_granted_role_holds_a_listed_data_write_verb(planted)
+
+
+def test_a_hand_made_custom_role_holds_only_the_checks_reads_and_running_queries(
+    docs: dict[str, Doc],
+) -> None:
+    """An allowlist: a custom role granted by hand on the project holds only permissions the cost
+    check's listed reads need or the two that run queries, so a token, access or data permission
+    cannot be added to one without a row in the cost check's READS."""
+    allowed = CHECK_READS | QUERY_PERMISSIONS
+    for role in agent_entry(docs)["custom_roles_granted_by_hand"]:
+        assert set(role["permissions"]) <= allowed, role["id"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "iam.serviceAccounts.getAccessToken",
+        "iam.serviceAccounts.signJwt",
+        "iam.serviceAccounts.signBlob",
+        "iam.serviceAccounts.getOpenIdToken",
+        "iam.serviceAccounts.implicitDelegation",
+        "datacatalog.categories.fineGrainedGet",
+        "bigquery.tables.restoreSnapshot",
+    ],
+)
+def test_a_planted_permission_outside_the_allowlist_is_refused(
+    docs: dict[str, Doc], extra: str
+) -> None:
+    planted = copy.deepcopy(docs)
+    agent_entry(planted)["custom_roles_granted_by_hand"].append(
+        {"id": "labPlanted", "title": "Planted", "created": "by hand", "permissions": [extra]}
+    )
+    with pytest.raises(AssertionError):
+        test_a_hand_made_custom_role_holds_only_the_checks_reads_and_running_queries(planted)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "iam.serviceAccounts.getAccessToken",
+        "iam.serviceAccounts.signJwt",
+        "iam.serviceAccounts.signBlob",
+        "iam.serviceAccounts.getOpenIdToken",
+        "iam.serviceAccounts.implicitDelegation",
+        "bigquery.datasets.setIamPolicy",
+    ],
+)
+def test_a_custom_role_minting_tokens_or_setting_access_is_refused(
+    docs: dict[str, Doc], extra: str
+) -> None:
+    planted = copy.deepcopy(docs)
+    for role in agent_entry(planted)["custom_roles_granted_by_hand"]:
+        if role["id"] == "labFenceReader":
+            role["permissions"].append(extra)
+    with pytest.raises(AssertionError):
+        test_no_hand_granted_custom_role_mints_tokens_sets_access_or_moves_a_fence(
+            planted, "labFenceReader"
+        )
+
+
+def test_a_consumer_role_lacking_the_quota_read_is_refused(
+    docs: dict[str, Doc], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    consumer = "roles/serviceusage.serviceUsageConsumer"
+    lacking = {
+        **RECORDED,
+        consumer: [p for p in RECORDED[consumer] if p != "serviceusage.quotas.get"],
+    }
+    monkeypatch.setattr(sys.modules[__name__], "RECORDED", lacking)
+    with pytest.raises(AssertionError):
+        test_the_fence_reader_holds_what_the_cost_checks_reads_need_and_nothing_else(docs)
+
+
+def test_a_hand_made_role_that_platform_gcp_declares_is_refused(
+    docs: dict[str, Doc], config: Config
+) -> None:
+    planted = copy.deepcopy(docs)
+    for role in agent_entry(planted)["custom_roles_granted_by_hand"]:
+        if role["id"] == "labQueryRunner":
+            role["created"] = "by hand"
+    with pytest.raises(AssertionError):
+        test_a_declared_custom_role_granted_by_hand_is_recorded_as_declared(planted, config)
+
+
+@pytest.mark.parametrize(
+    "break_it",
+    [
+        lambda r: r["custom_roles_granted_by_hand"][0].update(permissions=[]),
+        lambda r: r["custom_roles_granted_by_hand"][0].pop("created"),
+        lambda r: r["custom_roles_granted_by_hand"][0].update(created="maybe"),
+        lambda r: r["custom_roles_granted_by_hand"][0].pop("permissions"),
+        lambda r: r["table_roles_granted_by_hand"][0].pop("view"),
+        lambda r: r["table_roles_granted_by_hand"][0].pop("role"),
+        lambda r: r["table_roles_granted_by_hand"][0].update(role="bigquery.dataViewer"),
+        lambda r: r["custom_roles_granted_by_hand"][0]["permissions"].append(
+            "BigQuery.tables.getData"
+        ),
+        lambda r: r["custom_roles_granted_by_hand"][0].update(permission=["x.y.get"]),
+        lambda r: r["table_roles_granted_by_hand"][0].update(table="x.y"),
+    ],
+)
+def test_a_malformed_hand_grant_is_refused_by_the_schema(break_it: Callable[[Doc], None]) -> None:
+    review_doc = yaml.safe_load((REPO / "access/review.yaml").read_text())
+    (agent,) = [a for a in review_doc["accounts"] if a["id"] == "agent"]
+    break_it(agent)
+    validator = Draft202012Validator(json.loads((REPO / "access/review.schema.json").read_text()))
+    assert list(validator.iter_errors(review_doc)) != []
 
 
 def refused_permissions(role: str) -> set[str]:
@@ -271,9 +535,17 @@ def refused_permissions(role: str) -> set[str]:
     return (held & REFUSED) | {p for p in held if p.endswith(".setIamPolicy")}
 
 
-@pytest.mark.parametrize("role", HAND_GRANTED)
+@pytest.mark.parametrize("role", [*HAND_GRANTED, *(r for r, _ in HAND_GRANTED_TABLES)])
 def test_no_hand_granted_role_mints_tokens_sets_access_or_moves_a_fence(role: str) -> None:
     assert refused_permissions(role) == set()
+
+
+@pytest.mark.parametrize("role", HAND_GRANTED_CUSTOM)
+def test_no_hand_granted_custom_role_mints_tokens_sets_access_or_moves_a_fence(
+    docs: dict[str, Doc], role: str
+) -> None:
+    held = hand_granted_permissions(docs)[role]
+    assert (held & REFUSED) | {p for p in held if p.endswith(".setIamPolicy")} == set()
 
 
 @pytest.mark.parametrize(

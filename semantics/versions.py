@@ -133,7 +133,9 @@ The gate fails when:
   or snapshot a semantic model reads or a time spine is (dbt renders that Jinja with the
   environment, command-line variables and the clock);
 - dbt cannot parse either tree, or the working tree on the BigQuery target: the message names the
-  tree and dbt's error class, never dbt's own output;
+  tree and dbt's error class, never dbt's own output; a local parse that fails only by leaving a
+  semantic model's `node_relation` unset, which a backward step of the wall clock during the parse
+  causes, is run once more first, and the message says when the failure is that second parse's;
 - the lock's `bigquery` group is not in uv's cache (above);
 - a metric `origin/main` defines is gone from the working tree or renamed;
 - a metric's definition changed and its version did not go up, or its version went down;
@@ -296,6 +298,30 @@ JINJA = ("{{", "{%", "{#")
 FILE_MODES = ("100644", "100755")
 DUCKDB_FILE = "ledger_lab.duckdb"
 Block = dict[str, Any]
+
+
+# dbt's error when its parse leaves a semantic model's `node_relation` unset: it skips setting it
+# for a node whose wall-clock creation time is earlier than the parse's start, which a backward
+# step of the clock during the parse makes so. The error alone: one validation error, of that
+# field, for that reason. A text log breaks its lines; a JSON log writes the breaks as `\n`.
+NODE_RELATION_UNSET = re.compile(
+    r"(?<!\d)1 validation error for PydanticSemanticModel(?:\s|\\n)+node_relation(?:\s|\\n)+"
+    r"none is not an allowed value \(type=type_error\.none\.not_allowed\)"
+)
+
+
+def node_relation_unset(output: str) -> bool:
+    """Whether dbt's output, or its error's text, holds the error of an unset `node_relation`."""
+    return NODE_RELATION_UNSET.search(output) is not None
+
+
+def once_more[R](run: Callable[[], R], again: Callable[[R], bool]) -> tuple[R, bool]:
+    """`run`'s result, from a second run when the first one's result is `again`'s, and whether it
+    is the second run's: one more run at most, so a failure that repeats is reported."""
+    first = run()
+    if not again(first):
+        return first, False
+    return run(), True
 
 
 class GateError(Exception):
@@ -529,29 +555,57 @@ def environment(work: Path) -> dict[str, str]:
     }
 
 
+def parse_command(project: Path, report: Path) -> list[str]:
+    """The command of one parse: this file, in a process of its own (`parse_and_refuse`)."""
+    return [
+        sys.executable,
+        "-I",
+        str(Path(__file__).resolve()),
+        "--parse",
+        str(project),
+        str(report),
+    ]
+
+
 def parse(tree: Path, work: Path, which: str, routed: bool = False) -> Parsed:
     """What dbt's parse of the exported tree gives; Unreadable when dbt cannot parse it or it
-    holds what the gate refuses, and, when `routed`, a node off the gate's routing. The message
-    never carries dbt's own output."""
+    holds what the gate refuses, and, when `routed`, a node off the gate's routing. A parse whose
+    only error is an unset `node_relation` is run once more. The message never carries dbt's own
+    output."""
     project = tree / PROJECT
     for folder in ("home", "tmp"):
         (work / folder).mkdir(parents=True, exist_ok=True)
     report = work / "report.json"
-    result = subprocess.run(  # noqa: S603
-        [sys.executable, "-I", str(Path(__file__).resolve()), "--parse", str(project), str(report)],
-        capture_output=True,
-        check=False,
-        env=environment(work),
-        cwd=work,
+
+    def run() -> subprocess.CompletedProcess[bytes]:
+        report.unlink(missing_ok=True)
+        return subprocess.run(  # noqa: S603
+            parse_command(project, report),
+            capture_output=True,
+            check=False,
+            env=environment(work),
+            cwd=work,
+        )
+
+    def unset(result: subprocess.CompletedProcess[bytes]) -> bool:
+        if result.returncode != 0 or not report.is_file():
+            return False
+        return json.loads(report.read_text()).get("node_relation_unset") is True
+
+    result, second = once_more(run, unset)
+    retried = (
+        ", on a second parse after the first left a semantic model's node_relation unset"
+        if second
+        else ""
     )
     if result.returncode != 0 or not report.is_file():
         raise Unreadable(
             f"dbt could not parse the {which} tree (the parse ended with exit status"
-            f" {result.returncode})"
+            f" {result.returncode}){retried}"
         )
     found = json.loads(report.read_text())
     if found.get("error"):
-        raise Unreadable(f"dbt could not parse the {which} tree ({found['error']})")
+        raise Unreadable(f"dbt could not parse the {which} tree ({found['error']}){retried}")
     refused = found["refused"] + (found["off_routes"] if routed else [])
     if refused:
         raise Unreadable("; ".join(refused))
@@ -603,7 +657,9 @@ def parse_and_refuse(project: Path, report: Path) -> int:
     )
     manifest = result.result
     if not result.success or not isinstance(manifest, Manifest):
-        report.write_text(json.dumps({"error": failure(result.exception, project, tree)}))
+        error = failure(result.exception, project, tree)
+        unset = node_relation_unset(str(result.exception))
+        report.write_text(json.dumps({"error": error, "node_relation_unset": unset}))
         return 0
     project_file = load_yaml_text((project / "dbt_project.yml").read_text()) or {}
     project_vars = project_file.get("vars")

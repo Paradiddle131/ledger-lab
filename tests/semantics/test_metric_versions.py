@@ -1481,6 +1481,73 @@ def committed(tmp_path_factory: pytest.TempPathFactory) -> Block:
     return versions.parse(tree, work, "working").manifest
 
 
+CLOCK_STEP = Path(__file__).resolve().parents[1] / "models" / "clock_step.py"
+
+
+def stepped_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stepped: int, edit: Edit | None = None
+) -> tuple[Path, Path, Path]:
+    """The committed tree (changed by `edit`), exported for the gate, whose parses run through
+    `clock_step.py`: the first `stepped` leave each semantic model's `node_relation` unset. The
+    tree, the parse's work folder, and the file counting the parses."""
+    repo = git_repo(tmp_path, REAL) if edit is None else working(tmp_path, edit)
+    work, count = tmp_path / "work", tmp_path / "runs"
+    tree = work / "tree"
+    tree.mkdir(parents=True)
+    versions.export_working(repo, tree)
+    stand_in = [sys.executable, "-I", str(CLOCK_STEP), str(count), str(stepped), "gate"]
+    monkeypatch.setattr(
+        versions, "parse_command", lambda project, report: [*stand_in, str(project), str(report)]
+    )
+    return tree, work, count
+
+
+def parses(count: Path) -> int:
+    return len(count.read_text().splitlines()) if count.exists() else 0
+
+
+def test_the_gate_parses_once_more_after_an_unset_node_relation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree, work, count = stepped_tree(tmp_path, monkeypatch, 1)
+    parsed = versions.parse(tree, work, "working")
+    assert parses(count) == 2
+    assert {m["name"] for m in parsed.manifest["metrics"]} == set(ALL_METRICS)
+
+
+def test_the_gate_fails_after_one_more_parse_when_both_leave_node_relation_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree, work, count = stepped_tree(tmp_path, monkeypatch, 2)
+    with pytest.raises(versions.Unreadable) as raised:
+        versions.parse(tree, work, "working")
+    assert parses(count) == 2
+    assert str(raised.value) == (
+        "dbt could not parse the working tree (ValidationError), on a second parse after the"
+        " first left a semantic model's node_relation unset"
+    )
+
+
+def test_the_gate_fails_another_parse_error_after_one_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probe: Edit = lambda files: files.update({"models/models/probe.sql": PROBE_SQL})  # noqa: E731
+    tree, work, count = stepped_tree(tmp_path, monkeypatch, 0, probe)
+    with pytest.raises(versions.Unreadable) as raised:
+        versions.parse(tree, work, "working")
+    assert parses(count) == 1
+    assert str(raised.value).startswith("dbt could not parse the working tree (")
+    assert "second parse" not in str(raised.value)
+
+
+def test_the_gate_parses_a_tree_dbt_reads_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree, work, count = stepped_tree(tmp_path, monkeypatch, 0)
+    versions.parse(tree, work, "working")
+    assert parses(count) == 1
+
+
 Change = Callable[[Block], None]
 
 

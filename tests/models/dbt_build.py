@@ -16,6 +16,8 @@ from typing import Any
 
 import duckdb
 
+from semantics.versions import node_relation_unset, once_more
+
 PROJECT = Path(__file__).resolve().parents[2] / "models"
 DBT = Path(sys.executable).with_name("dbt")
 SAMPLE = Path(__file__).with_name("vendor_sample.yaml")
@@ -33,16 +35,34 @@ class Build:
     cwd: Path
 
 
+SECOND_RUN = (
+    "[dbt was run a second time: its first run failed leaving a semantic model's node_relation"
+    " unset; the output below is the second run's]\n"
+)
+
+
+def failed_on_unset_node_relation(result: subprocess.CompletedProcess[str]) -> bool:
+    return result.returncode != 0 and node_relation_unset(result.stdout + result.stderr)
+
+
+def run_dbt(command: list[str], env: dict[str, str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    """A dbt command, run once more when it fails on a semantic model's unset `node_relation`
+    (`semantics/versions.py`); a second run that fails has `SECOND_RUN` before its output."""
+
+    def run() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            command, capture_output=True, text=True, check=False, env=env, cwd=cwd
+        )
+
+    result, second = once_more(run, failed_on_unset_node_relation)
+    if second and result.returncode != 0:
+        result.stdout = SECOND_RUN + result.stdout
+    return result
+
+
 def dbt(env: dict[str, str], cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [str(DBT), *args, "--project-dir", str(PROJECT), "--profiles-dir", str(PROJECT)]
-        + ["--target", "local"],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-        cwd=cwd,
-    )
+    project = ["--project-dir", str(PROJECT), "--profiles-dir", str(PROJECT)]
+    return run_dbt([str(DBT), *args, *project, "--target", "local"], env, cwd)
 
 
 def built(tmp_path: Path, source_rows: str, landing: Path | None = None) -> Build:
