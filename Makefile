@@ -36,13 +36,23 @@ typecheck: sync
 # tests/platform/test_cost_read_around_tests.py checks these over a stub `uv`. Limits: an interrupt
 # (Ctrl-C) stops the line, the read after included; pytest runs in other targets (`stack-test`,
 # `reconcile-landed`, `bigquery-personas` and the like) have no cost read around them.
-PYTEST = LOADOUT='$(LOADOUT)' uv run pytest
-COST_CHECK = uv run --no-sync python platform/cost_check.py
+# The recipe holds no make variable, so no make-variable assignment from make's command line,
+# MAKEFLAGS, `make -e`, `--eval` or `MAKEFILES`, global or for this target, rewrites its commands;
+# the decider and both reads run Python with `-E`, so PYTHONPATH and the other PYTHON* variables
+# do not reach them; a `SHELL` or `.SHELLFLAGS` other than make's own (`-c`, or `-ec` under
+# `.POSIX`) stops the recipe; a failed pytest is caught without ending the line, so `.POSIX` does
+# not skip the read after; LOADOUT reaches pytest exported for this target, never spliced into
+# the shell line. These guard against a slip, not a deliberate evasion; not closed: `-o test`,
+# `-i` or `.IGNORE`, `-n`, `-t`, another makefile that replaces this recipe, programs earlier on
+# PATH (`uv`, `bq`, `gcloud`, `curl`), the environment pytest reads (`PYTEST_ADDOPTS`), and
+# `uv`'s own `UV_*` variables.
+test: export LOADOUT := $(LOADOUT)
 
 test: sync
-	case "$$(uv run --no-sync python platform/gcp_project.py)" in \
-	own) $(COST_CHECK) || exit 1; $(PYTEST); tests=$$?; $(COST_CHECK) || exit 1; exit $$tests ;; \
-	elsewhere) $(PYTEST) ;; \
+	$(if $(filter-out /bin/sh,$(SHELL))$(filter-out -c -ec,$(.SHELLFLAGS)),$(error test: SHELL or .SHELLFLAGS is not make's own))
+	case "$$(uv run --no-sync python -E platform/gcp_project.py)" in \
+	own) uv run --no-sync python -E platform/cost_check.py || exit 1; tests=0; uv run pytest || tests=$$?; uv run --no-sync python -E platform/cost_check.py || exit 1; exit $$tests ;; \
+	elsewhere) uv run pytest ;; \
 	*) echo "test: platform/gcp_project.py answered neither own nor elsewhere" >&2; exit 1 ;; \
 	esac
 
@@ -119,7 +129,7 @@ stack-test: sync stack-up
 # call, while LEDGER_LAB_GCP_PROJECT is unset; no GCP call and a failure, not checked, in a session
 # that carries another lab's GCP_PROJECT.
 cost-check:
-	@$(COST_CHECK)
+	@uv run --no-sync python -E platform/cost_check.py
 
 # The reconciliation of Chicago's payments to their contracts' awards over the landed files: every
 # class's count and dollars, and each break class's digest, must equal the reviewed baseline. Needs
