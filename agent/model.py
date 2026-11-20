@@ -1,10 +1,10 @@
 """The model behind the own agent: one protocol, one factory, one scripted implementation.
 
-The agent (`agent/ask.py`) shows the model a `Turn`: the question, the verified queries of the
-metric context it may name, and the results of the tool calls made so far. The model answers each
-turn with one step: a `ToolCall` naming a verified query by its id, or a `Reply` that ends the
-turn. A model names a query only by id; the SQL the tool runs comes from the metric context, not
-from the model or the question.
+The agent (`agent/ask.py`) shows the model a `Turn`: the question, the verified queries it may
+name, and the results of the tool calls made so far. The model answers each turn with one step: a
+`ToolCall` naming a verified query by its id, or a `Reply` that ends the turn. A model names a
+query only by id; the SQL the tool runs is the text of the verified queries `ask` is given (by
+default the metric context's), with no value bound from the question or the model.
 
 `model_from_config(environ, context)` is the one place a model is chosen, by the variable
 `LEDGER_LAB_AGENT_MODEL`: unset, empty or `scripted` gives the `ScriptedModel`; any other value
@@ -56,7 +56,7 @@ class Citation:
 
 @dataclass(frozen=True)
 class Refusal:
-    """A tool call that returned no rows, and why: the context holds no such query, the tool
+    """A tool call that was not run or failed, and why: the context holds no such query, the tool
     policy denied it, the persona's database holds a table name in two schemas or a schema name
     the tool does not quote, the engine raised an error, or the model went past the tool-call
     limit."""

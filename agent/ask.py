@@ -5,8 +5,10 @@ context (`semantics/context.json`), runs each verified query the model names wit
 read-only tool, `run_metric_query`, and returns an `Answer` citing what each run returned.
 
 What `ask` checks, in this order:
-- a persona that is not a string, or is empty or only whitespace, raises `NoPersonaError` before
-  the model is asked or a connection is opened;
+- the persona must be a string equal to a persona id of the personas catalogue (by default
+  `access/personas.yaml`), compared exactly, with no stripping or case folding; anything else
+  raises `NoPersonaError`, before the metric context is loaded, the model is asked or a
+  connection is opened;
 - for each tool call: the query id names a verified query of the context; the tool policy
   (`agent/policy/tools.py`) allows the persona to run `run_metric_query` on the query's metric;
   only then is a connection opened, by calling `as_persona(persona)`, at most once per `ask`;
@@ -25,8 +27,9 @@ Stated limits:
 - `ask` holds no connection of its own: the rows are whatever the connection `as_persona` returns
   can read, so the scoping is the connection-maker's (on the local engine, `access/compile.py`);
 - `ask` does not close that connection, which stays its maker's to close;
-- the persona id is not checked against `access/personas.yaml` here: the tool policy denies an id
-  its permit does not list, before any connection is asked for;
+- the catalogue is read as YAML without its schema check (`access/schema.json`); the id is looked
+  up by `access.identities.identity`, which also raises on a grant naming an entity exactly when
+  its product is not entity-scoped, and that error is a `NoPersonaError` too;
 - the query is not checked to be a single read: the persona's connection on the local engine is
   read-only, which is what stops a write;
 - no audit record is written.
@@ -43,7 +46,9 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
+import yaml
 
+from access.identities import UnknownPersonaError, identity
 from agent.model import (
     Citation,
     Model,
@@ -55,7 +60,9 @@ from agent.model import (
 )
 from agent.policy.tools import Entity, authorize
 
-CONTEXT = Path(__file__).resolve().parents[1] / "semantics" / "context.json"
+REPO = Path(__file__).resolve().parents[1]
+CONTEXT = REPO / "semantics" / "context.json"
+PERSONAS = REPO / "access" / "personas.yaml"
 TOOL = "run_metric_query"
 MAX_TOOL_CALLS = 3
 # A schema of the persona's database as `access/compile.py` names it: a purpose's id with `_` for
@@ -66,19 +73,25 @@ AsPersona = Callable[[str], duckdb.DuckDBPyConnection]
 
 
 class NoPersonaError(ValueError):
-    """A question asked without a persona: no answer, no model step, no connection."""
+    """A question asked without a persona of the catalogue: no answer, no model step, no
+    connection."""
 
 
 @dataclass(frozen=True)
 class Answer:
-    """The model's reply, each query run as the persona (`citations`) and each tool call that
-    returned no rows (`refusals`), in the order they were made."""
+    """The model's reply, each query run as the persona (`citations`) and each tool call that was
+    refused or failed (`refusals`), each in the order they were made."""
 
     persona: str
     question: str
     text: str
     citations: tuple[Citation, ...]
     refusals: tuple[Refusal, ...]
+
+
+def load_personas(path: Path = PERSONAS) -> dict[str, Any]:
+    """The personas catalogue as YAML holds it; its schema is not checked here."""
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
 def load_context(path: Path = CONTEXT) -> dict[str, VerifiedQuery]:
@@ -100,14 +113,20 @@ def ask(
     as_persona: AsPersona,
     model: Model | None = None,
     queries: Mapping[str, VerifiedQuery] | None = None,
+    catalogue: Mapping[str, Any] | None = None,
 ) -> Answer:
     """Answer `question` for `persona`, running tools only on `as_persona(persona)`'s connection.
 
     `model` defaults to `model_from_config(os.environ, queries)`, `queries` to the committed
-    metric context; see the module's docstring for what is checked.
+    metric context, `catalogue` to `access/personas.yaml`; see the module's docstring for what is
+    checked.
     """
-    if not isinstance(persona, str) or not persona.strip():
+    if not isinstance(persona, str):
         raise NoPersonaError(f"a question needs the asking persona, not {persona!r}")
+    try:
+        identity(load_personas() if catalogue is None else catalogue, persona)
+    except (UnknownPersonaError, ValueError) as error:
+        raise NoPersonaError(f"{persona!r} is not a persona of the catalogue") from error
     queries = load_context() if queries is None else queries
     model = model_from_config(os.environ, queries) if model is None else model
     session = uuid.uuid4().hex

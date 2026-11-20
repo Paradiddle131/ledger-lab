@@ -6,22 +6,26 @@ database compiled for the asking persona over the sample build; the model is the
 around the model shows which personas a connection was opened for and whether the model was asked.
 """
 
+import os
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import duckdb
 import pytest
 
-from agent.ask import Answer, NoPersonaError, ask, load_context
+from agent.ask import Answer, NoPersonaError, ask, load_context, run_metric_query
 from agent.model import (
     MODEL_VARIABLE,
     Model,
     ModelNotConfigured,
+    Refusal,
     Reply,
     ScriptedModel,
     ToolCall,
     Turn,
+    VerifiedQuery,
     model_from_config,
 )
 
@@ -34,6 +38,10 @@ CHICAGO = "accountant-chicago"
 UK = "accountant-uk-transport"
 # A persona the tool policy (`agent/policy/tools.cedar`) does not permit to run a metric's query.
 DENIED = "agent-operator"
+# A write time set on the persona's database file, long before any test runs.
+WRITTEN = datetime(2020, 1, 2, 3, 4, 5, tzinfo=UTC)
+# The tool-call limit `agent/ask.py` states, written out here so a raised limit fails a test.
+LIMIT = 3
 
 
 class Recorder:
@@ -97,8 +105,9 @@ def test_two_personas_asking_the_same_question_get_different_rows(
     assert chicago.persona == CHICAGO and uk.persona == UK
 
 
-# What stands for no persona: none at all, an empty or blank id, and a value that is no id.
-MISSING: list[Any] = [None, "", "   ", 7]
+# What stands for no persona: none at all, an empty or blank id, a value that is no string, and
+# strings that are not exactly a persona id of `access/personas.yaml` (a zero-width space too).
+MISSING: list[Any] = [None, "", "   ", 7, "nobody", f"{CHICAGO} ", "\u200b"]
 
 
 def test_a_question_without_a_persona_gets_no_answer(engine: AsPersona, scripted: Model) -> None:
@@ -132,8 +141,16 @@ def test_a_temporary_table_on_the_persona_connection_does_not_shadow_its_rows(
 def test_an_answer_cites_the_metric_its_version_the_sql_and_the_freshness(
     as_persona: AsPersona, scripted: Model
 ) -> None:
-    started = datetime.now(UTC)
-    answer = asked(Recorder(as_persona, scripted), CHICAGO)
+    def dated(persona: str) -> duckdb.DuckDBPyConnection:
+        connection = as_persona(persona)
+        row = connection.execute(
+            "select path from duckdb_databases() where database_name = current_database()"
+        ).fetchone()
+        assert row is not None
+        os.utime(row[0], (WRITTEN.timestamp(), WRITTEN.timestamp()))
+        return connection
+
+    answer = ask(CHICAGO, QUESTION, as_persona=dated, model=scripted)
     (citation,) = answer.citations
     metric = load_context()[QUERY]
     assert (citation.query, citation.metric, citation.version) == (
@@ -143,9 +160,8 @@ def test_an_answer_cites_the_metric_its_version_the_sql_and_the_freshness(
     )
     assert citation.sql == metric.sql
     assert citation.columns == ("duplicate_payment_rate",)
-    # The persona's database is built inside the ask, so it was written after the ask began.
-    assert citation.freshness is not None
-    assert started - timedelta(seconds=1) <= citation.freshness <= datetime.now(UTC)
+    # The persona's database file's time, set above, is the time the citation carries.
+    assert citation.freshness == WRITTEN
     assert answer.refusals == ()
     assert QUERY in answer.text and "version 1" in answer.text
 
@@ -201,8 +217,61 @@ def test_a_model_that_keeps_calling_tools_is_stopped(as_persona: AsPersona) -> N
 
     recorder = Recorder(as_persona, Looping())
     answer = asked(recorder, CHICAGO)
-    assert len(recorder.turns) == len(answer.citations) + len(answer.refusals)
-    assert answer.refusals[-1].reason.startswith("the model made no reply")
+    assert len(answer.citations) == LIMIT
+    assert len(recorder.turns) == LIMIT + 1
+    (refusal,) = answer.refusals
+    assert refusal.reason.startswith("the model made no reply")
+
+
+def test_one_ask_opens_one_connection_for_two_tool_calls(as_persona: AsPersona) -> None:
+    class Twice:
+        def step(self, turn: Turn) -> ToolCall | Reply:
+            calls = [QUERY, "duplicate-payment-amount-rate"]
+            if len(turn.results) < len(calls):
+                return ToolCall(calls[len(turn.results)])
+            return Reply("done")
+
+    recorder = Recorder(as_persona, Twice())
+    answer = asked(recorder, CHICAGO)
+    assert [c.query for c in answer.citations] == [QUERY, "duplicate-payment-amount-rate"]
+    assert recorder.opened == [CHICAGO]
+
+
+def crafted(tmp_path: Path, *statements: str) -> duckdb.DuckDBPyConnection:
+    """A database of invented tables only, built by `statements`, opened read-only."""
+    path = tmp_path / "crafted.duckdb"
+    with duckdb.connect(str(path)) as build:
+        for statement in statements:
+            build.execute(statement)
+    return duckdb.connect(str(path), read_only=True)
+
+
+INVENTED = VerifiedQuery("invented", "How many?", "invented_metric", 1, "select count(*) from t")
+
+
+def test_a_table_name_in_two_schemas_is_refused(tmp_path: Path) -> None:
+    db = crafted(
+        tmp_path,
+        "create schema a",
+        "create schema b",
+        "create table a.t as select 1 as x",
+        "create table b.t as select 2 as x",
+    )
+    result = run_metric_query(db, INVENTED)
+    assert result == Refusal("invented", "tables held in two schemas: t")
+
+
+def test_a_schema_name_the_tool_does_not_quote_is_refused(tmp_path: Path) -> None:
+    db = crafted(tmp_path, 'create schema "Odd-Name"', 'create table "Odd-Name".t as select 1 as x')
+    result = run_metric_query(db, INVENTED)
+    assert isinstance(result, Refusal)
+    assert result.reason.startswith("a schema name the tool does not quote")
+
+
+def test_the_factory_refuses_two_queries_sharing_a_question() -> None:
+    twin = VerifiedQuery("twin", INVENTED.question, "invented_metric", 1, INVENTED.sql)
+    with pytest.raises(ValueError, match="share a question"):
+        model_from_config({}, {"invented": INVENTED, "twin": twin})
 
 
 def test_the_model_comes_from_configuration() -> None:
