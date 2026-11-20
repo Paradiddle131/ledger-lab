@@ -139,7 +139,7 @@ verified_queries:
   - id: constant-currency-spend-by-basis
     question: What was spent on each basis, in euros at constant rates?
     metric: constant_currency_spend
-    version: 1
+    version: 2
     owner: group-controller
     group_by: [group_total__basis]
     sql: |
@@ -158,7 +158,7 @@ verified_queries:
       What did each entity spend, in euros at constant rates, where all its figures share one
       basis?
     metric: constant_currency_spend
-    version: 1
+    version: 2
     owner: group-controller
     group_by: [group_total__entity_id]
     sql: |
@@ -175,7 +175,7 @@ verified_queries:
   - id: constant-currency-spend-by-basis-and-fiscal-year
     question: What was spent on each basis in each fiscal year, in euros at constant rates?
     metric: constant_currency_spend
-    version: 1
+    version: 2
     owner: group-controller
     group_by: [group_total__basis, group_total__fiscal_year]
     sql: |

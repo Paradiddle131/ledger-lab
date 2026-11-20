@@ -370,7 +370,7 @@
           "sql": "select\n  entity_id as group_total__entity_id,\n  case\n    when count(distinct case when fiscal_period is not null then basis end)\n      + count(distinct case when fiscal_period is null then basis end) = 1\n    then coalesce(sum(amount_at_constant_rates), 0)\n  end as constant_currency_spend\nfrom group_totals\ngroup by entity_id\n"
         }
       ],
-      "version": 1
+      "version": 2
     },
     "duplicate_payment_amount_rate": {
       "description": "The share of the dollars the City of Chicago's served payment rows add up to that sits on rows repeating another served row: the publisher serving one payment twice, not the City paying twice. Chicago only, the one entity with a rule for repeats.",
@@ -564,7 +564,7 @@
           "name": "period_bases"
         }
       },
-      "version": 1
+      "version": 2
     },
     "spend_bases_in_years": {
       "description": "Not for direct use: an input of `constant_currency_spend`. How many different bases the summed whole fiscal years' rows hold.",
@@ -580,7 +580,7 @@
           "name": "year_bases"
         }
       },
-      "version": 1
+      "version": 2
     },
     "spend_in_periods": {
       "description": "Not for direct use: an input of `constant_currency_spend`, which is the figure to read. The fiscal periods' figures at constant rates summed whatever their basis, so on its own it adds unlike bases.",
@@ -596,7 +596,7 @@
           "name": "period_amount_at_constant_rates"
         }
       },
-      "version": 1
+      "version": 2
     },
     "spend_in_years": {
       "description": "Not for direct use: an input of `constant_currency_spend`, which is the figure to read. The whole fiscal years' figures at constant rates summed whatever their basis, so on its own it adds unlike bases.",
@@ -612,7 +612,7 @@
           "name": "year_amount_at_constant_rates"
         }
       },
-      "version": 1
+      "version": 2
     }
   }
 }
