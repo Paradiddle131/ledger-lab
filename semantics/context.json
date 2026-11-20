@@ -1,0 +1,618 @@
+{
+  "glossary": {
+    "accrual": {
+      "definition": "An entry that books a cost or income in the period it belongs to, before the invoice or payment arrives.",
+      "owner": "group-controller",
+      "see_also": [
+        "reversing-accrual",
+        "posting-date"
+      ],
+      "term": "Accrual"
+    },
+    "award": {
+      "definition": "The amount a contract allows to be spent with a vendor; it can be raised, lowered or cancelled after signing.",
+      "owner": "payables-clerk",
+      "see_also": [
+        "commitment",
+        "voucher"
+      ],
+      "term": "Award"
+    },
+    "budget-moment": {
+      "definition": "One of the points in a year at which a government publishes or revises its budget, from the draft budget through supplementary budgets to the annual report.",
+      "owner": "accountant-nl-government",
+      "see_also": [
+        "outturn"
+      ],
+      "term": "Budget moment"
+    },
+    "commitment": {
+      "definition": "Spending promised under a contract or order but not yet invoiced, which the budget already counts as used.",
+      "owner": "payables-clerk",
+      "see_also": [
+        "award",
+        "outturn"
+      ],
+      "term": "Commitment"
+    },
+    "constant-currency": {
+      "definition": "Figures from different periods translated at one fixed set of exchange rates, so a change shows the business moving and not the rates.",
+      "owner": "group-controller",
+      "see_also": [
+        "reference-rate"
+      ],
+      "term": "Constant currency"
+    },
+    "days-to-pay": {
+      "definition": "The days from the date an invoice or voucher is entered to the date it is paid; it needs both dates for each payment.",
+      "owner": "payables-clerk",
+      "see_also": [
+        "voucher",
+        "procure-to-pay"
+      ],
+      "term": "Days to pay"
+    },
+    "duplicate-payment-rate": {
+      "definition": "The share of payments, by count or by amount, recorded more than once, whether paid twice or only listed twice.",
+      "owner": "payables-clerk",
+      "see_also": [
+        "voucher",
+        "three-way-match"
+      ],
+      "term": "Duplicate-payment rate"
+    },
+    "fiscal-calendar": {
+      "definition": "How an entity splits its financial year into periods and when that year starts, such as January to December or April to March.",
+      "owner": "group-controller",
+      "see_also": [
+        "open-and-closed-period",
+        "posting-date"
+      ],
+      "term": "Fiscal calendar"
+    },
+    "intercompany": {
+      "definition": "A transaction between two entities of the same group, which must be removed when their figures are added together.",
+      "owner": "group-controller",
+      "see_also": [
+        "record-to-report"
+      ],
+      "term": "Intercompany"
+    },
+    "legal-entity-identifier": {
+      "definition": "A 20-character code that names one legal entity worldwide, from a public register, used to tell apart vendors with similar names.",
+      "owner": "payables-clerk",
+      "term": "Legal entity identifier"
+    },
+    "maker-checker": {
+      "definition": "A workflow where one identity prepares a change and a different identity approves it before it takes effect.",
+      "owner": "auditor",
+      "see_also": [
+        "segregation-of-duties"
+      ],
+      "term": "Maker-checker"
+    },
+    "open-and-closed-period": {
+      "definition": "A period still taking entries is open; once closed, its figures are final and a change goes into a later open period instead.",
+      "owner": "group-controller",
+      "see_also": [
+        "fiscal-calendar",
+        "restatement"
+      ],
+      "term": "Open and closed period"
+    },
+    "outturn": {
+      "definition": "What was actually spent or received in a year, set against the budget for the same year.",
+      "owner": "accountant-nl-government",
+      "see_also": [
+        "budget-moment",
+        "commitment"
+      ],
+      "term": "Outturn"
+    },
+    "paid-over-award": {
+      "definition": "What was paid on a contract beyond the award it is held to; never below zero, and never netted against what other contracts leave unpaid.",
+      "owner": "payables-clerk",
+      "see_also": [
+        "award",
+        "remaining-commitment"
+      ],
+      "term": "Paid over award"
+    },
+    "posting-date": {
+      "definition": "The date an entry counts in the ledger, which decides its fiscal period; it can differ from the document date and the payment date.",
+      "owner": "group-controller",
+      "see_also": [
+        "fiscal-calendar",
+        "open-and-closed-period"
+      ],
+      "term": "Posting date"
+    },
+    "procure-to-pay": {
+      "definition": "The chain from agreeing to buy something to paying for it, through contract or order, invoice, voucher and payment.",
+      "owner": "payables-clerk",
+      "see_also": [
+        "award",
+        "voucher",
+        "three-way-match"
+      ],
+      "term": "Procure-to-pay"
+    },
+    "record-to-report": {
+      "definition": "The chain from posting transactions in the ledger to publishing figures, through period close, reconciliation and consolidation.",
+      "owner": "group-controller",
+      "see_also": [
+        "trial-balance",
+        "open-and-closed-period",
+        "intercompany"
+      ],
+      "term": "Record-to-report"
+    },
+    "reference-rate": {
+      "definition": "An exchange rate published by a central bank for one day, used to translate amounts between currencies the same way everywhere.",
+      "owner": "group-controller",
+      "see_also": [
+        "constant-currency"
+      ],
+      "term": "Reference rate"
+    },
+    "remaining-commitment": {
+      "definition": "The part of a contract's award not yet paid, which the award still allows to be spent; never below zero, since paying over an award leaves nothing to commit.",
+      "owner": "payables-clerk",
+      "see_also": [
+        "award",
+        "commitment",
+        "spend-against-award"
+      ],
+      "term": "Remaining commitment"
+    },
+    "restatement": {
+      "definition": "A change to figures already published for a closed period, made and disclosed because they were wrong or a rule changed.",
+      "owner": "group-controller",
+      "see_also": [
+        "open-and-closed-period"
+      ],
+      "term": "Restatement"
+    },
+    "reversing-accrual": {
+      "definition": "An accrual that is undone automatically at the start of the next period, so the real invoice can be booked without counting the cost twice.",
+      "owner": "group-controller",
+      "see_also": [
+        "accrual"
+      ],
+      "term": "Reversing accrual"
+    },
+    "segregation-of-duties": {
+      "definition": "The rule that no one person both starts and approves the same transaction, so one mistake or fraud needs two people.",
+      "owner": "auditor",
+      "see_also": [
+        "maker-checker"
+      ],
+      "term": "Segregation of duties"
+    },
+    "spend-against-award": {
+      "definition": "The share of a contract's award that has been paid so far; above one when the contract was paid more than it was awarded.",
+      "owner": "payables-clerk",
+      "see_also": [
+        "award",
+        "remaining-commitment"
+      ],
+      "term": "Spend against award"
+    },
+    "three-way-match": {
+      "definition": "The check that an invoice agrees with the order or contract and with what was received before it is paid.",
+      "owner": "payables-clerk",
+      "see_also": [
+        "voucher",
+        "procure-to-pay"
+      ],
+      "term": "Three-way match"
+    },
+    "trial-balance": {
+      "definition": "The list of every account's balance at one date; its debits and credits must add up to the same total.",
+      "owner": "group-controller",
+      "see_also": [
+        "record-to-report"
+      ],
+      "term": "Trial balance"
+    },
+    "voucher": {
+      "definition": "The approved record that an invoice may be paid, naming the vendor, the amount and the contract it is charged to.",
+      "owner": "payables-clerk",
+      "see_also": [
+        "award",
+        "three-way-match"
+      ],
+      "term": "Voucher"
+    }
+  },
+  "metrics": {
+    "chicago_payment_amount": {
+      "description": "Not for direct use: an input of `duplicate_payment_amount_rate`. The US dollars of the City of Chicago's payment rows as served, repeats included.",
+      "filter": {
+        "where_filters": [
+          {
+            "where_sql_template": "{{ Dimension('payment__entity_id') }} = 'chicago'"
+          }
+        ]
+      },
+      "label": "Chicago payments served, in dollars",
+      "owner": "payables-clerk",
+      "role": "input",
+      "term": "duplicate-payment-rate",
+      "type": "simple",
+      "type_params": {
+        "join_to_timespine": false,
+        "measure": {
+          "join_to_timespine": false,
+          "name": "payment_amount"
+        }
+      },
+      "version": 1
+    },
+    "chicago_payment_rows": {
+      "description": "Not for direct use: an input of `duplicate_payment_rate`. The City of Chicago's payment rows as served, repeats included.",
+      "filter": {
+        "where_filters": [
+          {
+            "where_sql_template": "{{ Dimension('payment__entity_id') }} = 'chicago'"
+          }
+        ]
+      },
+      "label": "Chicago payment rows served",
+      "owner": "payables-clerk",
+      "role": "input",
+      "term": "duplicate-payment-rate",
+      "type": "simple",
+      "type_params": {
+        "join_to_timespine": false,
+        "measure": {
+          "join_to_timespine": false,
+          "name": "payment_rows"
+        }
+      },
+      "version": 1
+    },
+    "chicago_repeat_amount": {
+      "description": "Not for direct use: an input of `duplicate_payment_amount_rate`. The US dollars of the City of Chicago's payment rows that repeat another served row.",
+      "filter": {
+        "where_filters": [
+          {
+            "where_sql_template": "{{ Dimension('payment__entity_id') }} = 'chicago'"
+          }
+        ]
+      },
+      "label": "Chicago payments served again, in dollars",
+      "owner": "payables-clerk",
+      "role": "input",
+      "term": "duplicate-payment-rate",
+      "type": "simple",
+      "type_params": {
+        "join_to_timespine": false,
+        "measure": {
+          "join_to_timespine": false,
+          "name": "repeat_amount"
+        }
+      },
+      "version": 1
+    },
+    "chicago_repeat_rows": {
+      "description": "Not for direct use: an input of `duplicate_payment_rate`. The City of Chicago's payment rows that repeat another served row.",
+      "filter": {
+        "where_filters": [
+          {
+            "where_sql_template": "{{ Dimension('payment__entity_id') }} = 'chicago'"
+          }
+        ]
+      },
+      "label": "Chicago payment rows served again",
+      "owner": "payables-clerk",
+      "role": "input",
+      "term": "duplicate-payment-rate",
+      "type": "simple",
+      "type_params": {
+        "join_to_timespine": false,
+        "measure": {
+          "join_to_timespine": false,
+          "name": "repeat_rows"
+        }
+      },
+      "version": 1
+    },
+    "constant_currency_spend": {
+      "description": "What the entities spent, in the reporting currency (EUR) at the ECB rates of one fixed day (the group totals' `constant_rates_on`), so a change between spans shows spending moving and not the rates: the group totals' figures, with what they leave out (`group_totals_left_out`) left out here too. It is a figure only where every row it sums has one basis, so group by `group_total__basis` (or by an entity with a single basis); a query that would add unlike bases, such as the Dutch cash outturn and Chicago's payments, returns no figure. A whole fiscal year's figure (the Dutch outturn, Chicago's yearly roll-ups) has no month: by `metric_time` the metric groups by year or coarser (a basis of whole years also shows a row with no time and no figure), and a query by month or day is refused; by `group_total__period_start` a whole year's row has no month and stands apart. For months, group by `group_total__fiscal_year` and `group_total__fiscal_period` (no period on a whole year's row); `group_total__span` tells the two kinds of row apart.",
+      "label": "Constant-currency spend",
+      "owner": "group-controller",
+      "role": "headline",
+      "term": "constant-currency",
+      "type": "derived",
+      "type_params": {
+        "expr": "case when coalesce(spend_bases_in_periods, 0) + coalesce(spend_bases_in_years, 0) = 1 then coalesce(spend_in_periods, 0) + coalesce(spend_in_years, 0) end",
+        "join_to_timespine": false,
+        "metrics": [
+          {
+            "name": "spend_in_periods"
+          },
+          {
+            "name": "spend_in_years"
+          },
+          {
+            "name": "spend_bases_in_periods"
+          },
+          {
+            "name": "spend_bases_in_years"
+          }
+        ]
+      },
+      "verified_queries": [
+        {
+          "group_by": [
+            "group_total__basis"
+          ],
+          "id": "constant-currency-spend-by-basis",
+          "question": "What was spent on each basis, in euros at constant rates?",
+          "sql": "select\n  basis as group_total__basis,\n  case\n    when count(distinct case when fiscal_period is not null then basis end)\n      + count(distinct case when fiscal_period is null then basis end) = 1\n    then coalesce(sum(amount_at_constant_rates), 0)\n  end as constant_currency_spend\nfrom group_totals\ngroup by basis\n"
+        },
+        {
+          "group_by": [
+            "group_total__basis",
+            "group_total__fiscal_year"
+          ],
+          "id": "constant-currency-spend-by-basis-and-fiscal-year",
+          "question": "What was spent on each basis in each fiscal year, in euros at constant rates?",
+          "sql": "select\n  basis as group_total__basis,\n  fiscal_year as group_total__fiscal_year,\n  case\n    when count(distinct case when fiscal_period is not null then basis end)\n      + count(distinct case when fiscal_period is null then basis end) = 1\n    then coalesce(sum(amount_at_constant_rates), 0)\n  end as constant_currency_spend\nfrom group_totals\ngroup by basis, fiscal_year\n"
+        },
+        {
+          "group_by": [
+            "group_total__entity_id"
+          ],
+          "id": "constant-currency-spend-by-entity",
+          "question": "What did each entity spend, in euros at constant rates, where all its figures share one basis?",
+          "sql": "select\n  entity_id as group_total__entity_id,\n  case\n    when count(distinct case when fiscal_period is not null then basis end)\n      + count(distinct case when fiscal_period is null then basis end) = 1\n    then coalesce(sum(amount_at_constant_rates), 0)\n  end as constant_currency_spend\nfrom group_totals\ngroup by entity_id\n"
+        }
+      ],
+      "version": 1
+    },
+    "duplicate_payment_amount_rate": {
+      "description": "The share of the dollars the City of Chicago's served payment rows add up to that sits on rows repeating another served row: the publisher serving one payment twice, not the City paying twice. Chicago only, the one entity with a rule for repeats.",
+      "label": "Duplicate-payment rate by amount",
+      "owner": "payables-clerk",
+      "role": "headline",
+      "term": "duplicate-payment-rate",
+      "type": "ratio",
+      "type_params": {
+        "denominator": {
+          "name": "chicago_payment_amount"
+        },
+        "join_to_timespine": false,
+        "numerator": {
+          "name": "chicago_repeat_amount"
+        }
+      },
+      "verified_queries": [
+        {
+          "id": "duplicate-payment-amount-rate",
+          "question": "What share of the dollars of the City of Chicago's served payment rows sits on rows that repeat another served row?",
+          "sql": "select\n  cast(sum(case when is_repeat then amount else 0 end) as double)\n    / cast(nullif(sum(amount), 0) as double) as duplicate_payment_amount_rate\nfrom payments\nwhere entity_id = 'chicago'\n"
+        }
+      ],
+      "version": 1
+    },
+    "duplicate_payment_rate": {
+      "description": "The share of the City of Chicago's served payment rows that repeat another served row (`is_repeat`): the publisher serving one payment twice, not the City paying twice, which nothing in the files shows. Chicago only, the one entity with a rule for repeats.",
+      "label": "Duplicate-payment rate",
+      "owner": "payables-clerk",
+      "role": "headline",
+      "term": "duplicate-payment-rate",
+      "type": "ratio",
+      "type_params": {
+        "denominator": {
+          "name": "chicago_payment_rows"
+        },
+        "join_to_timespine": false,
+        "numerator": {
+          "name": "chicago_repeat_rows"
+        }
+      },
+      "verified_queries": [
+        {
+          "id": "duplicate-payment-rate",
+          "question": "What share of the City of Chicago's served payment rows repeat another served row?",
+          "sql": "select\n  cast(sum(case when is_repeat then 1 else 0 end) as double)\n    / cast(nullif(count(payment_key), 0) as double) as duplicate_payment_rate\nfrom payments\nwhere entity_id = 'chicago'\n"
+        },
+        {
+          "group_by": [
+            "metric_time__month"
+          ],
+          "id": "duplicate-payment-rate-by-month",
+          "question": "By month of payment date, what share of the City of Chicago's served payment rows repeat another served row?",
+          "sql": "select\n  date_trunc('month', payment_date) as metric_time__month,\n  cast(sum(case when is_repeat then 1 else 0 end) as double)\n    / cast(nullif(count(payment_key), 0) as double) as duplicate_payment_rate\nfrom payments\nwhere entity_id = 'chicago'\ngroup by date_trunc('month', payment_date)\n"
+        }
+      ],
+      "version": 1
+    },
+    "fixed_award": {
+      "description": "Not for direct use: the denominator of `spend_against_award`. The awards held to of the City of Chicago's contracts with a fixed award (above 0), in US dollars, by approval cohort.",
+      "label": "Fixed award",
+      "owner": "payables-clerk",
+      "role": "input",
+      "term": "award",
+      "type": "simple",
+      "type_params": {
+        "join_to_timespine": false,
+        "measure": {
+          "join_to_timespine": false,
+          "name": "fixed_award"
+        }
+      },
+      "version": 1
+    },
+    "paid_against_fixed_award": {
+      "description": "Not for direct use: the numerator of `spend_against_award`. What was paid against the City of Chicago's contracts with a fixed award (above 0), every repeat left out, in US dollars, by approval cohort.",
+      "label": "Paid against fixed award",
+      "owner": "payables-clerk",
+      "role": "input",
+      "term": "spend-against-award",
+      "type": "simple",
+      "type_params": {
+        "join_to_timespine": false,
+        "measure": {
+          "join_to_timespine": false,
+          "name": "paid_against_fixed_award"
+        }
+      },
+      "version": 1
+    },
+    "paid_over_award": {
+      "description": "What the City of Chicago paid beyond the award on contracts with a fixed award (an award held to above 0): per contract, the reconciliation's difference where it is above 0, summed, the rounding allowance not taken off; the part `remaining_commitment` never nets away. By `metric_time` it groups contracts by approval cohort (the day of their first revision), not by when the excess was paid. Group by `contract__break_class` for the cause the reconciliation finds.",
+      "label": "Paid over award",
+      "owner": "payables-clerk",
+      "role": "headline",
+      "term": "paid-over-award",
+      "type": "simple",
+      "type_params": {
+        "join_to_timespine": false,
+        "measure": {
+          "join_to_timespine": false,
+          "name": "paid_over_award"
+        }
+      },
+      "verified_queries": [
+        {
+          "group_by": [
+            "contract__break_class"
+          ],
+          "id": "paid-over-award-by-break-class",
+          "question": "How much did Chicago pay beyond the award on its fixed-award contracts, by the reconciliation's break class?",
+          "sql": "select\n  break_class as contract__break_class,\n  sum(\n    case when award_held_to > 0 then\n      case when difference > 0 then difference else 0 end\n    end\n  ) as paid_over_award\nfrom chicago_contract_reconciliation\ngroup by break_class\n"
+        }
+      ],
+      "version": 1
+    },
+    "remaining_commitment": {
+      "description": "The part of the City of Chicago's fixed contract awards not yet paid: per contract with a fixed award (an award held to above 0), the award held to less what was paid against it, never below 0, summed; what contracts were paid beyond their award is `paid_over_award`, never netted here. It is what the awards still allow, not money owed or due, and it holds expired contracts: on the pinned files $71.38bn, of which $31.80bn sits on 63,490 contracts whose latest end date is before the files' cut-off (31 October 2026), $10.98bn on 19,116 that serve no end date and $28.60bn on 3,612 still running; filter on `contract__last_ends_on` for those. By `metric_time` it groups contracts by approval cohort (the day of their first revision): \"by year\" is what each year's newly awarded contracts still allow, not a balance at the end of that year.",
+      "label": "Remaining commitment",
+      "owner": "payables-clerk",
+      "role": "headline",
+      "term": "remaining-commitment",
+      "type": "simple",
+      "type_params": {
+        "join_to_timespine": false,
+        "measure": {
+          "join_to_timespine": false,
+          "name": "unpaid_award"
+        }
+      },
+      "verified_queries": [
+        {
+          "id": "remaining-commitment",
+          "question": "How much of the City of Chicago's fixed contract awards is not yet paid?",
+          "sql": "select\n  sum(\n    case when award_held_to > 0 then\n      case when paid < award_held_to then award_held_to - paid else 0 end\n    end\n  ) as remaining_commitment\nfrom chicago_contract_reconciliation\n"
+        },
+        {
+          "id": "remaining-commitment-on-running-contracts",
+          "question": "How much of the fixed awards of Chicago's contracts still running on 31 October 2026 is not yet paid?",
+          "sql": "select\n  sum(\n    case when award_held_to > 0 then\n      case when paid < award_held_to then award_held_to - paid else 0 end\n    end\n  ) as remaining_commitment\nfrom chicago_contract_reconciliation\nwhere last_ends_on >= date '2026-10-31'\n",
+          "where": "{{ TimeDimension('contract__last_ends_on', 'day') }} >= '2026-10-31'"
+        }
+      ],
+      "version": 1
+    },
+    "spend_against_award": {
+      "description": "The share of the City of Chicago's fixed contract awards that has been paid: what was paid against contracts with a fixed award (an award held to above 0, as the contract reconciliation holds it: the award after revisions, or the highest award ever in force where revisions net to 0 without all being 0), every repeat left out, over those awards. Left out: a blanket whose every revision awards 0, a negative award, a contract number the contracts table lacks, and the contracts whose revisions net to 0 and whose award never rose above 0 (24 classed `unexplained`, 197 `unpaid` on the pinned files). A contract paid over its award counts its whole payment, so a group of contracts can pass 1. By `metric_time` it groups contracts by approval cohort (the day of their first revision), not by when they were paid. Group by `contract__break_class` to see where it comes from.",
+      "label": "Spend against award",
+      "owner": "payables-clerk",
+      "role": "headline",
+      "term": "spend-against-award",
+      "type": "ratio",
+      "type_params": {
+        "denominator": {
+          "name": "fixed_award"
+        },
+        "join_to_timespine": false,
+        "numerator": {
+          "name": "paid_against_fixed_award"
+        }
+      },
+      "verified_queries": [
+        {
+          "id": "spend-against-award",
+          "question": "What share of the City of Chicago's fixed contract awards has been paid?",
+          "sql": "select\n  cast(sum(case when award_held_to > 0 then paid end) as double)\n    / cast(nullif(sum(case when award_held_to > 0 then award_held_to end), 0) as double)\n    as spend_against_award\nfrom chicago_contract_reconciliation\n"
+        },
+        {
+          "group_by": [
+            "metric_time__year"
+          ],
+          "id": "spend-against-award-by-approval-year",
+          "question": "What share of the fixed awards of the contracts Chicago first approved in each year has been paid?",
+          "sql": "select\n  date_trunc('year', first_approved_on) as metric_time__year,\n  cast(sum(case when award_held_to > 0 then paid end) as double)\n    / cast(nullif(sum(case when award_held_to > 0 then award_held_to end), 0) as double)\n    as spend_against_award\nfrom chicago_contract_reconciliation\ngroup by date_trunc('year', first_approved_on)\n"
+        }
+      ],
+      "version": 1
+    },
+    "spend_bases_in_periods": {
+      "description": "Not for direct use: an input of `constant_currency_spend`. How many different bases the summed fiscal periods' rows hold.",
+      "label": "Bases summed in fiscal periods",
+      "owner": "group-controller",
+      "role": "input",
+      "term": "constant-currency",
+      "type": "simple",
+      "type_params": {
+        "join_to_timespine": false,
+        "measure": {
+          "join_to_timespine": false,
+          "name": "period_bases"
+        }
+      },
+      "version": 1
+    },
+    "spend_bases_in_years": {
+      "description": "Not for direct use: an input of `constant_currency_spend`. How many different bases the summed whole fiscal years' rows hold.",
+      "label": "Bases summed in whole fiscal years",
+      "owner": "group-controller",
+      "role": "input",
+      "term": "constant-currency",
+      "type": "simple",
+      "type_params": {
+        "join_to_timespine": false,
+        "measure": {
+          "join_to_timespine": false,
+          "name": "year_bases"
+        }
+      },
+      "version": 1
+    },
+    "spend_in_periods": {
+      "description": "Not for direct use: an input of `constant_currency_spend`, which is the figure to read. The fiscal periods' figures at constant rates summed whatever their basis, so on its own it adds unlike bases.",
+      "label": "Spend at constant rates in fiscal periods, any basis",
+      "owner": "group-controller",
+      "role": "input",
+      "term": "constant-currency",
+      "type": "simple",
+      "type_params": {
+        "join_to_timespine": false,
+        "measure": {
+          "join_to_timespine": false,
+          "name": "period_amount_at_constant_rates"
+        }
+      },
+      "version": 1
+    },
+    "spend_in_years": {
+      "description": "Not for direct use: an input of `constant_currency_spend`, which is the figure to read. The whole fiscal years' figures at constant rates summed whatever their basis, so on its own it adds unlike bases.",
+      "label": "Spend at constant rates in whole fiscal years, any basis",
+      "owner": "group-controller",
+      "role": "input",
+      "term": "constant-currency",
+      "type": "simple",
+      "type_params": {
+        "join_to_timespine": false,
+        "measure": {
+          "join_to_timespine": false,
+          "name": "year_amount_at_constant_rates"
+        }
+      },
+      "version": 1
+    }
+  }
+}
