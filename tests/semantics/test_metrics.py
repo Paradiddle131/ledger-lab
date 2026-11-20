@@ -516,11 +516,9 @@ INVENTED = [
 ]
 
 
-def test_the_contract_metrics_over_invented_contracts(build: Build, tmp_path: Path) -> None:
-    """Over the invented contracts: only an award held to above 0 is fixed (held to, not the award
-    after revisions), the unpaid part and the part paid over are each floored at 0 per contract
-    and never netted, and a blanket, a negative award, an award never above 0 and a number the
-    contracts table lacks stay out."""
+def invented_contracts(build: Build, tmp_path: Path) -> Build:
+    """A build in `tmp_path` whose database holds the invented contracts as the contract
+    reconciliation, and nothing else, read through the sample build's semantic manifest."""
     (tmp_path / "target").mkdir()
     shutil.copy(build.cwd / "target" / "semantic_manifest.json", tmp_path / "target")
     database = tmp_path / "ledger_lab.duckdb"
@@ -537,10 +535,15 @@ def test_the_contract_metrics_over_invented_contracts(build: Build, tmp_path: Pa
             " (?, ?, ?, ?, ? - ?, ?, false, false, ? is not null, date '2020-01-02', null)",
             [(c, h, a, p, p, h, k, h) for c, h, a, p, k in INVENTED],
         )
-    invented = Build(
-        "", database, {}, build.env | {"LEDGER_LAB_DUCKDB_PATH": str(database)}, tmp_path
-    )
-    (row,) = mf_query(invented, CONTRACT_METRICS)
+    return Build("", database, {}, build.env | {"LEDGER_LAB_DUCKDB_PATH": str(database)}, tmp_path)
+
+
+def test_the_contract_metrics_over_invented_contracts(build: Build, tmp_path: Path) -> None:
+    """Over the invented contracts: only an award held to above 0 is fixed (held to, not the award
+    after revisions), the unpaid part and the part paid over are each floored at 0 per contract
+    and never netted, and a blanket, a negative award, an award never above 0 and a number the
+    contracts table lacks stay out."""
+    (row,) = mf_query(invented_contracts(build, tmp_path), CONTRACT_METRICS)
     got = {k: Decimal(v) for k, v in row.items()}
     assert got["fixed_award"] == Decimal("2700")
     assert got["paid_against_fixed_award"] == Decimal("1950.25")
