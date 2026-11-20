@@ -1,17 +1,21 @@
-"""The tool policy, deny by default: a listed read-only tool allowed, everything else denied.
+"""The tool policy, deny by default: a listed read-only tool allowed to listed personas only.
 
-The policy (`agent/policy/tools.cedar`) permits one tool, `run_metric_query`. Each test below asks
-the seam once and expects a denial, except the ones that ask for that tool on a metric; the engine
-failures are planted by replacing the engine's call or the policy's files.
+The policy (`agent/policy/tools.cedar`) permits one tool, `run_metric_query`, to the personas the
+catalogue (`access/personas.yaml`) gives a read or aggregate grant on a data product holding figures.
+The tests check the policy file against the schema and the catalogue, and ask the seam for allowed
+and denied requests; the engine failures are planted by replacing the engine's call or the policy's
+files.
 """
 
 import json
 from collections.abc import Mapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import cedarpy
 import pytest
+from conftest import load_access
 
 from agent.policy import tools
 from agent.policy.tools import (
@@ -29,6 +33,36 @@ READ_ONLY_TOOL = "run_metric_query"
 METRIC = Entity("Metric", "spend_against_award")
 LEDGER = Entity("Ledger", "chicago")
 CONTEXT = {"session": "session-1"}
+# The data products that hold no figure: a grant on them alone does not let a persona run a metric.
+NO_FIGURES = {"metric-definitions", "audit-log"}
+# The data products that hold figures; with NO_FIGURES, the catalogue's products, so a new product
+# fails a test until it is placed in one of the two.
+FIGURES = {"payments", "ledger", "group-totals"}
+
+
+def metric_readers(catalogue: Mapping[str, Any]) -> set[str]:
+    """The personas holding a read or aggregate grant on a data product that holds figures."""
+    return {
+        grant["persona"]
+        for grant in catalogue["grants"]
+        if grant["access"] in {"read", "aggregate"} and grant["product"] in FIGURES
+    }
+
+
+CATALOGUE = load_access()
+READERS = sorted(metric_readers(CATALOGUE))
+NOT_READERS = sorted({p["id"] for p in CATALOGUE["personas"]} - set(READERS))
+
+
+def permitted_personas(policy: Mapping[str, Any]) -> list[str]:
+    """The persona ids of a permit's `when { principal in [...] }` condition, in file order."""
+    (condition,) = policy["conditions"]
+    assert condition["kind"] == "when"
+    membership = condition["body"]["in"]
+    assert membership["left"] == {"Var": "principal"}
+    entities = [item["Value"]["__entity"] for item in membership["right"]["Set"]]
+    assert {entity["type"] for entity in entities} == {"Persona"}
+    return [entity["id"] for entity in entities]
 
 
 @pytest.fixture(autouse=True)
@@ -59,19 +93,48 @@ def test_the_policy_validates_against_the_schema() -> None:
     assert result.validation_passed, [str(error) for error in result.errors]
 
 
-def test_the_only_permit_names_the_read_only_tool() -> None:
+def test_the_data_products_are_split_into_figures_and_none() -> None:
+    products = {product["id"] for product in CATALOGUE["data_products"]}
+    assert products == FIGURES | NO_FIGURES
+    assert not FIGURES & NO_FIGURES
+
+
+def test_the_only_permit_is_the_read_only_tool_for_the_catalogues_metric_readers() -> None:
     policies = json.loads(cedarpy.policies_to_json_str(POLICIES.read_text()))
-    effects = [(p["effect"], p["action"]) for p in policies["staticPolicies"].values()]
-    assert effects == [
-        ("permit", {"op": "==", "entity": {"type": "Action", "id": READ_ONLY_TOOL}}),
-    ]
     assert policies["templates"] == {}
+    assert policies["templateLinks"] == []
+    (policy,) = policies["staticPolicies"].values()
+    personas = permitted_personas(policy)
+    assert len(personas) == len(set(personas))
+    assert sorted(personas) == READERS
+    assert {key: value for key, value in policy.items() if key != "conditions"} == {
+        "effect": "permit",
+        "principal": {"op": "is", "entity_type": "Persona"},
+        "action": {"op": "==", "entity": {"type": "Action", "id": READ_ONLY_TOOL}},
+        "resource": {"op": "is", "entity_type": "Metric"},
+        "annotations": {"id": "run-metric-query"},
+    }
 
 
-def test_the_listed_read_only_tool_is_allowed(persona: str) -> None:
+def test_the_personas_without_a_figure_grant_are_the_operator_and_the_proposer() -> None:
+    assert NOT_READERS == ["agent-operator", "proposer"]
+
+
+@pytest.mark.parametrize("persona", READERS)
+def test_the_listed_read_only_tool_is_allowed_to_a_metric_reader(persona: str) -> None:
     decision = asks(persona)
     assert decision == Decision(allowed=True, policies=("run-metric-query",))
     assert decision
+
+
+@pytest.mark.parametrize(
+    "persona", [*NOT_READERS, "no-such-persona", "", "Auditor", "auditor ", "*"]
+)
+def test_the_listed_read_only_tool_is_denied_to_anyone_else(persona: str) -> None:
+    decision = asks(persona)
+    assert denied(decision)
+    assert decision.policies == ()
+    assert decision.reasons == ("no policy permits run_metric_query (Deny)",)
 
 
 def test_a_declared_tool_no_policy_permits_is_denied(persona: str) -> None:
