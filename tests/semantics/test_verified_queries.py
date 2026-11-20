@@ -13,20 +13,25 @@ What is checked:
   the sample build (the committed samples built on the local engine) and, for the queries reading
   the contract reconciliation, also over the invented contracts of
   `tests/semantics/test_metrics.py` (a contract paid over its award, one held to an award other
-  than its award after revisions, a negative award, none of which the samples hold):
+  than its award after revisions, a negative award, one refunded below it, none of which the
+  samples hold, and a contract ending exactly on the running-contracts filter's day):
   - the SQL's columns are exactly the grain's and the metric's names;
   - neither side holds two rows for one grain value, and both hold the same grain values;
   - grain values are compared as text, after the SQL's are converted as MetricFlow converts the
     rows it reads (a date as midnight, a decimal as a double) and written as its CSV writes them;
   - metric values are compared as doubles, exactly, with no tolerance, and an empty value (null)
     equals only an empty value; row order is not compared;
-  - over the samples, `mf` must answer with at least one row holding a figure, and a stated
-    filter must change its answer, so neither side passes by being empty or unfiltered;
-- wrong SQL planted for each query (a row left out, a row twice, every figure a cent off, a grain
-  value rewritten) and for several queries (a filter or the Chicago condition on one side only,
-  payments with no date left out, a month for a year, a null made 0, the amount rate counted by
-  rows, unlike bases added; over the invented contracts: the unpaid part netted, awards not above
-  0 kept, the award after revisions for the award held to) is refused;
+  - over the samples and over the invented contracts, `mf` must answer with at least one row
+    holding a figure, and a stated filter must change its answer;
+- wrong SQL is refused when planted:
+  - in each query over the samples: a row left out, a row twice, every non-null figure raised by
+    0.01, and, on a query with a grain, a grain value rewritten;
+  - in the queries named for it over the samples: the Chicago condition left out, payments with
+    no date left out, the stated filter left out, a month for a year, a null made 0, the amount
+    rate counted by rows, unlike bases added;
+  - over the invented contracts, in each contract query whose text it applies to: the unpaid part
+    netted, awards not above 0 kept, the award after revisions for the award held to, `>` for `>=`
+    on the latest end date;
 - a version or owner changed in the metric's YAML and read back through dbt's parse is refused.
 
 Stated limits:
@@ -36,9 +41,11 @@ Stated limits:
 - `mf`'s CSV writes a null and an empty text alike, so a grain value of empty text and a null one
   compare equal;
 - the SQL is checked only over the committed samples and the invented contracts; the landed
-  build is not run here, so a difference only real data shows (such as a basis of whole years,
-  which the samples lack) is not caught, nor a filter, condition or grain whose wrong form gives
-  the same result over those rows;
+  build is not run here, so a difference only real data shows is not caught, nor a filter,
+  condition or grain whose wrong form gives the same result over those rows;
+- the whole-year branch of `constant_currency_spend` (a basis of whole fiscal years, such as the
+  Dutch outturn) is not exercised: the samples hold no whole year with rates, so a constant-currency
+  query that mishandles whole-year rows can pass;
 - the SQL is written for the local DuckDB build's table names and dialect, not BigQuery's.
 """
 
@@ -300,7 +307,11 @@ def test_the_verified_query_equals_mf_query(
 def test_the_contract_query_equals_mf_query_over_invented_contracts(
     invented: Build, invented_answers: dict[str, Rows], qid: str
 ) -> None:
-    assert verify(invented, BY_ID[qid], invented_answers[qid]) == []
+    query = BY_ID[qid]
+    mf_rows = invented_answers[qid]
+    # Not vacuous: mf answers with a figure.
+    assert any(r[query["metric"]] for r in mf_rows), mf_rows
+    assert verify(invented, query, mf_rows) == []
 
 
 @pytest.mark.parametrize("qid", [q["id"] for q in QUERIES if "where" in q])
@@ -308,6 +319,13 @@ def test_a_stated_filter_changes_the_answer_over_the_samples(
     build: Build, answers: dict[str, Rows], qid: str
 ) -> None:
     assert ask_mf(build, BY_ID[qid], filtered=False) != answers[qid]
+
+
+@pytest.mark.parametrize("qid", [q for q in CONTRACT_QUERIES if "where" in BY_ID[q]])
+def test_a_stated_filter_changes_the_answer_over_invented_contracts(
+    invented: Build, invented_answers: dict[str, Rows], qid: str
+) -> None:
+    assert ask_mf(invented, BY_ID[qid], filtered=False) != invented_answers[qid]
 
 
 def test_row_order_is_not_compared(build: Build, answers: dict[str, Rows]) -> None:
@@ -359,87 +377,87 @@ def test_a_wrong_result_is_refused(
     assert verify(build, query, answers[qid], GENERIC[plant](query["sql"], query)) != []
 
 
-# Wrong SQL for a query, as replacements in its text, and the build it is run over, the samples or
-# the invented contracts: (query, [(text, replacement), ...], build).
-PLANTED_SQL: dict[str, tuple[str, list[tuple[str, str]], str]] = {
+# Wrong SQL, as replacements in a query's text, over the samples for the queries named, each
+# where the samples tell it apart: {plant: (queries, [(text, replacement), ...])}.
+PLANTED_OVER_SAMPLES: dict[str, tuple[list[str], list[tuple[str, str]]]] = {
     "the-chicago-condition-left-out": (
-        "duplicate-payment-rate-by-month",
+        ["duplicate-payment-rate", "duplicate-payment-rate-by-month"],
         [("where entity_id = 'chicago'\n", "")],
-        "samples",
     ),
     "payments-with-no-date-left-out": (
-        "duplicate-payment-rate-by-month",
+        ["duplicate-payment-rate-by-month"],
         [
             (
                 "where entity_id = 'chicago'\n",
                 "where entity_id = 'chicago' and payment_date is not null\n",
             )
         ],
-        "samples",
     ),
     "the-stated-filter-left-out": (
-        "remaining-commitment-on-running-contracts",
+        ["remaining-commitment-on-running-contracts"],
         [("where last_ends_on >= date '2026-10-31'\n", "")],
-        "samples",
     ),
     "a-month-for-a-year": (
-        "spend-against-award-by-approval-year",
+        ["spend-against-award-by-approval-year"],
         [("date_trunc('year', first_approved_on)", "date_trunc('month', first_approved_on)")],
-        "samples",
-    ),
-    "the-unpaid-part-netted": (
-        "remaining-commitment",
-        [
-            (
-                "case when paid < award_held_to then award_held_to - paid else 0 end",
-                "award_held_to - paid",
-            )
-        ],
-        "invented",
-    ),
-    "awards-not-above-0-kept": (
-        "paid-over-award-by-break-class",
-        [("case when award_held_to > 0 then\n", "case when true then\n")],
-        "invented",
-    ),
-    "the-award-after-revisions-for-the-award-held-to": (
-        "spend-against-award",
-        [("award_held_to", "award_after_revisions")],
-        "invented",
     ),
     "a-null-made-0": (
-        "paid-over-award-by-break-class",
+        ["paid-over-award-by-break-class"],
         [("sum(\n", "coalesce(sum(\n"), (") as paid_over_award", "), 0) as paid_over_award")],
-        "samples",
     ),
     "the-amount-rate-by-rows": (
-        "duplicate-payment-amount-rate",
+        ["duplicate-payment-amount-rate"],
         [("case when is_repeat then amount else 0 end", "case when is_repeat then 1 else 0 end")],
-        "samples",
     ),
     "unlike-bases-added": (
-        "constant-currency-spend-by-entity",
+        ["constant-currency-spend-by-entity"],
         [("= 1\n", ">= 1\n")],
-        "samples",
     ),
 }
+# Wrong SQL over the invented contracts, planted in every contract query whose text holds each
+# text it replaces: {plant: [(text, replacement), ...]}.
+PLANTED_OVER_INVENTED: dict[str, list[tuple[str, str]]] = {
+    "the-unpaid-part-netted": [
+        (
+            "case when paid < award_held_to then award_held_to - paid else 0 end",
+            "award_held_to - paid",
+        )
+    ],
+    "awards-not-above-0-kept": [("case when award_held_to > 0 then\n", "case when true then\n")],
+    "the-award-after-revisions-for-the-award-held-to": [("award_held_to", "award_after_revisions")],
+    "the-end-date-edge-left-out": [("last_ends_on >= ", "last_ends_on > ")],
+}
+PLANTS = [
+    (plant, qid, "samples") for plant, (qids, _) in PLANTED_OVER_SAMPLES.items() for qid in qids
+] + [
+    (plant, qid, "invented")
+    for plant, edits in PLANTED_OVER_INVENTED.items()
+    for qid in CONTRACT_QUERIES
+    if all(text in BY_ID[qid]["sql"] for text, _ in edits)
+]
 
 
-@pytest.mark.parametrize("plant", list(PLANTED_SQL))
+def test_each_plant_over_the_invented_contracts_reaches_a_query() -> None:
+    planted = {plant for plant, _, over in PLANTS if over == "invented"}
+    assert planted == set(PLANTED_OVER_INVENTED)
+
+
+@pytest.mark.parametrize(("plant", "qid", "over"), PLANTS)
 def test_a_planted_wrong_sql_is_refused(
     build: Build,
     answers: dict[str, Rows],
     invented: Build,
     invented_answers: dict[str, Rows],
     plant: str,
+    qid: str,
+    over: str,
 ) -> None:
-    qid, replacements, over = PLANTED_SQL[plant]
     query = BY_ID[qid]
+    edits = PLANTED_OVER_INVENTED[plant] if over == "invented" else PLANTED_OVER_SAMPLES[plant][1]
     wrong = query["sql"]
-    for text, replacement in replacements:
+    for text, replacement in edits:
         assert text in wrong, f"{qid}'s SQL moved: update {plant}"
         wrong = wrong.replace(text, replacement)
-    assert verify(build, query, answers[qid], query["sql"]) == []
     if over == "invented":
         assert verify(invented, query, invented_answers[qid], wrong) != []
     else:
