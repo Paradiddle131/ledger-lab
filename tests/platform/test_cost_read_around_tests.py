@@ -14,7 +14,11 @@ whether it sees the lab's project, and logs the answer. What is checked:
 - in the own environment, each route in BYPASSES (a `COST_CHECK` or `PYTEST` assignment on make's
   command line, in MAKEFLAGS or under `make -e`, a target-specific override by `--eval` or by a
   file in `MAKEFILES`, and an extra `-f` makefile overriding both variables) still leaves both
-  reads around pytest, and `make test` with a `LOADOUT` that holds a quote does too;
+  reads around pytest; a `LOADOUT` holding a quote, given on make's command line, reaches pytest
+  as given, and with none given pytest gets the Makefile's default; a `SHELL` or `.SHELLFLAGS` set
+  for the `test` target, by `--eval` or a `MAKEFILES` file, fails make before any read or pytest;
+  under `.POSIX` a failed pytest is still read after; the `test` recipe's command lines hold no
+  make variable, and run each Python script with `-E`;
 - the invented project id is not in make's output, in each of these runs.
 
 No GCP call and no real test suite runs: the stub stands in for every `uv` command, and only
@@ -58,13 +62,13 @@ def log(event):
         file.write(event + "\\n")
 if args[:1] == ["sync"]:
     log("sync")
-elif line == "run --no-sync python platform/gcp_project.py":
+elif line == "run --no-sync python -E platform/gcp_project.py":
     log("decider")
     if "FAKE_DECIDER" in os.environ:
         print(os.environ["FAKE_DECIDER"])
         sys.exit(0)
     sys.exit(subprocess.run([sys.executable, "platform/gcp_project.py"]).returncode)
-elif line == "run --no-sync python platform/cost_check.py":
+elif line == "run --no-sync python -E platform/cost_check.py":
     log("cost")
     counter = os.environ["FAKE_LOG"] + ".cost"
     done = int(open(counter).read()) if os.path.exists(counter) else 0
@@ -75,6 +79,8 @@ elif args[:2] == ["run", "pytest"]:
     sys.path.insert(0, "platform")
     from gcp_project import lab_project_or_none
     log("pytest:" + ("own" if lab_project_or_none() is not None else "elsewhere"))
+    with open(os.environ["FAKE_LOG"] + ".loadout", "w") as file:
+        file.write(os.environ.get("LOADOUT", "<unset>"))
     sys.exit(int(os.environ.get("FAKE_PYTEST_CODE", "0")))
 sys.exit(0)
 """
@@ -230,7 +236,7 @@ BYPASSES = {
 
 @pytest.mark.parametrize("target", INVOCATIONS, ids=INVOCATION_IDS)
 @pytest.mark.parametrize(("extra", "env"), BYPASSES.values(), ids=BYPASSES.keys())
-def test_no_assignment_from_outside_the_makefile_drops_a_read(
+def test_the_listed_routes_leave_both_reads_around_pytest(
     tmp_path: Path, extra: list[str], env: dict[str, str], target: list[str]
 ) -> None:
     (tmp_path / "extra.mk").write_text(EXTRA_MK)
@@ -242,7 +248,90 @@ def test_no_assignment_from_outside_the_makefile_drops_a_read(
     assert events == BRACKETED
 
 
-def test_a_loadout_holding_a_quote_reaches_pytest_without_ending_the_line(tmp_path: Path) -> None:
-    result, events = run(tmp_path, OWN, f"LOADOUT={tmp_path}/loadout'; exit 0; '", "test")
+def test_a_loadout_holding_a_quote_reaches_pytest_as_given(tmp_path: Path) -> None:
+    quoted = f"{tmp_path}/loadout'; exit 0; '"
+    result, events = run(tmp_path, OWN, f"LOADOUT={quoted}", "test")
     assert result.returncode == 0, result.stdout + result.stderr
     assert events == BRACKETED
+    assert (tmp_path / "uv.log.loadout").read_text() == quoted
+
+
+def test_with_no_loadout_given_pytest_gets_the_makefiles_default(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "CLAUDE.md").write_text(
+        "The collection of rules is cloned at `/example/rules-clone` (stand-in).\n"
+    )
+    env = environment(tmp_path, OWN) | {"HOME": str(home)}
+    env.pop("LOADOUT", None)
+    tool = shutil.which("make")
+    assert tool is not None
+    result = subprocess.run(
+        [tool, "--no-print-directory", "test"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=REPO,
+        env=env,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert Path(env["FAKE_LOG"] + ".loadout").read_text() == "/example/rules-clone"
+
+
+SHELL_ROUTES = {
+    "eval-shell": ["--eval=test: SHELL = /bin/true"],
+    "eval-shellflags": ["--eval=test: .SHELLFLAGS = -c true"],
+    "makefiles-shell": ["@MK@"],
+}
+
+
+@pytest.mark.parametrize("extra", SHELL_ROUTES.values(), ids=SHELL_ROUTES.keys())
+def test_a_shell_set_for_the_test_target_stops_make_before_any_read(
+    tmp_path: Path, extra: list[str]
+) -> None:
+    (tmp_path / "shell.mk").write_text("test: SHELL = /bin/true\n")
+    env: dict[str, str] = {}
+    if extra == ["@MK@"]:
+        extra, env = [], {"MAKEFILES": str(tmp_path / "shell.mk")}
+    env_all = environment(tmp_path, OWN | env)
+    tool = shutil.which("make")
+    assert tool is not None
+    result = subprocess.run(
+        [tool, "--no-print-directory", f"LOADOUT={tmp_path / 'loadout'}", *extra, "test"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=REPO,
+        env=env_all,
+        timeout=120,
+    )
+    log = Path(env_all["FAKE_LOG"])
+    events = log.read_text().splitlines() if log.exists() else []
+    assert result.returncode != 0
+    assert "SHELL or .SHELLFLAGS" in result.stderr
+    assert not [e for e in events if e != "sync"]
+
+
+def test_under_posix_a_failed_pytest_is_still_read_after(tmp_path: Path) -> None:
+    result, events = run(tmp_path, OWN, "--eval=.POSIX:", "test", FAKE_PYTEST_CODE="1")
+    assert result.returncode != 0
+    assert events == BRACKETED
+
+
+def test_the_test_recipe_holds_no_make_variable_and_runs_python_with_e() -> None:
+    text = (REPO / "Makefile").read_text()
+    start = text.index("\ntest: sync\n") + len("\ntest: sync\n")
+    lines = []
+    for line in text[start:].splitlines():
+        if not line.startswith("\t"):
+            break
+        lines.append(line)
+    commands = [line for line in lines if not line.strip().startswith("$(if ")]
+    assert commands, "no test recipe"
+    for line in commands:
+        bare = line.replace("$$", "")
+        assert "$(" not in bare and "${" not in bare, line
+    body = "\n".join(commands)
+    assert body.count("python -E platform/") == 3
+    assert "python platform/" not in body
