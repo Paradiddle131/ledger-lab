@@ -70,14 +70,21 @@ def mf(build: Build, *args: str) -> subprocess.CompletedProcess[str]:
 def mf_query(
     build: Build, metrics: list[str], group_by: list[str] | None = None, where: str | None = None
 ) -> list[dict[str, str]]:
-    """`mf query` of the metrics, one dict per row of its CSV output, values as `mf` writes them."""
+    """`mf query` of the metrics, one dict per row of its CSV output, values as `mf` writes them.
+
+    `mf` writes no CSV for an empty result, so the file is removed before each run and an empty
+    result, which `mf` reports in its output, gives no rows rather than an earlier query's."""
     out = build.cwd / "metricflow" / "query.csv"
     args = ["query", "--metrics", ",".join(metrics), "--csv", str(out)]
     if group_by:
         args += ["--group-by", ",".join(group_by), "--order", ",".join(group_by)]
     if where:
         args += ["--where", where]
+    out.unlink(missing_ok=True)
     result = mf(build, *args)
     assert result.returncode == 0, result.stdout + result.stderr
+    if not out.exists():
+        assert "Query returned an empty result set" in result.stdout + result.stderr, result.stdout
+        return []
     with out.open(newline="") as rows:
         return list(csv.DictReader(rows))

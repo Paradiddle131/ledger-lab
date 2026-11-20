@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Verified queries, one SQL answer per common question on a governed metric",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verified_queries"],
+  "$defs": {
+    "slug": {"type": "string", "pattern": "^[a-z][a-z0-9-]*[a-z0-9]$"},
+    "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*[a-z0-9]$"},
+    "line": {
+      "description": "One line of plain text: no line break, no leading or trailing space.",
+      "type": "string",
+      "pattern": "^\\S(?:[^\\n]*\\S)?$"
+    }
+  },
+  "properties": {
+    "verified_queries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "question", "metric", "version", "owner", "group_by", "sql"],
+        "properties": {
+          "id": {"$ref": "#/$defs/slug"},
+          "question": {"$ref": "#/$defs/line"},
+          "metric": {
+            "description": "The MetricFlow metric the query answers, of role headline.",
+            "$ref": "#/$defs/name"
+          },
+          "version": {
+            "description": "The metric's version, as its config.meta holds it.",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "owner": {
+            "description": "The metric's owner, as its config.meta holds it.",
+            "$ref": "#/$defs/slug"
+          },
+          "group_by": {
+            "description": "The grain: MetricFlow group-by names, also the SQL's columns.",
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"$ref": "#/$defs/name"}
+          },
+          "where": {
+            "description": "The filter, in MetricFlow's where syntax, the SQL also applies.",
+            "$ref": "#/$defs/line"
+          },
+          "sql": {
+            "description": "One select over the local build, returning the grain's columns and the metric's.",
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}
