@@ -11,8 +11,10 @@ whether it sees the lab's project, and logs the answer. What is checked:
   `elsewhere` stops make before pytest; a failed pytest elsewhere fails make;
 - with each lab variable given on make's command line, in both directions, the cost is read exactly
   when the pytest the stub saw has the lab's project;
-- in the own environment, `COST_CHECK` replaced on make's command line, through MAKEFLAGS, or from
-  the environment under `make -e` still leaves the reads around pytest;
+- in the own environment, each route in BYPASSES (a `COST_CHECK` or `PYTEST` assignment on make's
+  command line, in MAKEFLAGS or under `make -e`, a target-specific override by `--eval` or by a
+  file in `MAKEFILES`, and an extra `-f` makefile overriding both variables) still leaves both
+  reads around pytest, and `make test` with a `LOADOUT` that holds a quote does too;
 - the invented project id is not in make's output, in each of these runs.
 
 No GCP call and no real test suite runs: the stub stands in for every `uv` command, and only
@@ -210,18 +212,37 @@ def test_a_variable_on_makes_command_line_reaches_the_decider_as_it_reaches_pyte
     assert events == (BRACKETED if seen == "own" else ["pytest:elsewhere"])
 
 
-OVERRIDES = {
-    "command-line": (["COST_CHECK=:"], {}),
-    "makeflags": ([], {"MAKEFLAGS": "COST_CHECK=:"}),
-    "environment-e": (["-e"], {"COST_CHECK": ":"}),
+EXTRA_MK = "override COST_CHECK = :\nPYTEST = exit\n"
+TARGET_MK = "test: override COST_CHECK = :\ntest: override PYTEST = exit\n"
+# Each route: (make arguments, environment), `@TMP@` replaced by the test's temporary folder.
+BYPASSES = {
+    "cost-command-line": (["COST_CHECK=:"], {}),
+    "cost-makeflags": ([], {"MAKEFLAGS": "COST_CHECK=:"}),
+    "cost-environment-e": (["-e"], {"COST_CHECK": ":"}),
+    "pytest-command-line": (["PYTEST=exit"], {}),
+    "pytest-makeflags": ([], {"MAKEFLAGS": "PYTEST=exit"}),
+    "pytest-environment-e": (["-e"], {"PYTEST": "exit"}),
+    "eval-target": (["--eval=test: override COST_CHECK = :"], {}),
+    "makefiles-target": ([], {"MAKEFILES": "@TMP@/target.mk"}),
+    "extra-makefile": (["-f", "Makefile", "-f", "@TMP@/extra.mk"], {}),
 }
 
 
 @pytest.mark.parametrize("target", INVOCATIONS, ids=INVOCATION_IDS)
-@pytest.mark.parametrize(("extra", "env"), OVERRIDES.values(), ids=OVERRIDES.keys())
-def test_the_cost_read_cannot_be_replaced_from_outside_the_makefile(
+@pytest.mark.parametrize(("extra", "env"), BYPASSES.values(), ids=BYPASSES.keys())
+def test_no_assignment_from_outside_the_makefile_drops_a_read(
     tmp_path: Path, extra: list[str], env: dict[str, str], target: list[str]
 ) -> None:
-    result, events = run(tmp_path, OWN | env, *extra, *target)
+    (tmp_path / "extra.mk").write_text(EXTRA_MK)
+    (tmp_path / "target.mk").write_text(TARGET_MK)
+    swap = lambda text: text.replace("@TMP@", str(tmp_path))  # noqa: E731
+    args = [swap(a) for a in extra]
+    result, events = run(tmp_path, OWN | {k: swap(v) for k, v in env.items()}, *args, *target)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert events == BRACKETED
+
+
+def test_a_loadout_holding_a_quote_reaches_pytest_without_ending_the_line(tmp_path: Path) -> None:
+    result, events = run(tmp_path, OWN, f"LOADOUT={tmp_path}/loadout'; exit 0; '", "test")
     assert result.returncode == 0, result.stdout + result.stderr
     assert events == BRACKETED

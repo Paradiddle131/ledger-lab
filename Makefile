@@ -36,14 +36,17 @@ typecheck: sync
 # tests/platform/test_cost_read_around_tests.py checks these over a stub `uv`. Limits: an interrupt
 # (Ctrl-C) stops the line, the read after included; pytest runs in other targets (`stack-test`,
 # `reconcile-landed`, `bigquery-personas` and the like) have no cost read around them.
-PYTEST = LOADOUT='$(LOADOUT)' uv run pytest
-# `override` keeps the cost read from being replaced from make's command line, MAKEFLAGS or `make -e`.
-override COST_CHECK = uv run --no-sync python platform/cost_check.py
+# The recipe holds no make variable, so no assignment from make's command line, MAKEFLAGS, the
+# environment, `--eval` or `MAKEFILES`, global or for this target, changes the reads or pytest;
+# LOADOUT reaches pytest exported, never spliced into the shell line. Not closed, as with any
+# makefile: a `SHELL` or `.SHELLFLAGS` given to make, `-o test`, `-i`, `-n`, `-t`, another makefile
+# that replaces this recipe, and a `uv` earlier on PATH.
+export LOADOUT
 
 test: sync
 	case "$$(uv run --no-sync python platform/gcp_project.py)" in \
-	own) $(COST_CHECK) || exit 1; $(PYTEST); tests=$$?; $(COST_CHECK) || exit 1; exit $$tests ;; \
-	elsewhere) $(PYTEST) ;; \
+	own) uv run --no-sync python platform/cost_check.py || exit 1; uv run pytest; tests=$$?; uv run --no-sync python platform/cost_check.py || exit 1; exit $$tests ;; \
+	elsewhere) uv run pytest ;; \
 	*) echo "test: platform/gcp_project.py answered neither own nor elsewhere" >&2; exit 1 ;; \
 	esac
 
@@ -120,7 +123,7 @@ stack-test: sync stack-up
 # call, while LEDGER_LAB_GCP_PROJECT is unset; no GCP call and a failure, not checked, in a session
 # that carries another lab's GCP_PROJECT.
 cost-check:
-	@$(COST_CHECK)
+	@uv run --no-sync python platform/cost_check.py
 
 # The reconciliation of Chicago's payments to their contracts' awards over the landed files: every
 # class's count and dollars, and each break class's digest, must equal the reviewed baseline. Needs

@@ -4,7 +4,8 @@ The review skill's `tier.sh` reads `REVIEW.md` from the default branch, so a cha
 of it is judged here instead: this file parses it by the rules `tier.sh` states (`parse` and
 `glob_re` below, the one copy of them in this repository) and pins the lenses of the paths in
 PINNED (`ingest/load.py`, `ingest/bucket.py`, `access/personas.yaml`, `platform/cost_check.py`,
-`agent/policy/tools.cedar`, `semantics/verified_queries.yaml`).
+`agent/policy/tools.cedar`, `agent/policy/tools.py`, `semantics/verified_queries.yaml`,
+`semantics/context.json`).
 
 Checked:
 - `REVIEW.md` parses: `parse` raises where `tier.sh` would warn and count every path as
@@ -65,7 +66,9 @@ PINNED = {
     },
     "platform/cost_check.py": {"control-prober", "guardrail-reviewer"},
     "agent/policy/tools.cedar": {"claims-auditor", "control-prober", "guardrail-reviewer"},
+    "agent/policy/tools.py": {"claims-auditor", "control-prober", "guardrail-reviewer"},
     "semantics/verified_queries.yaml": {"claims-auditor", "control-prober", "guardrail-reviewer"},
+    "semantics/context.json": {"claims-auditor", "control-prober", "guardrail-reviewer"},
 }
 
 
