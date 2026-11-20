@@ -1,0 +1,27 @@
+// The entities and tools the tool policy (tools.cedar) can name.
+// A request that names an entity type or action not declared here, or a context of another shape,
+// is refused before any policy is evaluated.
+
+// A persona of access/personas.yaml, by its id: the identity the agent acts for.
+entity Persona;
+
+// A governed metric, by its name.
+entity Metric;
+
+// One entity's ledger, by the entity's id in access/personas.yaml.
+entity Ledger;
+
+// Read-only: run a governed metric's query.
+action run_metric_query appliesTo {
+  principal: [Persona],
+  resource: [Metric],
+  context: { session: String },
+};
+
+// A write: draft a journal entry for a named human to approve.
+// No policy permits it, so it is denied by default.
+action propose_entry appliesTo {
+  principal: [Persona],
+  resource: [Ledger],
+  context: { session: String },
+};
