@@ -12,13 +12,17 @@ carrying its reasons, including:
 - the engine's `Deny`: no permit matches, or a forbid does;
 - a request the schema refuses (the engine's `NoDecision`): an action or entity type it does not
   declare, an entity type the action does not apply to, a context of another shape;
-- an argument of the wrong Python type;
+- a principal or resource that is not an `Entity` of two strings, an action that is not a string,
+  or a context that is not a mapping;
 - policies or a schema that do not parse, do not validate or cannot be read;
-- an `Exception` the engine raises, or an answer of a shape this module does not know.
+- an `Exception` the engine raises, including on a context value it cannot convert;
+- an answer naming a decision `cedarpy` does not define, or whose errors or reasons are not lists
+  of strings.
 
 Limits: an exception outside `Exception` (`KeyboardInterrupt`, `SystemExit`) propagates; entities
-go to the engine with no attributes and no parents, so no policy can read either; which identities
-and resources exist is not checked here, only their types.
+go to the engine with no attributes and no parents, so no policy can read either; this module checks
+the types of the principal and resource, not their ids: the policy names the personas it permits by
+id, and no metric's id is checked.
 """
 
 import functools
@@ -61,6 +65,14 @@ class PolicyInvalid(ValueError):
     """Policies that do not validate against the schema."""
 
 
+class RequestMalformed(TypeError):
+    """A request argument of the wrong Python type."""
+
+
+class AnswerMalformed(TypeError):
+    """An engine answer whose diagnostics are not of the shape `cedarpy` documents."""
+
+
 def _deny(*reasons: str, policies: tuple[str, ...] = ()) -> Decision:
     return Decision(allowed=False, policies=policies, reasons=reasons)
 
@@ -69,8 +81,15 @@ def _entity(value: object, role: str) -> dict[str, str]:
     if not (
         isinstance(value, Entity) and isinstance(value.type, str) and isinstance(value.id, str)
     ):
-        raise TypeError(f"the {role} must be an Entity of two strings, not {value!r}")
+        raise RequestMalformed(f"the {role} must be an Entity of two strings, not {value!r}")
     return {"type": value.type, "id": value.id}
+
+
+def _strings(value: object, what: str) -> tuple[str, ...]:
+    """The engine's list of strings as a tuple; any other shape raises `AnswerMalformed`."""
+    if not (isinstance(value, list) and all(isinstance(item, str) for item in value)):
+        raise AnswerMalformed(f"the engine's {what} are not a list of strings: {value!r}")
+    return tuple(value)
 
 
 class ToolPolicy:
@@ -97,6 +116,8 @@ class ToolPolicy:
         """Whether `principal` may call the tool `action` on `resource`; any failure is a denial."""
         try:
             return self._decide(principal, action, resource, context)
+        except RequestMalformed as error:
+            return _deny(f"the request is malformed: {error}")
         except Exception as error:
             return _deny(f"the engine raised {type(error).__name__}: {error}")
 
@@ -104,9 +125,9 @@ class ToolPolicy:
         self, principal: object, action: object, resource: object, context: object
     ) -> Decision:
         if not isinstance(action, str):
-            raise TypeError(f"the action must be a string, not {action!r}")
+            raise RequestMalformed(f"the action must be a string, not {action!r}")
         if not isinstance(context, Mapping):
-            raise TypeError(f"the context must be a mapping, not {context!r}")
+            raise RequestMalformed(f"the context must be a mapping, not {context!r}")
         request = {
             "principal": _entity(principal, "principal"),
             "action": {"type": "Action", "id": action},
@@ -115,9 +136,12 @@ class ToolPolicy:
         }
         result = cedarpy.is_authorized(request, self._policies, [], schema=self._schema)
         diagnostics = result.diagnostics
-        errors = tuple(str(error) for error in diagnostics.errors)
-        reasons = tuple(str(reason) for reason in diagnostics.reasons)
-        named = tuple(str(diagnostics.id_annotations_by_reason.get(r, r)) for r in reasons)
+        errors = _strings(diagnostics.errors, "errors")
+        reasons = _strings(diagnostics.reasons, "reasons")
+        annotations = diagnostics.id_annotations_by_reason
+        if not isinstance(annotations, dict):
+            raise AnswerMalformed(f"the engine's annotations are not a dict: {annotations!r}")
+        named = _strings([annotations.get(r, r) for r in reasons], "policy names")
         decision = result.decision
         if decision is not cedarpy.Decision.Allow:
             if errors:
