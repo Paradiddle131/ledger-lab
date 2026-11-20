@@ -54,6 +54,18 @@ class Recorder:
         return self._model.step(turn)
 
 
+@pytest.fixture(params=["local", "bigquery"])
+def engine(request: pytest.FixtureRequest) -> AsPersona:
+    """The connection-maker the agent asks through: `as_persona` on the local engine, or BigQuery,
+    skipped before any build, so the controls test sees it skip quickly; nothing here calls GCP."""
+    if request.param == "bigquery":
+        pytest.skip(
+            "the agent's BigQuery mode is not built: the persona's warehouse grants are not"
+            " exercised"
+        )
+    return request.getfixturevalue("as_persona")
+
+
 @pytest.fixture
 def scripted() -> Model:
     return model_from_config({}, load_context())
@@ -69,12 +81,12 @@ def values(answer: Answer) -> list[tuple[Any, ...]]:
 
 
 def test_two_personas_asking_the_same_question_get_different_rows(
-    as_persona: AsPersona, scripted: Model
+    engine: AsPersona, scripted: Model
 ) -> None:
     """The local engine's proof that a query runs as the asker: Chicago's accountant gets a share
     of Chicago's rows, the UK accountant, whose database holds no Chicago row, the null of an empty
     sum; each connection was opened for the persona asking, and for no other."""
-    recorder = Recorder(as_persona, scripted)
+    recorder = Recorder(engine, scripted)
     chicago = asked(recorder, CHICAGO)
     uk = asked(recorder, UK)
     assert recorder.opened == [CHICAGO, UK]
@@ -85,16 +97,17 @@ def test_two_personas_asking_the_same_question_get_different_rows(
     assert chicago.persona == CHICAGO and uk.persona == UK
 
 
-@pytest.mark.parametrize("missing", [None, "", "   ", 7])
-def test_a_question_without_a_persona_gets_no_answer(
-    as_persona: AsPersona, scripted: Model, missing: Any
-) -> None:
+# What stands for no persona: none at all, an empty or blank id, and a value that is no id.
+MISSING: list[Any] = [None, "", "   ", 7]
+
+
+def test_a_question_without_a_persona_gets_no_answer(engine: AsPersona, scripted: Model) -> None:
     """No persona raises before the model is asked or a connection is opened."""
-    recorder = Recorder(as_persona, scripted)
-    with pytest.raises(NoPersonaError):
-        asked(recorder, missing)
-    assert recorder.opened == []
-    assert recorder.turns == []
+    for missing in MISSING:
+        recorder = Recorder(engine, scripted)
+        with pytest.raises(NoPersonaError):
+            asked(recorder, missing)
+        assert (missing, recorder.opened, recorder.turns) == (missing, [], [])
 
 
 def test_a_temporary_table_on_the_persona_connection_does_not_shadow_its_rows(
