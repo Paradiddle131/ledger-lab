@@ -50,7 +50,7 @@ test: export LOADOUT := $(LOADOUT)
 
 test: sync
 	$(if $(filter-out /bin/sh,$(SHELL))$(filter-out -c -ec,$(.SHELLFLAGS)),$(error test: SHELL or .SHELLFLAGS is not make's own))
-	case "$$(uv run --no-sync python -E platform/gcp_project.py)" in \
+	case "$$(uv run --no-sync python platform/gcp_project.py)" in \
 	own) uv run --no-sync python -E platform/cost_check.py || exit 1; tests=0; uv run pytest || tests=$$?; uv run --no-sync python -E platform/cost_check.py || exit 1; exit $$tests ;; \
 	elsewhere) uv run pytest ;; \
 	*) echo "test: platform/gcp_project.py answered neither own nor elsewhere" >&2; exit 1 ;; \
