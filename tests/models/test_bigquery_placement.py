@@ -67,6 +67,21 @@ def test_the_bigquery_parse_runs_once_more_after_an_unset_node_relation(
     assert parses(count) == 2
 
 
+def test_the_bigquery_parse_fails_another_parse_error_after_one_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    count = tmp_path / "runs"
+    stepped(monkeypatch, count, 0)
+    tree = copy_project(tmp_path / "tree")
+    (tree / "models" / "models" / "probe.sql").write_text("select 1 as a {{\n")
+    with pytest.raises(versions.Unreadable) as raised:
+        outcome(tree, tmp_path / "bigquery")
+    assert parses(count) == 1
+    message = str(raised.value)
+    assert message.startswith("dbt could not parse the working tree on a BigQuery target (")
+    assert "second parse" not in message
+
+
 def test_the_bigquery_parse_fails_when_its_second_run_leaves_node_relation_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

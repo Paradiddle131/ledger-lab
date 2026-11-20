@@ -793,6 +793,15 @@ def payments_on(condition: str) -> Edit:
 
 
 PAYMENTS_MOVED = f"{ON_BIGQUERY}{PAYMENTS_NODE} lands in payments, {ROUTE_HELD} intermediate"
+
+
+def reads_invocation(path: str, name: str) -> str:
+    return (
+        f"{path}: its Jinja reads {name}, which differs between the gate's parse and a real build,"
+        " which the gate refuses"
+    )
+
+
 ROUTING_REFUSED: dict[str, tuple[Edit, list[str]]] = {
     "a function built in a product's dataset": (
         lambda files: files.update(
@@ -851,6 +860,49 @@ ROUTING_REFUSED: dict[str, tuple[Edit, list[str]]] = {
             }
         ),
         ["an on-run hook of the project runs SQL no parse places, which the gate refuses"],
+    ),
+    "a config() call only a command other than parse reaches": (
+        payments_on("flags.WHICH != 'parse'"),
+        [reads_invocation(PAYMENTS_SQL, "flags")],
+    ),
+    "a config() call only a full-refresh build reaches": (
+        payments_on("should_full_refresh()"),
+        [reads_invocation(PAYMENTS_SQL, "should_full_refresh")],
+    ),
+    "a config() call only a build storing failures reaches": (
+        payments_on("should_store_failures()"),
+        [reads_invocation(PAYMENTS_SQL, "should_store_failures")],
+    ),
+    "a config() call only the invocation's arguments reach": (
+        payments_on("invocation_args_dict.get('which') == 'build'"),
+        [reads_invocation(PAYMENTS_SQL, "invocation_args_dict")],
+    ),
+    "a generic test's schema that renders by the command": (
+        replaced(
+            CHICAGO_DOCS,
+            "          - not_null\n      - name: revision_number",
+            "          - not_null:\n              config:\n                schema: \"{{ 'payments'"
+            " if flags.WHICH == 'build' else none }}\"\n"
+            "      - name: revision_number",
+        ),
+        [reads_invocation(CHICAGO_DOCS, "flags")],
+    ),
+    "a project macro that reads the invocation": (
+        project_macro(
+            "{% macro place() %}{{ return('payments' if invocation_id else none) }}{% endmacro %}\n"
+        ),
+        [reads_invocation(PLACE_MACRO, "invocation_id")],
+    ),
+    "a pre-hook on a model": (
+        replaced(
+            GROUP_TOTALS_SQL,
+            "\nselect",
+            "\n{{ config(pre_hook='create table payments.copy as select 1') }}\nselect",
+        ),
+        [
+            f"{ON_BIGQUERY}{GROUP_TOTALS_NODE} sets pre_hook, which runs SQL no parse places,"
+            " which the gate refuses"
+        ],
     ),
     "a config() call only the BigQuery output's name reaches": (
         payments_on("target.name == 'bigquery'"),
@@ -1276,13 +1328,17 @@ def test_an_alias_on_a_metric_model_is_a_changed_definition(tmp_path: Path) -> N
 def test_the_routing_names_declared_product_datasets_and_the_project_file_implements_it() -> None:
     """Each routed dataset is one platform/gcp/warehouse.tf declares for a data product (its
     `datasets` local: the products' ids with `_` for `-`), each route's tables are that product's
-    `tables` in access/personas.yaml, the committed macro is the gate's own text, and the project
-    file's `+schema` settings are exactly the routes."""
+    `tables` in access/personas.yaml, none is a product of `entity` scope (its rows wait on their
+    row access policies), the committed macro is the gate's own text, and the project file's
+    `+schema` settings are exactly the routes."""
     personas = yaml.safe_load((versions.REPO / "access" / "personas.yaml").read_text())
     products = {p["id"].replace("-", "_"): p for p in personas["data_products"]}
     for route in versions.ROUTES.values():
         assert route.dataset in products
         assert sorted(route.tables) == sorted(products[route.dataset]["tables"])
+        # A dataset read reaches every row of a table there with no row access policies, so an
+        # entity-scoped product is routed only in the change that creates its policies.
+        assert products[route.dataset]["scope"] != "entity", route
     macros = (versions.REPO / SCHEMA_MACRO_FILE).read_text()
     assert macros.count(versions.SCHEMA_MACRO) == 1
     project = yaml.safe_load((versions.REPO / PROJECT_FILE).read_text())

@@ -74,6 +74,11 @@ nodes are held to. The placement configs (`PLACEMENT`) are `schema`, `alias`, `e
     refused (dbt's own prefixes it with the profile's dataset).
 - On either tree, a model, seed, snapshot or data test of the project that the local parse
   disables is refused (a disabled metric or semantic model is read as gone, as before).
+- On either tree, Jinja in any file of the tree dbt reads that names what dbt knows of its own
+  invocation (`INVOCATION`: `flags`, `invocation_args_dict`, `invocation_id`, and dbt's macros
+  `should_full_refresh` and `should_store_failures`, which read a flag while the project is
+  parsed) is refused: both parses run `dbt parse`, so a placement turning on the command or its
+  flags would be read as a parse gives it, not as a real build's.
 - On the working tree: a model, seed or snapshot's `schema` is the dataset `ROUTES` gives its
   folder, and none outside those folders; a routed folder's relation names (an alias, else the
   node's name) are its route's tables, each built once.
@@ -103,7 +108,10 @@ Stated limits of the routing: a placement config dbt-bigquery adds after the loc
 refused by the local rules until it is listed (a test compares the listed names with the locked
 adapter's `_ALIASES`), though the outcome check still sees where it places a node; a placement that
 turns on the environment, the clock or command-line `--vars` is read as the gate's fixed
-environment gives it, not as a real build's; one that turns on the project or region being one
+environment gives it, not as a real build's, and the BigQuery output's settings the environment
+renders (its method and token) as the probes set them (`PROBED`), not as a real build's; one that
+reads the invocation by another name than `INVOCATION`'s is read as a parse gives it; one that
+turns on the project or region being one
 named value (the real project's id, which no file may hold, or a third region) is read as the two
 probes give it; SQL a node's Jinja runs through `run_query` or a `statement` block when dbt
 executes it (a parse does not), and a project macro that overrides `ref` or `source` (which dbt
@@ -296,6 +304,20 @@ SEMANTIC_KEYS = ("semantic_models", "metrics")
 # The schema-file keys of what a semantic model can read or a time spine can be.
 READ_KEYS = ("models", "seeds", "snapshots")
 JINJA = ("{{", "{%", "{#")
+# What Jinja can read of the dbt invocation itself, which differs between the gate's `dbt parse`
+# and a real build (`flags.WHICH`, `--full-refresh`, `--store-failures` and the rest): dbt's
+# `flags`, `invocation_args_dict` and `invocation_id`, and dbt's own macros that read a flag while a
+# project is parsed. A placement turning on any of them is not the build's, so the gate refuses each
+# read by name, in every file of the tree dbt reads.
+INVOCATION = (
+    "flags",
+    "invocation_args_dict",
+    "invocation_id",
+    "should_full_refresh",
+    "should_store_failures",
+)
+JINJA_SPAN = re.compile(r"\{\{.*?\}\}|\{%.*?%\}", re.DOTALL)
+INVOCATION_READ = re.compile(r"\b(?:" + "|".join(INVOCATION) + r")\b")
 # Git's modes for a file and an executable file; anything else (a link, a submodule) is refused.
 FILE_MODES = ("100644", "100755")
 DUCKDB_FILE = "ledger_lab.duckdb"
@@ -637,6 +659,18 @@ def jinja_at(
                 yield ".".join(str(p) for p in path)
 
 
+def invocation_reads(path: str, text: str) -> list[str]:
+    """What the gate refuses of a file's Jinja reading the dbt invocation (`INVOCATION`)."""
+    read = sorted(
+        {name for span in JINJA_SPAN.findall(text) for name in INVOCATION_READ.findall(span)}
+    )
+    return [
+        f"{path}: its Jinja reads {name}, which differs between the gate's parse and a real build,"
+        " which the gate refuses"
+        for name in read
+    ]
+
+
 def parse_and_refuse(project: Path, report: Path) -> int:
     """Run in a process of its own: `dbt parse` of the project with the network refused, writing
     to `report` the project's vars, dbt's error class and in-tree path when it fails, and what dbt
@@ -764,9 +798,10 @@ def parse_and_refuse(project: Path, report: Path) -> int:
             # A second guard: the path settings checked before the parse keep dbt in the tree.
             refused.append("dbt read a file outside the tree")
             continue
+        path = found_at.relative_to(tree).as_posix()
+        refused += invocation_reads(path, found_at.read_text(errors="replace"))
         if not isinstance(file, SchemaSourceFile):
             continue
-        path = found_at.relative_to(tree).as_posix()
         for key, entries in (file.dict_from_yaml or {}).items():
             if key not in SEMANTIC_KEYS and key not in READ_KEYS:
                 continue
