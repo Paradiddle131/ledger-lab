@@ -37,7 +37,8 @@ typecheck: sync
 # (Ctrl-C) stops the line, the read after included; pytest runs in other targets (`stack-test`,
 # `reconcile-landed`, `bigquery-personas` and the like) have no cost read around them.
 PYTEST = LOADOUT='$(LOADOUT)' uv run pytest
-COST_CHECK = uv run --no-sync python platform/cost_check.py
+# `override` keeps the cost read from being replaced from make's command line, MAKEFLAGS or `make -e`.
+override COST_CHECK = uv run --no-sync python platform/cost_check.py
 
 test: sync
 	case "$$(uv run --no-sync python platform/gcp_project.py)" in \

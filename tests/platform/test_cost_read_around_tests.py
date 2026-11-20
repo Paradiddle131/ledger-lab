@@ -11,6 +11,8 @@ whether it sees the lab's project, and logs the answer. What is checked:
   `elsewhere` stops make before pytest; a failed pytest elsewhere fails make;
 - with each lab variable given on make's command line, in both directions, the cost is read exactly
   when the pytest the stub saw has the lab's project;
+- in the own environment, `COST_CHECK` replaced on make's command line, through MAKEFLAGS, or from
+  the environment under `make -e` still leaves the reads around pytest;
 - the invented project id is not in make's output, in each of these runs.
 
 No GCP call and no real test suite runs: the stub stands in for every `uv` command, and only
@@ -206,3 +208,20 @@ def test_a_variable_on_makes_command_line_reaches_the_decider_as_it_reaches_pyte
     result, events = run(tmp_path, lab, assignment, *target)
     assert result.returncode == 0, result.stdout + result.stderr
     assert events == (BRACKETED if seen == "own" else ["pytest:elsewhere"])
+
+
+OVERRIDES = {
+    "command-line": (["COST_CHECK=:"], {}),
+    "makeflags": ([], {"MAKEFLAGS": "COST_CHECK=:"}),
+    "environment-e": (["-e"], {"COST_CHECK": ":"}),
+}
+
+
+@pytest.mark.parametrize("target", INVOCATIONS, ids=INVOCATION_IDS)
+@pytest.mark.parametrize(("extra", "env"), OVERRIDES.values(), ids=OVERRIDES.keys())
+def test_the_cost_read_cannot_be_replaced_from_outside_the_makefile(
+    tmp_path: Path, extra: list[str], env: dict[str, str], target: list[str]
+) -> None:
+    result, events = run(tmp_path, OWN | env, *extra, *target)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert events == BRACKETED
