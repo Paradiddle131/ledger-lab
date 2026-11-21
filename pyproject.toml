@@ -45,6 +45,7 @@ dev = [
   "ruff==0.17.5",
   "types-pyyaml==6.0.12.20250915",
   "psycopg[binary]==3.2.12",
+  "pytest-xdist==3.8.0",
 ]
 
 [tool.uv]
