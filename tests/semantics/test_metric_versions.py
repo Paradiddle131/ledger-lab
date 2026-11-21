@@ -324,7 +324,9 @@ HIDDEN_BY_ATTRIBUTES: dict[str, tuple[dict[str, str], str | None]] = {
 
 
 @pytest.mark.parametrize("name", list(HIDDEN_BY_ATTRIBUTES))
-def test_git_attributes_cannot_hide_a_change_on_main(tmp_path: Path, name: str) -> None:
+def test_git_attributes_cannot_hide_a_change_on_main(
+    tmp_path: Path, name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """`origin/main` is read from git's objects as stored, so no export attribute leaves a file
     out of it or rewrites one."""
     extra, info = HIDDEN_BY_ATTRIBUTES[name]
@@ -342,7 +344,7 @@ def test_git_attributes_cannot_hide_a_change_on_main(tmp_path: Path, name: str) 
     if info is not None:
         (repo / ".git/info").mkdir(exist_ok=True)
         (repo / ".git/info/attributes").write_text(info)
-    versions._PUBLISHED.clear()  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(versions, "_PUBLISHED", {})
     ok, report = versions.check(repo)
     assert not ok, report
     assert lines(report) == still("fixed_award", "spend_against_award"), report
@@ -833,6 +835,7 @@ def test_each_case_gets_its_own_copy_of_the_committed_parse(
     kept = copy.deepcopy(committed_once)
     committed["metrics"][0]["config"]["meta"].clear()
     committed["semantic_models"][0]["measures"].clear()
+    committed["project_configuration"].clear()
     committed["metrics"].clear()
     assert committed_once == kept
 
