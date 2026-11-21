@@ -51,11 +51,11 @@ Area labels: `data`, `access`, `semantics`, `agent`, `workflow`, `operations`, `
 
 **An item that turns out to need GCP or the owner:** commit nothing half-done; swap `ready` and `agent:claimed` for `needs-gcp` (the step calls GCP while `LEDGER_LAB_GCP_PROJECT` is unset or blank or a `GCP_PROJECT` is non-empty, or while the Digest says `Mode: offline`, or this lab's own project is missing) or `needs-owner` (a decision packet as the last comment); say why on the issue; `git stash -u`; take the next.
 
-**The lab's own environment** is a session where `LEDGER_LAB_GCP_PROJECT` is not blank (blank: empty or only whitespace, which `platform/gcp_project.py` strips) and `GCP_PROJECT` is unset or empty; `uv run python platform/gcp_project.py` prints `own` there and `elsewhere` in any other session, never the project.
+**The lab's own environment** is a session where none of these holds: `LEDGER_LAB_GCP_PROJECT` is unset or blank or a `GCP_PROJECT` is non-empty; blank means empty or only whitespace, as `platform/gcp_project.py` strips it, and `uv run python platform/gcp_project.py` prints `own` there and `elsewhere` in any other session, never the project.
 
 **Giving a `needs-gcp` item back:** at orient, a wake in the lab's own environment whose Digest says `Mode: full` (or has no `Mode` line) lists the open `needs-gcp` issues.
-An issue whose last parking comment gives only the session's environment or `Mode: offline` as the reason gets `ready` back in place of `needs-gcp`, with a comment saying this wake's environment can run its GCP step; the picker can then take it.
-An issue parked because the lab's own project is missing, or for any other reason, keeps `needs-gcp`, and the owner lifts it.
+An issue gets `ready` back in place of `needs-gcp`, with a comment saying this wake's environment can run its GCP step, only when both hold: the newest comment that parked it is a wake's (it starts with `🤖`) and gives only the session's environment or `Mode: offline` as the reason, and every comment after it is a wake's and gives no other reason; the picker can then take it.
+Any other issue keeps `needs-gcp`, one parked because the lab's own project is missing or by a comment that is not a wake's among them, and the owner lifts it.
 
 ## Gates
 

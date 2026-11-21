@@ -21,6 +21,9 @@ Checked, by those cases only:
   empty value included), `empty` present and exactly empty, `non-empty` present and not empty (a
   space included), `blank` present and empty or only whitespace (as `str.strip` sees it); the
   earlier wording, EARLIER_WORDING, read with them, differs from the oracle on some case;
+- the line starting OWN_ANCHOR holds OWN_BEFORE once, and the condition right after it, up to
+  the next `;`, read the same way, is true exactly on those cases;
+- each word of WORDS answers WORD_CASES as listed;
 - the reader refuses the clauses in REFUSED_CLAUSES, and SHELL_CHECK refuses the checks in
   REFUSED_CHECKS; the run helper refuses one of them before bash starts, leaving no file behind;
 - `AGENTS.md` has, under `## Guardrails`, a line starting `- **Own project only:**` holding each
@@ -29,8 +32,8 @@ Checked, by those cases only:
 Not checked:
 - the wording on those lines outside the pinned phrases and the extracted condition, and the rest
   of the guardrail line's prose;
-- the profile's paragraph that defines the lab's own environment, and the one that gives a
-  `needs-gcp` item back;
+- the own-environment paragraph past its condition, and the paragraph that gives a `needs-gcp`
+  item back, a rule a wake follows by reading an issue's comments;
 - whitespace beyond the ASCII cases above, where Python's `str.strip` and bash's `[[:space:]]`
   may differ;
 - that the shell check is run, or run as the line says, by an agent or hook.
@@ -53,6 +56,8 @@ BASH = shutil.which("bash") or "bash"
 
 QUEUE_ANCHOR = "**An item that turns out to need GCP or the owner:**"
 QUEUE_BEFORE = "swap `ready` and `agent:claimed` for `needs-gcp` (the step calls GCP while "
+OWN_ANCHOR = "**The lab's own environment**"
+OWN_BEFORE = "is a session where none of these holds: "
 NEVER_BEFORE = "- Call GCP outside this lab's own environment: while "
 NEVER_AFTER = ", where"
 NEVER_INSTRUCTION = "label the item `needs-gcp` instead."
@@ -95,6 +100,13 @@ REFUSED_CLAUSES = {
     "mode": "the Digest says `Mode: offline`",
 }
 
+WORD_CASES: dict[str, tuple[tuple[str | None, bool], ...]] = {
+    "unset": ((None, True), ("", False), (" ", False), ("x", False)),
+    "set": ((None, False), ("", True), (" ", True), ("x", True)),
+    "empty": ((None, False), ("", True), (" ", False), ("x", False)),
+    "non-empty": ((None, False), ("", False), (" ", True), ("x", True)),
+    "blank": ((None, False), ("", True), (" ", True), ("\t", True), ("x", False)),
+}
 EARLIER_WORDING = f"`{VARIABLE}` is unset or empty or a `{FOREIGN}` is set"
 
 LAB_VALUES: tuple[str | None, ...] = (None, "", " ", "\t", "\n", "the-lab")
@@ -188,6 +200,12 @@ def queue_condition() -> Callable[[Env], bool]:
     return read_condition(between(line, QUEUE_BEFORE, ","), line)
 
 
+def own_condition() -> Callable[[Env], bool]:
+    """The condition the own-environment definition says must not hold."""
+    line = line_starting(AUTOPILOT.read_text().splitlines(), OWN_ANCHOR, "autopilot.md")
+    return read_condition(between(line, OWN_BEFORE, ";"), line)
+
+
 def never_condition() -> Callable[[Env], bool]:
     line = line_starting(section(AUTOPILOT, "## Never"), NEVER_BEFORE, "autopilot.md, ## Never")
     assert line.endswith(NEVER_INSTRUCTION), f"expected the end {NEVER_INSTRUCTION!r}, on: {line}"
@@ -225,7 +243,9 @@ def test_the_known_condition_check_passes_only_in_the_own_environment(env: dict[
 
 
 @pytest.mark.parametrize(
-    "condition", [queue_condition, never_condition], ids=["queue rule", "never line"]
+    "condition",
+    [queue_condition, never_condition, own_condition],
+    ids=["queue rule", "never line", "own environment"],
 )
 @pytest.mark.parametrize("env", CASES, ids=repr)
 def test_the_written_condition_is_the_foreign_environment(
@@ -253,3 +273,11 @@ def test_the_words_tell_the_earlier_wording_apart() -> None:
     read word for word, that wording misjudges some case, so the reader cannot pass it."""
     earlier = read_condition(EARLIER_WORDING, "the earlier wording")
     assert any(earlier(env) != (not own(env)) for env in CASES)
+
+
+@pytest.mark.parametrize("word", WORD_CASES, ids=WORD_CASES.keys())
+def test_each_word_means_what_it_says(word: str) -> None:
+    assert set(WORD_CASES) == set(WORDS)
+    for value, expected in WORD_CASES[word]:
+        env = {} if value is None else {"X": value}
+        assert WORDS[word](env, "X") is expected, (word, value)
