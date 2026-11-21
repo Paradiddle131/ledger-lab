@@ -42,6 +42,11 @@ What `ask` checks, in this order:
     without the model, and `ask` replies with its fixed text `CAPPED`;
 - so a turn takes at most `MAX_STEPS` model steps (`MAX_TOOL_CALLS` + `MAX_REFUSALS` + 1): each
   step runs a query, is refused, or ends the turn;
+- once the loop has ended, a turn not stopped at either cap has its reply checked by
+  `agent.integrity.withheld`: when no cited query's verified question is the asked one, or
+  `agent.integrity.trace` reports a number of the reply, `agent.integrity.WITHHELD`, which holds
+  no digit, is shown and recorded in its place, and the turn is not `answered`; a turn stopped at
+  the tool-call cap or the refusal cap shows its own fixed message, unchecked;
 - once the turn has ended, its record is written (`AuditLog.append`, by default
   `agent.audit.FileLog`, which checks it against the schema and its seals before writing); when
   that raises, for any `Exception`, `ask` raises `AuditWriteFailed` and returns no `Answer`;
@@ -59,12 +64,15 @@ question, the answer's text, each run's result (`agent.audit.sealed_result` of i
 cells as `cell_text`) and its bound values, a seal, each under its own salt, the salt and value
 kept by the log apart from the record.
 Its outcome is `refused` with `no-identity` for no persona, `failed` when a step raised (above),
-`stopped` with `model-call-cap` at the tool-call limit, else `answered` when a query returned,
-`stopped` with `model-refusal-cap` when none did and the refusal limit was reached, `refused` with
-`policy` when none did and the tool policy denied one, `refused` with `unplanned` when none did,
-the policy denied none and a call was refused as unplanned, and `abstained` otherwise. A refusal
-for any other reason (a value that is not a string, a query the context lacks, a tool `ask` does
-not run) is not named in the record.
+`stopped` with `model-call-cap` at the tool-call limit, else `answered` when a query returned and
+the reply was not withheld, `stopped` with `model-refusal-cap` when no answer stands and the
+refusal limit was reached, `refused` with `policy` when no answer stands and the tool policy
+denied one, `refused` with `unplanned` when no answer stands, the policy denied none and a call
+was refused as unplanned, and `abstained` otherwise. So a withheld reply's turn is recorded
+`refused` with `policy` when a call was denied, else `refused` with `unplanned` when a call was
+unplanned, else `abstained` (a turn at the refusal cap is never withheld). A refusal for any other
+reason (a value that is not a string, a query the context lacks, a tool `ask` does not run) is not
+named in the record.
 
 How the tool runs a query: on a new cursor of the persona's connection (in DuckDB a cursor is a
 connection of its own to the same database, so it sees none of the parent's temporary objects),
@@ -121,6 +129,7 @@ import duckdb
 import yaml
 
 from access.identities import UnknownPersonaError, identity
+from agent import integrity
 from agent.audit import (
     AuditLog,
     AuditWriteFailed,
@@ -131,6 +140,7 @@ from agent.audit import (
     seal,
     sealed_result,
 )
+from agent.integrity import WITHHELD
 from agent.model import (
     READ_ONLY_TOOL,
     Citation,
@@ -383,9 +393,16 @@ def ask(
         # Written outside the `except`, so an `AuditWriteFailed` carries no context.
         record(audit, persona, session, question, ("failed", stage), metrics, runs, None)
         raise raised
+    # A reply no covering run backs is not shown (`agent/integrity.py`); a turn at either cap
+    # shows its own fixed message.
+    withheld = (
+        stopped is None and not capped and integrity.withheld(question, text, citations, queries)
+    )
+    if withheld:
+        text = WITHHELD
     if stopped is not None:
         outcome: tuple[str, str | None] = ("stopped", stopped)
-    elif citations:
+    elif citations and not withheld:
         outcome = ("answered", None)
     elif capped:
         outcome = ("stopped", REFUSAL_CAP)
