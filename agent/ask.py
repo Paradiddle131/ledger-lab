@@ -10,7 +10,8 @@ What `ask` checks, in this order:
   `access/personas.yaml`), compared exactly, with no stripping or case folding; anything else
   raises `NoPersonaError`, before the metric context is loaded, the model is asked or a
   connection is opened;
-- for each tool call, in this order: a call to `run_metric_query` must name a verified query of
+- for each tool call, in this order: the tool must be named by a string (otherwise a `Refusal`
+  whose `tool` is the value's `repr`); a call to `run_metric_query` must name a verified query of
   the context; the call is put to the tool policy (`agent/policy/tools.py`) with the tool the
   model named, the persona, and as resource the query's metric for `run_metric_query`, the
   `Ledger` of the call's id for `propose_entry`, and a `Metric` of the call's id for any other
@@ -174,6 +175,10 @@ def ask(
             text = reason
             break
         calls += 1
+        if not isinstance(step.tool, str):
+            reason = "the tool is not named by a string"
+            results.append(Refusal(step.query, reason, repr(step.tool)))
+            continue
         query = queries.get(step.query) if step.tool == TOOL else None
         if step.tool == TOOL and query is None:
             results.append(Refusal(step.query, "the metric context holds no such verified query"))

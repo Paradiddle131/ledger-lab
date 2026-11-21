@@ -373,3 +373,18 @@ def test_the_model_is_shown_the_glossary_of_the_metric_context(
     assert {term.id for term in glossary} >= {"duplicate-payment-rate", "constant-currency"}
     assert all(turn.glossary == glossary for turn in recorder.turns)
     assert all(turn.columns == () for turn in recorder.turns)
+
+
+@pytest.mark.parametrize("tool", [["run_metric_query"], None, 7])
+def test_a_tool_named_by_no_string_is_refused_and_the_turn_goes_on(
+    as_persona: AsPersona, tool: Any
+) -> None:
+    """A call whose tool is not a string is a `Refusal`, with no connection opened; the model's
+    next call still runs."""
+    recorder = Recorder(as_persona, Calls(ToolCall(QUERY, tool), ToolCall(QUERY)))
+    answer = asked(recorder, CHICAGO)
+    assert answer.refusals == (Refusal(QUERY, "the tool is not named by a string", repr(tool)),)
+    assert len(recorder.turns) == 3
+    assert recorder.turns[1].results == answer.refusals
+    assert [c.query for c in answer.citations] == [QUERY]
+    assert recorder.opened == [CHICAGO]
