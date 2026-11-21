@@ -42,18 +42,26 @@ UK = "accountant-uk-transport"
 DENIED = "agent-operator"
 # A write time set on the persona's database file, long before any test runs.
 WRITTEN = datetime(2020, 1, 2, 3, 4, 5, tzinfo=UTC)
-# The tool-call limit `agent/ask.py` states, written out here so a raised limit fails a test.
+# The tool-call and step limits `agent/ask.py` states, written out here so a raised limit fails a
+# test.
 LIMIT = 3
+STEPS = 10
 
 
 class Recorder:
-    """`as_persona` and a model, each recording its calls."""
+    """`as_persona` and a model, each recording its calls: `planned` the turns the model planned
+    on, `turns` the turns it stepped on."""
 
     def __init__(self, as_persona: AsPersona, model: Any) -> None:
         self.opened: list[str] = []
+        self.planned: list[Turn] = []
         self.turns: list[Turn] = []
         self._as_persona = as_persona
         self._model = model
+
+    def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+        self.planned.append(turn)
+        return self._model.plan(turn)
 
     def connect(self, persona: str) -> duckdb.DuckDBPyConnection:
         self.opened.append(persona)
@@ -214,6 +222,9 @@ def test_a_table_the_persona_lacks_is_refused_not_read_elsewhere(as_persona: AsP
 
 def test_a_model_that_keeps_calling_tools_is_stopped(as_persona: AsPersona) -> None:
     class Looping:
+        def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+            return (ToolCall(QUERY),) * (LIMIT + 1)
+
         def step(self, turn: Turn) -> ToolCall | Reply:
             return ToolCall(QUERY)
 
@@ -227,6 +238,9 @@ def test_a_model_that_keeps_calling_tools_is_stopped(as_persona: AsPersona) -> N
 
 def test_one_ask_opens_one_connection_for_two_tool_calls(as_persona: AsPersona) -> None:
     class Twice:
+        def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+            return (ToolCall(QUERY), ToolCall("duplicate-payment-amount-rate"))
+
         def step(self, turn: Turn) -> ToolCall | Reply:
             calls = [QUERY, "duplicate-payment-amount-rate"]
             if len(turn.results) < len(calls):
@@ -285,16 +299,27 @@ def test_the_model_comes_from_configuration() -> None:
 
 
 class Calls:
-    """A model that makes the given tool calls in order, then replies."""
+    """A model that plans the given tool calls (by default the ones it makes), makes them in
+    order, then replies."""
 
-    def __init__(self, *calls: ToolCall) -> None:
+    def __init__(self, *calls: ToolCall, plan: tuple[ToolCall, ...] | None = None) -> None:
         self._calls = calls
+        self._plan = calls if plan is None else plan
+
+    def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+        return self._plan
 
     def step(self, turn: Turn) -> ToolCall | Reply:
         if len(turn.results) < len(self._calls):
             return self._calls[len(turn.results)]
         return Reply("done")
 
+
+# The reason `ask` gives for a call the model did not plan.
+UNPLANNED = (
+    "the call is not one the model planned before it was shown anything but the question and"
+    " the verified queries, or it was planned fewer times"
+)
 
 # Tools the tool policy's schema does not declare (`agent/policy/tools.cedarschema`), and the
 # write it declares and no policy permits.
@@ -400,14 +425,76 @@ def test_a_tool_call_whose_tool_or_query_is_no_string_is_refused_and_the_turn_go
     assert recorder.opened == [CHICAGO]
 
 
-def test_a_call_past_the_limit_whose_query_is_no_string_is_refused_with_its_repr(
+def test_a_model_that_keeps_making_unplanned_calls_is_stopped_at_the_step_limit(
     as_persona: AsPersona,
 ) -> None:
+    """Unplanned calls do not count toward the tool-call limit; the step limit ends the turn, and
+    each refusal holds the `repr` of a query that is not a string."""
+
     class Looping:
+        def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+            return ()
+
         def step(self, turn: Turn) -> ToolCall | Reply:
             return ToolCall(["a"])  # type: ignore[arg-type]
 
-    answer = asked(Recorder(as_persona, Looping()), CHICAGO)
-    assert len(answer.refusals) == LIMIT + 1
+    recorder = Recorder(as_persona, Looping())
+    answer = asked(recorder, CHICAGO)
+    assert len(recorder.turns) == STEPS
+    assert len(answer.refusals) == STEPS
     assert {(r.query, r.tool) for r in answer.refusals} == {("['a']", "run_metric_query")}
-    assert answer.refusals[-1].reason.startswith("the model made no reply")
+    assert {r.reason for r in answer.refusals[:-1]} == {UNPLANNED}
+    assert answer.refusals[-1].reason == f"the model made no reply within {STEPS} steps"
+    assert answer.text == answer.refusals[-1].reason
+    assert recorder.opened == []
+
+
+def test_the_plan_is_made_on_the_question_and_the_verified_queries_alone(
+    as_persona: AsPersona, scripted: Model
+) -> None:
+    recorder = Recorder(as_persona, scripted)
+    answer = asked(recorder, CHICAGO)
+    (planned,) = recorder.planned
+    assert planned == Turn(QUESTION, tuple(load_context().values()), ())
+    assert (planned.glossary, planned.columns, planned.results) == ((), (), ())
+    assert [c.query for c in answer.citations] == [QUERY]
+
+
+def test_a_call_the_model_did_not_plan_is_refused_and_not_put_to_the_policy(
+    as_persona: AsPersona, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unplanned call, and a planned call made once more than planned, are each refused with no
+    policy request; the planned call still runs, on the one connection."""
+    asked_for: list[str] = []
+    authorize = ask_module.authorize
+
+    def recording(
+        principal: Entity, action: str, resource: Entity, context: dict[str, object]
+    ) -> Decision:
+        asked_for.append(action)
+        return authorize(principal, action, resource, context)
+
+    monkeypatch.setattr(ask_module, "authorize", recording)
+    other = ToolCall("duplicate-payment-amount-rate")
+    model = Calls(other, ToolCall(QUERY), ToolCall(QUERY), plan=(ToolCall(QUERY),))
+    recorder = Recorder(as_persona, model)
+    answer = asked(recorder, CHICAGO)
+    assert answer.refusals == (Refusal(other.query, UNPLANNED), Refusal(QUERY, UNPLANNED))
+    assert recorder.turns[1].results == (answer.refusals[0],)
+    assert recorder.opened == [CHICAGO]
+    assert asked_for == ["run_metric_query"]
+    assert [c.query for c in answer.citations] == [QUERY]
+
+
+def test_refused_planned_calls_do_not_count_toward_the_tool_call_limit(
+    as_persona: AsPersona,
+) -> None:
+    """Planned calls the policy denies, `LIMIT` of them, leave the planned query to run."""
+    denied = (*UNLISTED, WRITE)
+    assert len(denied) == LIMIT
+    recorder = Recorder(as_persona, Calls(*denied, ToolCall(QUERY)))
+    answer = asked(recorder, CHICAGO)
+    assert [r.tool for r in answer.refusals] == [c.tool for c in denied]
+    assert all(r.reason.startswith("the tool policy denied it: ") for r in answer.refusals)
+    assert [c.query for c in answer.citations] == [QUERY]
+    assert answer.text == "done"

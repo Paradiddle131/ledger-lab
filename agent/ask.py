@@ -2,25 +2,35 @@
 
 `ask` shows the model (`agent/model.py`) the question, the verified queries and the glossary of
 the metric context (`semantics/context.json`, or what the caller passes), and the column
-descriptions the caller passes, runs each verified query the model names with the one read-only
-tool, `run_metric_query`, and returns an `Answer` citing what each run returned.
+descriptions the caller passes, runs each verified query the model planned and then names with
+the one read-only tool, `run_metric_query`, and returns an `Answer` citing what each run returned.
 
 What `ask` checks, in this order:
 - the persona must be a string equal to a persona id of the personas catalogue (by default
   `access/personas.yaml`), compared exactly, with no stripping or case folding; anything else
   raises `NoPersonaError`, before the metric context is loaded, the model is asked or a
   connection is opened;
-- for each tool call, in this order: its tool and its query must each be a string, or the call
-  is a `Refusal` holding the `repr` of each that is not, before any lookup or policy request;
-  a call to `run_metric_query` must name a verified query of the context; the call is put to
-  the tool policy (`agent/policy/tools.py`) with the tool the model named, the persona, and as
-  resource the query's metric for `run_metric_query`, the `Ledger` of the call's id for
-  `propose_entry`, and a `Metric` of the call's id for any other tool; a denial is a `Refusal`
-  naming the policy's reasons; a call the policy allows to any tool but `run_metric_query` is a
-  `Refusal` too, since `ask` runs no other tool; only then is a connection opened, by calling
-  `as_persona(persona)`, at most once per `ask`;
-- the model gets at most `MAX_TOOL_CALLS` tool calls; one more is refused and ends the turn,
-  its refusal holding the `repr` of a tool or query that is not a string.
+- plan, then execute: the model first plans its tool calls (`Model.plan`) on a turn holding the
+  question and the verified queries only, with no glossary, no column description and no result;
+  the turns after it show those as well;
+- for each tool call the model then makes, in this order:
+  - once `MAX_TOOL_CALLS` queries have been run (a query whose run raised an engine error counts;
+    a refused call does not), the call is refused, not put to the policy, and ends the turn;
+  - at the `MAX_STEPS`th model step, the call is refused, not put to the policy, and ends the
+    turn; each limit's refusal holds the `repr` of a tool or query that is not a string;
+  - the call must equal (tool and query) a planned call not yet made, each planned call counted
+    as often as the plan holds it; any other call is a `Refusal` and is not put to the policy;
+  - its tool and its query must each be a string, or the call is a `Refusal` holding the `repr`
+    of each that is not;
+  - a call to `run_metric_query` must name a verified query of the context;
+  - the call is put to the tool policy (`agent/policy/tools.py`) with the tool the model named,
+    the persona, and as resource the query's metric for `run_metric_query`, the `Ledger` of the
+    call's id for `propose_entry`, and a `Metric` of the call's id for any other tool; a denial
+    is a `Refusal` naming the policy's reasons;
+  - a call the policy allows to any tool but `run_metric_query` is a `Refusal`, since `ask` runs
+    no other tool;
+  - only then is a connection opened, by calling `as_persona(persona)`, at most once per `ask`,
+    and the query run.
 
 How the tool runs a query: on a new cursor of the persona's connection (in DuckDB a cursor is a
 connection of its own to the same database, so it sees none of the parent's temporary objects),
@@ -41,10 +51,11 @@ Stated limits:
 - the query is not checked to be a single read: the persona's connection on the local engine is
   read-only, which is what stops a write;
 - no audit record is written;
-- the glossary, the column descriptions and a result's cells reach the model as they are: the
-  policy decides which tool runs and for which persona, not which verified query the persona's
-  model may ask for, so an instruction in that text naming a verified query the persona may run
-  gets it run (`tests/agent/test_injection.py` pins this);
+- the glossary, the column descriptions and a result's cells reach the model as they are, on
+  every turn but the planning one: an instruction there cannot add a tool call to the plan, but it
+  can shape the reply's text, and it can make the model skip a planned call;
+- the plan is the model's own reading of the question and the verified queries; a question that
+  itself carries an instruction is planned on like any other;
 - no column description is given to the model unless the caller passes it: the metric context
   holds none.
 """
@@ -86,6 +97,15 @@ TOOL = READ_ONLY_TOOL
 # `Metric`, and the schema refuses the request for its action.
 RESOURCE = {TOOL: "Metric", "propose_entry": "Ledger"}
 MAX_TOOL_CALLS = 3
+# The model steps one `ask` takes at most, refused calls and the reply included: a call refused as
+# unplanned or by a check does not count toward `MAX_TOOL_CALLS`, so without this bound a model
+# that kept making such calls would never end the turn; it leaves room for the tool calls, as many
+# refusals again and more, and the reply.
+MAX_STEPS = 10
+UNPLANNED = (
+    "the call is not one the model planned before it was shown anything but the question and"
+    " the verified queries, or it was planned fewer times"
+)
 # A schema of the persona's database as `access/compile.py` names it: a purpose's id with `_` for
 # `-`, or `main`.
 SCHEMA = re.compile(r"[a-z_][a-z0-9_]*")
@@ -165,9 +185,11 @@ def ask(
     session = uuid.uuid4().hex
     connection: duckdb.DuckDBPyConnection | None = None
     results: list[Citation | Refusal] = []
-    calls = 0
+    planned = list(model.plan(Turn(question, tuple(queries.values()), ())))
+    calls = steps = 0
     while True:
         step = model.step(Turn(question, tuple(queries.values()), tuple(results), *shown))
+        steps += 1
         if isinstance(step, Reply):
             text = step.text
             break
@@ -176,7 +198,15 @@ def ask(
             results.append(Refusal(_text(step.query), reason, _text(step.tool)))
             text = reason
             break
-        calls += 1
+        if steps == MAX_STEPS:
+            reason = f"the model made no reply within {MAX_STEPS} steps"
+            results.append(Refusal(_text(step.query), reason, _text(step.tool)))
+            text = reason
+            break
+        if step not in planned:
+            results.append(Refusal(_text(step.query), UNPLANNED, _text(step.tool)))
+            continue
+        planned.remove(step)
         if not (isinstance(step.query, str) and isinstance(step.tool, str)):
             reason = "the tool or the query is not a string"
             results.append(Refusal(_text(step.query), reason, _text(step.tool)))
@@ -196,6 +226,7 @@ def ask(
             continue
         if connection is None:
             connection = as_persona(persona)
+        calls += 1
         results.append(run_metric_query(connection, query))
     return Answer(
         persona,

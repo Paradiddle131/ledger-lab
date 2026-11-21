@@ -1,22 +1,25 @@
 """The model behind the own agent: one protocol, one factory, one scripted implementation.
 
-The agent (`agent/ask.py`) shows the model a `Turn`: the question, the verified queries it may
-name, the glossary's terms, the column descriptions `ask` is given, and the results of the tool
-calls made so far. The model answers each turn with one step: a `ToolCall` naming a tool (by
+The agent (`agent/ask.py`) first asks the model to plan: `plan(turn)` gets a `Turn` holding the
+question and the verified queries only, and returns the tool calls the model will make. Then it
+shows the model a `Turn` at each step: the question, the verified queries it may name, the
+glossary's terms, the column descriptions `ask` is given, and the results of the tool calls made
+so far. The model answers each such turn with one step: a `ToolCall` naming a tool (by
 default the one read-only tool, `run_metric_query`) and what it acts on (for that tool a verified
 query by its id), or a `Reply` that ends the turn. A model names a query only by id; the SQL the
 tool runs is the text of the verified queries `ask` is given (by default the metric context's),
 with no value bound from the question or the model.
 
 The glossary's definitions, the column descriptions and the cells of a result are text the model
-reads and the lab does not vouch for: a model may take an instruction it finds there as its own,
-so what a tool call may do is decided outside the model, by the tool policy `ask` asks before
-each call.
+reads and the lab does not vouch for: a model may take an instruction it finds there as its own.
+So `ask` refuses a call that is not in the plan, made before that text was shown, and asks the
+tool policy before it runs any call; the call past the tool-call or step limit is refused without
+asking it.
 
 `model_from_config(environ, context)` is the one place a model is chosen, by the variable
 `LEDGER_LAB_AGENT_MODEL`: unset, empty or `scripted` gives the `ScriptedModel`; any other value
 raises `ModelNotConfigured`. A free hosted model, or an adapter over a LangGraph graph or an MCP
-client, would be another value here and another class with the same `step`.
+client, would be another value here and another class with the same `plan` and `step`.
 
 Stated limits: the scripted model makes no network call and reads no model SDK; it matches a
 question to a verified query by exact text only, so a paraphrase gets no tool call; it reads
@@ -124,6 +127,11 @@ class Turn:
 
 
 class Model(Protocol):
+    def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+        """The tool calls the model will make for the turn's question, chosen on a turn that holds
+        the question and the verified queries only."""
+        ...
+
     def step(self, turn: Turn) -> ToolCall | Reply: ...
 
 
@@ -132,12 +140,16 @@ class ModelNotConfigured(ValueError):
 
 
 class ScriptedModel:
-    """Replays a fixed script: on the first step, the query the script maps the question to, or a
-    reply that no verified query answers it; once a tool has answered, a reply built from the
-    results."""
+    """Replays a fixed script: it plans the query the script maps the question to, if any; on the
+    first step, that query, or a reply that no verified query answers it; once a tool has
+    answered, a reply built from the results."""
 
     def __init__(self, script: Mapping[str, str]) -> None:
         self._script = dict(script)
+
+    def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+        query = self._script.get(turn.question)
+        return () if query is None else (ToolCall(query),)
 
     def step(self, turn: Turn) -> ToolCall | Reply:
         if not turn.results:

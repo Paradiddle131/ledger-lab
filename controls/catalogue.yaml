@@ -71,8 +71,10 @@ controls:
   - id: untrusted-content-cannot-instruct
     layer: Injection and tool authorisation
     owner: agent-operator
-    asserts: An instruction planted in a cell of the persona's database, a column description or a glossary entry passed to the agent, read by a test model that obeys it, to call a tool the tool policy does not declare, the write tool it declares and denies, or a query the metric context lacks, reaches the model and comes back refused with nothing run for it, and the queries run, with the metric, version, SQL, columns and rows each cites (the planted cell put back), equal those of the same question asked with nothing planted; a planted call to a verified query the asking persona may run is run, a stated limit.
-    proven_by: [tests/agent/test_injection.py::test_planted_instructions_are_ignored]
+    asserts: The own agent's model plans its tool calls on a turn holding the question and the verified queries only, and a call it then makes that is not in the plan is refused and not put to the tool policy; an instruction planted in a cell of the persona's database, a column description or a glossary entry passed to the agent, read by a test model that obeys it, to call a tool the policy does not declare, the write tool, a query the metric context lacks, a verified query the asking persona may run, or the question's own query once more, comes back refused as unplanned, and the queries run, with the metric, version, SQL, columns and rows each cites (the planted cell put back), equal those of the same question asked with nothing planted, three planted calls in one glossary entry included; the text of the reply is the model's and is not checked.
+    proven_by:
+      - tests/agent/test_injection.py::test_planted_instructions_are_ignored
+      - tests/agent/test_injection.py::test_three_planted_calls_leave_the_questions_query_to_run
     status: implemented
   - id: no-outbound-channel-carries-data
     layer: Injection and tool authorisation
