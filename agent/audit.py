@@ -472,7 +472,6 @@ class FileLog:
     def _forget(self, seq: int) -> None:
         """Remove the kept values of a position whose record was not written, then try to `fsync`
         the folder; a failure of that `fsync` is not raised, so the first error is."""
-        (self.kept / f"{seq}.json").unlink(missing_ok=True)
         with contextlib.suppress(OSError):
             self._sync_folder()
 
