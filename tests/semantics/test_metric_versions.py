@@ -18,9 +18,11 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+import group_env
 import jinja2
 import pytest
 import yaml
@@ -31,14 +33,17 @@ from tests.semantics.metric_cli import manifest
 
 FOLDER = "semantics/metricflow"
 PROJECT_FILE = "models/dbt_project.yml"
-# The gate and what it runs from a clone of its own: the network refusal, and the lock its
-# offline BigQuery parse reads the `bigquery` group from.
+# The gate and what it runs from a clone of its own: the network refusal, the lock groups'
+# environments, and the lock and Python version its offline BigQuery parse builds the `bigquery`
+# group's environment from.
 GATE_FILES = [
     "semantics/versions.py",
     "semantics/offline/refusal.py",
     "semantics/offline/sitecustomize.py",
+    "platform/group_env.py",
     "pyproject.toml",
     "uv.lock",
+    ".python-version",
 ]
 
 
@@ -2173,6 +2178,45 @@ def test_a_terminated_run_leaves_no_copy_behind(tmp_path: Path) -> None:
     gate.send_signal(signal.SIGTERM)
     assert gate.wait(timeout=60) == 128 + signal.SIGTERM
     assert list(scratch.glob("metric-versions-*")) == []
+
+
+def builds() -> set[str]:
+    """The entries of uv's `builds-v0`, hidden names included, where `uv run --isolated` makes
+    the throwaway environment it leaves behind when it is killed."""
+    folder = group_env.cache_dir() / "builds-v0"
+    return set(os.listdir(folder)) if folder.is_dir() else set()
+
+
+def test_the_gates_bigquery_parses_leave_no_environment_in_uvs_cache(tmp_path: Path) -> None:
+    """Two of the gate's BigQuery parses, one run to its end and one ended mid-parse (as the gate
+    ends both when the local read fails first), leave `builds-v0` as they found it. Another process
+    on the same cache may hold an entry there for a moment, so an entry new when the parses end
+    counts only while it stays, and one made after they end does not count."""
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    versions.export_working(versions.REPO, tree)
+    before = builds()
+    finished = tmp_path / "finished"
+    child = versions.start_bigquery(tree, finished)
+    try:
+        restart = partial(versions.start_bigquery, tree, finished)
+        assert versions.bigquery_refusals(child, finished, restart) == []
+    finally:
+        versions.end(child)
+    ended = tmp_path / "ended"
+    child = versions.start_bigquery(tree, ended)
+    deadline = time.monotonic() + 120
+    try:
+        while not (ended / "home").is_dir():
+            assert child.poll() is None and time.monotonic() < deadline, "the parse never started"
+            time.sleep(0.05)
+    finally:
+        versions.end(child)
+    grown = builds() - before
+    deadline = time.monotonic() + 60
+    while (grown := grown & builds()) and time.monotonic() < deadline:
+        time.sleep(0.5)
+    assert not grown, f"left in uv's builds-v0: {sorted(grown)}"
 
 
 def test_every_metric_carries_a_version(build: Build) -> None:
