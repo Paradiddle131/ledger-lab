@@ -102,10 +102,12 @@ warehouse-parity: sync
 bigquery-personas: sync
 	uv run pytest -m bigquery_persona tests/access/test_bigquery_personas.py
 
-# Each human persona's read of the payments product's governed copy on BigQuery, as the persona:
-# exactly its granted entities' rows, or a refusal without a row grant (access/row_policies.py).
+# Each human persona's read of the payments product's governed copies on BigQuery, as the persona:
+# exactly its granted entities' rows of its copy (clear or masked), none of the other, a refusal
+# without a row grant (access/row_policies.py), and a tagged column of the clear copy refused
+# without the tag's clear role (access/policy_tags.py).
 bigquery-row-policies: sync
-	uv run pytest -m bigquery_persona tests/access/test_row_policies.py
+	uv run pytest -m bigquery_persona tests/access/test_row_policies.py tests/access/test_policy_tags.py
 
 # The container stack: the shared database always, one more service per PROFILE=<name>.
 # Each checkout is its own Compose project (containers, network, volume) and the database takes a
