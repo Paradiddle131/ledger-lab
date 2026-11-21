@@ -24,6 +24,7 @@ from cost_check import (
     KILL_SWITCH_ACCOUNT_PERMISSIONS,
     MAX_BYTES_BILLED,
     PROJECT_PERMISSIONS,
+    RATE_LIMIT_PAUSES,
     READS,
     bq_command,
     check,
@@ -405,6 +406,10 @@ def test_every_call_is_a_read_on_the_lab_project_only() -> None:
             assert billed in ([], [f"x-goog-user-project: {PROJECT}"]), command
         else:
             assert re.search(rf"/{re.escape(ACCOUNT)}(?:[/:]|$)", url), command
+            assert billed == [f"x-goog-user-project: {PROJECT}"], command
+        # The billing APIs, read with gcloud's login and no quota project, spend the quota of
+        # gcloud's shared project: each billing read names the lab's.
+        if re.match(r"https://(cloudbilling|billingbudgets)\.googleapis\.com/", url):
             assert billed == [f"x-goog-user-project: {PROJECT}"], command
     for command in gcp.calls:
         if command[0] == "curl":
@@ -980,3 +985,83 @@ def test_a_terminated_run_removes_the_header_file_and_restores_the_handlers(sign
     assert seen
     assert not any(path.exists() or path.parent.exists() for path in seen)
     assert signal.getsignal(signum) == before
+
+
+# A read the API refuses for a rate limit is sent again after a pause, a bounded number of times.
+
+RATE_LIMITED = {
+    "error": {
+        "code": 429,
+        "message": "quota exceeded",
+        "status": "RESOURCE_EXHAUSTED",
+        "details": [
+            {
+                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                "reason": "RATE_LIMIT_EXCEEDED",
+                "domain": "googleapis.com",
+            }
+        ],
+    }
+}
+
+
+class Limited(FakeGCP):
+    """The live answers, but each read of `key` refused for a rate limit `times` times first."""
+
+    def __init__(self, key: str, times: int, refusal: dict[str, Any] = RATE_LIMITED) -> None:
+        super().__init__()
+        self.key, self.left, self.refusal = key, times, refusal
+        self.tries = 0
+
+    def __call__(self, command: Sequence[str]) -> str:
+        if command[0] == "curl" and route(command) == self.key:
+            self.tries += 1
+            if self.left:
+                self.left -= 1
+                self.calls.append(list(command))
+                return json.dumps(self.refusal)
+        return super().__call__(command)
+
+
+def test_a_rate_limited_billing_read_passes_on_the_next_attempt() -> None:
+    gcp, paused = Limited("billing", 1), []
+    code, out = check(ENV, gcp, paused.append)
+    assert code == 0, out
+    assert gcp.tries == 2
+    assert paused == [RATE_LIMIT_PAUSES[0]]
+    assert line_for(out, "billing link").startswith("cost-check: ok billing link:"), out
+
+
+def test_a_billing_read_rate_limited_on_every_attempt_fails_the_check() -> None:
+    """An unread billing link leaves the budget unchecked, so the retries end in a failure."""
+    gcp, paused = Limited("billing", len(RATE_LIMIT_PAUSES) + 1), []
+    code, out = check(ENV, gcp, paused.append)
+    assert code == 1, out
+    assert gcp.tries == len(RATE_LIMIT_PAUSES) + 1
+    assert paused == list(RATE_LIMIT_PAUSES)
+    assert line_for(out, "billing link") == (
+        "cost-check: FAIL billing link: could not be read (RESOURCE_EXHAUSTED, reason "
+        f"RATE_LIMIT_EXCEEDED, on each of {len(RATE_LIMIT_PAUSES) + 1} attempts)"
+    )
+    assert out.splitlines()[-1].startswith("cost-check: failed on billing link;"), out
+
+
+def test_a_status_only_rate_limit_is_retried_like_one_with_a_reason() -> None:
+    bare = {"error": {"code": 429, "message": "m"}}
+    gcp, paused = Limited("topic", 1, bare), []
+    code, out = check(ENV, gcp, paused.append)
+    assert code == 0, out
+    assert gcp.tries == 2 and paused == [RATE_LIMIT_PAUSES[0]]
+
+
+def test_the_retries_are_bounded_and_short() -> None:
+    assert 1 <= len(RATE_LIMIT_PAUSES) <= 3
+    assert all(p > 0 for p in RATE_LIMIT_PAUSES)
+    assert sum(RATE_LIMIT_PAUSES) <= 30
+
+
+def test_a_refusal_that_is_no_rate_limit_is_not_retried() -> None:
+    gcp, paused = Limited("billing", 1, DENIED), []
+    _, out = check(ENV, gcp, paused.append)
+    assert gcp.tries == 1 and paused == []
+    assert "attempts" not in line_for(out, "billing link"), out
