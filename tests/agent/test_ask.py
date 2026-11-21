@@ -375,16 +375,39 @@ def test_the_model_is_shown_the_glossary_of_the_metric_context(
     assert all(turn.columns == () for turn in recorder.turns)
 
 
-@pytest.mark.parametrize("tool", [["run_metric_query"], None, 7])
-def test_a_tool_named_by_no_string_is_refused_and_the_turn_goes_on(
-    as_persona: AsPersona, tool: Any
+# Values that are not strings, as a model's tool or query.
+NOT_STRINGS: list[Any] = [["run_metric_query"], None, 7]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [ToolCall(QUERY, tool) for tool in NOT_STRINGS] + [ToolCall(query) for query in NOT_STRINGS],
+    ids=[f"tool={t!r}" for t in NOT_STRINGS] + [f"query={q!r}" for q in NOT_STRINGS],
+)
+def test_a_tool_call_whose_tool_or_query_is_no_string_is_refused_and_the_turn_goes_on(
+    as_persona: AsPersona, call: ToolCall
 ) -> None:
-    """A call whose tool is not a string is a `Refusal`, with no connection opened; the model's
-    next call still runs."""
-    recorder = Recorder(as_persona, Calls(ToolCall(QUERY, tool), ToolCall(QUERY)))
+    """A call whose tool or query is not a string is a `Refusal` holding the `repr` of each such
+    value, with no connection opened; the model's next call still runs."""
+    recorder = Recorder(as_persona, Calls(call, ToolCall(QUERY)))
     answer = asked(recorder, CHICAGO)
-    assert answer.refusals == (Refusal(QUERY, "the tool is not named by a string", repr(tool)),)
+    query = call.query if isinstance(call.query, str) else repr(call.query)
+    tool = call.tool if isinstance(call.tool, str) else repr(call.tool)
+    assert answer.refusals == (Refusal(query, "the tool or the query is not a string", tool),)
     assert len(recorder.turns) == 3
     assert recorder.turns[1].results == answer.refusals
     assert [c.query for c in answer.citations] == [QUERY]
     assert recorder.opened == [CHICAGO]
+
+
+def test_a_call_past_the_limit_whose_query_is_no_string_is_refused_with_its_repr(
+    as_persona: AsPersona,
+) -> None:
+    class Looping:
+        def step(self, turn: Turn) -> ToolCall | Reply:
+            return ToolCall(["a"])  # type: ignore[arg-type]
+
+    answer = asked(Recorder(as_persona, Looping()), CHICAGO)
+    assert len(answer.refusals) == LIMIT + 1
+    assert {(r.query, r.tool) for r in answer.refusals} == {("['a']", "run_metric_query")}
+    assert answer.refusals[-1].reason.startswith("the model made no reply")

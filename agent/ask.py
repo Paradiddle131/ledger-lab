@@ -10,15 +10,17 @@ What `ask` checks, in this order:
   `access/personas.yaml`), compared exactly, with no stripping or case folding; anything else
   raises `NoPersonaError`, before the metric context is loaded, the model is asked or a
   connection is opened;
-- for each tool call, in this order: the tool must be named by a string (otherwise a `Refusal`
-  whose `tool` is the value's `repr`); a call to `run_metric_query` must name a verified query of
-  the context; the call is put to the tool policy (`agent/policy/tools.py`) with the tool the
-  model named, the persona, and as resource the query's metric for `run_metric_query`, the
-  `Ledger` of the call's id for `propose_entry`, and a `Metric` of the call's id for any other
-  tool; a denial is a `Refusal` naming the policy's reasons; a call the policy allows to any tool
-  but `run_metric_query` is a `Refusal` too, since `ask` runs no other tool; only then is a
-  connection opened, by calling `as_persona(persona)`, at most once per `ask`;
-- the model gets at most `MAX_TOOL_CALLS` tool calls; one more is refused and ends the turn.
+- for each tool call, in this order: its tool and its query must each be a string, or the call
+  is a `Refusal` holding the `repr` of each that is not, before any lookup or policy request;
+  a call to `run_metric_query` must name a verified query of the context; the call is put to
+  the tool policy (`agent/policy/tools.py`) with the tool the model named, the persona, and as
+  resource the query's metric for `run_metric_query`, the `Ledger` of the call's id for
+  `propose_entry`, and a `Metric` of the call's id for any other tool; a denial is a `Refusal`
+  naming the policy's reasons; a call the policy allows to any tool but `run_metric_query` is a
+  `Refusal` too, since `ask` runs no other tool; only then is a connection opened, by calling
+  `as_persona(persona)`, at most once per `ask`;
+- the model gets at most `MAX_TOOL_CALLS` tool calls; one more is refused and ends the turn,
+  its refusal holding the `repr` of a tool or query that is not a string.
 
 How the tool runs a query: on a new cursor of the persona's connection (in DuckDB a cursor is a
 connection of its own to the same database, so it sees none of the parent's temporary objects),
@@ -171,13 +173,13 @@ def ask(
             break
         if calls == MAX_TOOL_CALLS:
             reason = f"the model made no reply within {MAX_TOOL_CALLS} tool calls"
-            results.append(Refusal(step.query, reason, step.tool))
+            results.append(Refusal(_text(step.query), reason, _text(step.tool)))
             text = reason
             break
         calls += 1
-        if not isinstance(step.tool, str):
-            reason = "the tool is not named by a string"
-            results.append(Refusal(step.query, reason, repr(step.tool)))
+        if not (isinstance(step.query, str) and isinstance(step.tool, str)):
+            reason = "the tool or the query is not a string"
+            results.append(Refusal(_text(step.query), reason, _text(step.tool)))
             continue
         query = queries.get(step.query) if step.tool == TOOL else None
         if step.tool == TOOL and query is None:
@@ -202,6 +204,11 @@ def ask(
         tuple(r for r in results if isinstance(r, Citation)),
         tuple(r for r in results if isinstance(r, Refusal)),
     )
+
+
+def _text(value: object) -> str:
+    """A model's value as a refusal holds it: a string as it is, anything else as its `repr`."""
+    return value if isinstance(value, str) else repr(value)
 
 
 def run_metric_query(
