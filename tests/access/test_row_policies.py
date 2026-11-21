@@ -317,14 +317,18 @@ def test_the_command_refuses_a_session_without_the_lab_project(
 
 
 @pytest.mark.bigquery_persona
-def test_each_human_persona_reads_only_its_entities_rows_of_payments(
-    as_persona_on_bigquery: Callable[[str], PersonaSession], access: dict[str, Any], human: str
+@pytest.mark.parametrize("table", ["payments", "payments_masked"])
+def test_each_human_persona_reads_only_its_entities_rows_of_its_copy(
+    as_persona_on_bigquery: Callable[[str], PersonaSession],
+    access: dict[str, Any],
+    human: str,
+    table: str,
 ) -> None:
     from gcp_project import lab_project
 
     granted = identity(access, human).reads.get("payments")
-    in_clear = human in clear(load_columns(), "payments")
-    sql = f"SELECT DISTINCT entity_id FROM `{lab_project()}.payments.payments`"  # noqa: S608
+    ours = (human in clear(load_columns(), "payments")) == (table == "payments")
+    sql = f"SELECT DISTINCT entity_id FROM `{lab_project()}.payments.{table}`"  # noqa: S608
     session = as_persona_on_bigquery(human)
     if granted is None:
         with pytest.raises(PersonaQueryError) as refused:
@@ -333,5 +337,5 @@ def test_each_human_persona_reads_only_its_entities_rows_of_payments(
             pytest.fail("a persona with no row grant on payments was not refused")
         return
     seen = {row[0] for row in session.query(sql).rows}
-    if seen != (set(granted) if in_clear else set()):
-        pytest.fail("the persona read other entities' rows than its grants give")
+    if seen != (set(granted) if ours else set()):
+        pytest.fail("the persona read other entities' rows of this copy than its grants give")
