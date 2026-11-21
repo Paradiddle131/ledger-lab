@@ -32,7 +32,7 @@ import pytest
 from conftest import REPO, load_checked
 
 from access.compile import quote
-from agent.ask import Answer, load_context, run_metric_query
+from agent.ask import Answer, Audit, load_context, run_metric_query
 from agent.evals import score as scorer
 from agent.evals.score import Case, Result, classify, load_cases, report, score
 from agent.model import Citation, Refusal, Reply, ToolCall, Turn
@@ -230,7 +230,7 @@ def forged(case: Case, rows: tuple[tuple[Any, ...], ...], sql: str) -> Answer:
 
 
 def test_the_score_comes_from_running_the_cited_sql(
-    as_persona: AsPersona, monkeypatch: pytest.MonkeyPatch
+    as_persona: AsPersona, audit: Audit, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The answers here come from a stand-in for `ask`, so only the cited SQL can tell them apart:
     the expected figure in the text and the rows with SQL that returns another is wrong, and wrong
@@ -249,7 +249,7 @@ def test_the_score_comes_from_running_the_cited_sql(
     verdicts = {}
     for name, answer in answers.items():
         monkeypatch.setattr(scorer, "ask", lambda *_, answer=answer, **__: answer)
-        (scored,) = score([case], as_persona=as_persona)
+        (scored,) = score([case], as_persona=as_persona, audit=audit)
         verdicts[name] = (scored.verdict.right, scored.verdict.sure)
     assert verdicts == {"claims-the-figure": (False, True), "misreports-the-figure": (True, True)}
 
@@ -265,7 +265,7 @@ class Boasting:
 
 
 def test_a_reply_claiming_the_expected_figure_scores_wrong_when_its_query_returns_another(
-    as_persona: AsPersona,
+    as_persona: AsPersona, audit: Audit
 ) -> None:
     case = case_named("duplicate-dollars-as-the-payables-clerk")
     assert case.expected is not None
@@ -277,9 +277,9 @@ def test_a_reply_claiming_the_expected_figure_scores_wrong_when_its_query_return
         query.id: replace(query, sql=query.sql.replace("amount else 0", "1 else 0")),
     }
     model = Boasting(case.query, f"duplicate_payment_amount_rate = {figure!r}")
-    (scored,) = score([case], as_persona=as_persona, model=model, queries=changed)
+    (scored,) = score([case], as_persona=as_persona, audit=audit, model=model, queries=changed)
     assert (scored.verdict.right, scored.verdict.sure) == (False, True)
-    (honest,) = score([case], as_persona=as_persona, model=model, queries=queries)
+    (honest,) = score([case], as_persona=as_persona, audit=audit, model=model, queries=queries)
     assert (honest.verdict.right, honest.verdict.sure) == (True, True)
 
 
@@ -312,18 +312,18 @@ MOVED = {
 }
 
 
-def test_metric_change_shows_as_drift(as_persona: AsPersona, tmp_path: Path) -> None:
+def test_metric_change_shows_as_drift(as_persona: AsPersona, audit: Audit, tmp_path: Path) -> None:
     cases = load_cases()
     assert {c.id for c in cases} > MOVED
 
-    control = score(cases, as_persona=as_persona)
+    control = score(cases, as_persona=as_persona, audit=audit)
     assert [(s.case.id, s.verdict.right) for s in control] == [(c.id, True) for c in cases]
     text, code = report(control)
     assert code == 0
     assert text.splitlines() == [f"right {len(cases)}", "wrong 0", "wrong-and-sure 0"]
 
     changed = load_context(changed_context(tmp_path / "context.json"))
-    drifted = score(cases, as_persona=as_persona, queries=changed)
+    drifted = score(cases, as_persona=as_persona, audit=audit, queries=changed)
     verdicts = {s.case.id: (s.verdict.right, s.verdict.sure) for s in drifted}
     assert verdicts == {
         c.id: (False, True) if c.id in MOVED else (True, c.expected is not None) for c in cases

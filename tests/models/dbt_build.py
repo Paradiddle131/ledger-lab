@@ -6,11 +6,14 @@ model reading a fetched source reads: `sample`, the committed seeds (the vendor 
 register records among them), or `landed`, the files under the landing path.
 """
 
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -92,3 +95,50 @@ def built(tmp_path: Path, source_rows: str, landing: Path | None = None) -> Buil
 def query(build: Build, sql: str, *params: object) -> list[tuple[Any, ...]]:
     with duckdb.connect(str(build.database), read_only=True) as db:
         return db.execute(sql, list(params)).fetchall()
+
+
+# The committed samples a `sample` build reads for a source of ingest/sources.yaml that an audit
+# record names; the record lists these by digest, as a landed build lists its landed files.
+SAMPLED_SOURCES = {
+    "chicago-contracts": "models/seeds/staging/chicago/chicago_contracts_sample.csv",
+    "chicago-payments": "models/seeds/staging/chicago/chicago_payments_sample.csv",
+}
+
+
+def git_out(*args: str) -> str:
+    git = shutil.which("git") or "git"
+    done = subprocess.run(
+        [git, *args], cwd=PROJECT.parent, capture_output=True, text=True, check=True
+    )
+    return done.stdout.strip()
+
+
+def record_time(moment: datetime) -> str:
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def build_data(cwd: Path) -> dict[str, Any]:
+    """An audit record's `data` for a sample build made by `built` in `cwd`: dbt's invocation id
+    and time from its run results there, the checkout's HEAD as its commit, the local target and
+    its variables, and each sampled source's committed file by SHA-256, its time HEAD's commit
+    time. Stated limit: HEAD is named whatever the working tree holds beside it."""
+    metadata = json.loads((cwd / "target" / "run_results.json").read_text())["metadata"]
+    head = git_out("rev-parse", "HEAD")
+    committed = record_time(datetime.fromtimestamp(int(git_out("log", "-1", "--format=%ct")), UTC))
+    return {
+        "build": {
+            "id": metadata["invocation_id"],
+            "at": record_time(datetime.fromisoformat(metadata["generated_at"])),
+            "commit": head,
+            "target": "local",
+            "vars": {"source_rows": "sample"},
+        },
+        "sources": [
+            {
+                "name": name,
+                "sha256": hashlib.sha256((PROJECT.parent / path).read_bytes()).hexdigest(),
+                "landed_at": committed,
+            }
+            for name, path in SAMPLED_SOURCES.items()
+        ],
+    }
