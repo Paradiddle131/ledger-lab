@@ -1,14 +1,11 @@
 """Shared loaders for the catalogues kept as data in the tree, and the persona identities."""
 
-import hashlib
 import json
 import logging
 import os
 import shutil
 import signal
-import subprocess
 from collections.abc import Callable, Generator, Iterator
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +20,7 @@ from access.compile import open_persona
 from access.identities import identity
 from agent.ask import Audit
 from agent.audit import FileLog
+from tests.models.dbt_build import SAMPLED_SOURCES, git_out
 
 if TYPE_CHECKING:
     from tests.models.dbt_build import Build
@@ -159,48 +157,11 @@ def as_persona(
         shutil.rmtree(directory)
 
 
-# The committed samples a `sample` build reads for a source of ingest/sources.yaml that an audit
-# record names; the record lists these by digest, as a landed build lists its landed files.
-SAMPLED_SOURCES = {
-    "chicago-contracts": "models/seeds/staging/chicago/chicago_contracts_sample.csv",
-    "chicago-payments": "models/seeds/staging/chicago/chicago_payments_sample.csv",
-}
-
-
-def git_out(*args: str) -> str:
-    git = shutil.which("git") or "git"
-    done = subprocess.run([git, *args], cwd=REPO, capture_output=True, text=True, check=True)
-    return done.stdout.strip()
-
-
-def record_time(moment: datetime) -> str:
-    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-
 def sample_build_data(build: "Build") -> dict[str, Any]:
-    """An audit record's `data` for the session's sample build: dbt's invocation id and time from
-    its run results, the checkout's HEAD as its commit, the local target and its variables, and
-    each sampled source's committed file by SHA-256, its time HEAD's commit time."""
-    metadata = json.loads((build.cwd / "target" / "run_results.json").read_text())["metadata"]
-    head = git_out("rev-parse", "HEAD")
-    committed = record_time(datetime.fromtimestamp(int(git_out("log", "-1", "--format=%ct")), UTC))
-    return {
-        "build": {
-            "id": metadata["invocation_id"],
-            "at": record_time(datetime.fromisoformat(metadata["generated_at"])),
-            "commit": head,
-            "target": "local",
-            "vars": {"source_rows": "sample"},
-        },
-        "sources": [
-            {
-                "name": name,
-                "sha256": hashlib.sha256((REPO / path).read_bytes()).hexdigest(),
-                "landed_at": committed,
-            }
-            for name, path in SAMPLED_SOURCES.items()
-        ],
-    }
+    """An audit record's `data` for the session's sample build (`tests/models/dbt_build.py`)."""
+    from tests.models.dbt_build import build_data
+
+    return build_data(build.cwd)
 
 
 @pytest.fixture
@@ -210,6 +171,9 @@ def audit(build: "Build", tmp_path: Path) -> Audit:
     log = FileLog(tmp_path / "audit" / "log.jsonl", tmp_path / "audit" / "kept")
     log.path.parent.mkdir()
     return Audit(log, git_out("rev-parse", "HEAD"), sample_build_data(build))
+
+
+__all__ = ["SAMPLED_SOURCES", "git_out"]
 
 
 @pytest.fixture

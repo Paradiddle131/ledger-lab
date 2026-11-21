@@ -1,7 +1,8 @@
 """Score the own agent on the golden set (`agent/evals/golden.yaml`) by running the queries its
 answers cite.
 
-For each case, `score` asks `agent.ask.ask` the case's question as the case's persona, then reads
+For each case, `score` asks `agent.ask.ask` the case's question as the case's persona, writing
+the turn's audit record to the `Audit` its caller passes, then reads
 from the answer only each citation's query id and SQL, runs that SQL again on a connection
 `as_persona(persona)` returns, through `agent.ask.run_metric_query` (a cursor with the search path
 set to the persona's own schemas), and hands the results to `classify`, a pure function.
@@ -23,7 +24,10 @@ abstaining. Every wrong-and-sure answer is also counted as wrong.
 `python -m agent.evals.score [--warehouse <sample build>]` prints the counts and each wrong case's
 id and reason, and exits 1 when any case is wrong; without `--warehouse` it builds the committed
 samples on the local engine in a temporary folder first (`tests/models/dbt_build.py`). It runs the
-model `LEDGER_LAB_AGENT_MODEL` names, which today is only the scripted one.
+model `LEDGER_LAB_AGENT_MODEL` names, which today is only the scripted one. It writes each turn's
+audit record to a `FileLog` in a temporary folder of its own, deleted with the records and kept
+values when it exits; the records name the checkout's HEAD as the release and the build's data as
+`tests.models.dbt_build.build_data` reads it from the folder that holds the warehouse.
 
 Stated limits:
 - the answer's text and the rows its citations report are not read; `ask` fills a citation's rows
@@ -36,7 +40,9 @@ Stated limits:
 - the expected results were frozen on the committed sample build; on another build (the landed
   files) the cases are expected to score wrong;
 - drift shows only where a changed definition changes a frozen result: a change that leaves every
-  case's rows on the sample build as they were does not move the score.
+  case's rows on the sample build as they were does not move the score;
+- the command reads the build's run results from `target/run_results.json` beside the warehouse,
+  the layout `tests/models/dbt_build.py` writes; another layout fails before any case is asked.
 """
 
 import argparse
@@ -57,7 +63,8 @@ import duckdb
 import yaml
 from jsonschema import Draft202012Validator
 
-from agent.ask import Answer, AsPersona, ask, run_metric_query
+from agent.ask import Answer, AsPersona, Audit, ask, run_metric_query
+from agent.audit import FileLog
 from agent.model import Citation, Model, VerifiedQuery
 
 REPO = Path(__file__).resolve().parents[2]
@@ -181,14 +188,21 @@ def score(
     cases: Sequence[Case],
     *,
     as_persona: AsPersona,
+    audit: Audit,
     model: Model | None = None,
     queries: Mapping[str, VerifiedQuery] | None = None,
 ) -> list[Scored]:
-    """Ask each case's question and score the answer by running what it cites again."""
+    """Ask each case's question, its record written to `audit`, and score the answer by running
+    what it cites again."""
     scored = []
     for case in cases:
         answer = ask(
-            case.persona, case.question, as_persona=as_persona, model=model, queries=queries
+            case.persona,
+            case.question,
+            as_persona=as_persona,
+            audit=audit,
+            model=model,
+            queries=queries,
         )
         citations = cited(answer)
         executed: list[Result | None] = []
@@ -249,13 +263,17 @@ def main(argv: Sequence[str]) -> int:
     args = parser.parse_args(argv)
     cases = load_cases()
     with tempfile.TemporaryDirectory(prefix="golden-build-") as scratch:
+        from tests.models.dbt_build import build_data, built, git_out
+
         warehouse = args.warehouse
         if warehouse is None:
-            from tests.models.dbt_build import built
-
             warehouse = built(Path(scratch), "sample").database
+        records = Path(scratch) / "audit"
+        records.mkdir(mode=0o700)
+        log = FileLog(records / "log.jsonl", records / "kept")
+        audit = Audit(log, git_out("rev-parse", "HEAD"), build_data(warehouse.parent))
         with personas_over(warehouse) as as_persona:
-            text, code = report(score(cases, as_persona=as_persona))
+            text, code = report(score(cases, as_persona=as_persona, audit=audit))
     print(text)
     return code
 
