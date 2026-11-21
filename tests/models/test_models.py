@@ -7,6 +7,7 @@ these tests never reach BigQuery whatever the session's environment holds.
 """
 
 import csv
+import importlib
 import json
 import os
 import re
@@ -101,12 +102,19 @@ IN_REGION = {"LEDGER_LAB_BQ_LOCATION": "us-central1"}
         ),
     ],
 )
-def test_an_explicit_bigquery_target_is_refused_in_another_labs_session(
+def test_the_bigquery_output_names_a_method_dbt_refuses_in_another_labs_session(
     env: dict[str, str], method: str
 ) -> None:
-    """dbt checks the method against its own list when it reads the profile, so a method outside
-    it stops `--target bigquery` before any connection."""
+    """The method the profile renders for each environment. That dbt refuses a method outside its
+    own list when it reads the profile is the run quoted above `REFUSED`; where the `bigquery`
+    group is installed, each rendered method is also checked against dbt-bigquery's list."""
     assert render("method", env) == method
+    try:
+        credentials = importlib.import_module("dbt.adapters.bigquery.credentials")
+    except ImportError:
+        return
+    accepted = {m.value for m in credentials.BigQueryConnectionMethod}
+    assert (method in accepted) == (method != REFUSED), (method, accepted)
 
 
 # Not one of dbt-bigquery's methods either: the method while the location is not a free-tier region.
