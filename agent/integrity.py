@@ -90,7 +90,7 @@ WITHHELD = (
 # The characters read as a minus directly before or after a number.
 DASHES = "-\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe58\ufe63\uff0d"
 NUMBER = re.compile(
-    rf"(?:(?<!\w)[{DASHES}])?(?:\d{{1,3}}(?:,\d{{3}})+(?!\d)|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?"
+    rf"(?:(?<!\w)[{DASHES}])?(?:\d{{1,3}}(?:,\d{{3}})+|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?"
 )
 VERSION = re.compile(r"(?<!\w)version\s+$", re.IGNORECASE)
 # The schema names `agent/ask.py`'s tool sets on the search path, and no other.
