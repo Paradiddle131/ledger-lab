@@ -188,7 +188,7 @@
       "allOf": [
         {
           "if": {"properties": {"outcome": {"const": "failed"}}},
-          "then": {"required": ["reason"], "not": {"required": ["answer"]}, "properties": {"reason": {"enum": ["model-error", "policy-error", "connection-error", "tool-error"]}}},
+          "then": {"required": ["reason"], "not": {"required": ["answer"]}},
           "else": {"required": ["answer"]}
         },
         {
