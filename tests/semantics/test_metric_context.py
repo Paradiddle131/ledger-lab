@@ -31,8 +31,11 @@ Block = dict[str, Any]
 CHANGED = "duplicate_payment_amount_rate"
 PAYMENTS = "semantics/metricflow/payments.yml"
 VERIFIED = "semantics/verified_queries.yaml"
-# The tree a fresh export reads: the dbt project, the definitions, the export and the gate it uses.
-TREE = tracked("models", "semantics")
+# The tree a fresh export reads: the dbt project, the definitions, the export and the gate it uses,
+# with the files that name the gate's BigQuery environment, so the copy shares that environment.
+TREE = tracked(
+    "models", "semantics", "platform/group_env.py", "pyproject.toml", "uv.lock", ".python-version"
+)
 RATIO = (
     "      denominator: chicago_payment_amount\n"
     "    config:\n"
