@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Audit record",
-  "description": "One record per agent turn (answered, abstained, refused or stopped), per proposal the acting agent drafts and per human decision on a proposal, in one log the agent operator and the auditor read. A record holds in clear only what tells no reader any data value: who, when, which agent, data build, code, metric versions, query text and warehouse job; it holds a seal (agent/audit.py) in place of every value a reader of the log may not see (the question, query parameters, each query's result, the answer, a proposal's request, inputs and draft). A query's text enters a record only once agent/audit.py's check_bound passes it, so every value from a question or a result is a parameter. The salt and value of each seal are kept outside the log, keyed by the record's position. Records form one hash chain: `prev` is the previous record's `digest`, `digest` the SHA-256 of the record's RFC 8785 canonical form without `digest`; keeping one writer at a time is the writer's job, not the schema's. Every time is checked as a real instant by agent/audit.py, since the schema's pattern cannot.",
+  "description": "One record per agent turn (answered, abstained, refused, stopped or failed), per proposal the acting agent drafts and per human decision on a proposal, in one log the agent operator and the auditor read. A record holds in clear only what tells no reader any data value: who, when, which agent, data build, code, metric versions, query text and warehouse job; it holds a seal (agent/audit.py) in place of every value a reader of the log may not see (the question, query parameters, each query's result, the answer, a proposal's request, inputs and draft). A query's text enters a record only once agent/audit.py's check_bound passes it, so every value from a question or a result is a parameter. The salt and value of each seal are kept outside the log, keyed by the record's position. Records form one hash chain: `prev` is the previous record's `digest`, `digest` the SHA-256 of the record's RFC 8785 canonical form without `digest`; keeping one writer at a time is the writer's job, not the schema's. Every time is checked as a real instant by agent/audit.py, since the schema's pattern cannot.",
   "type": "object",
   "required": ["seq", "prev", "digest", "kind", "at"],
   "properties": {
@@ -170,22 +170,27 @@
       }
     },
     "answer": {
-      "description": "One turn of a session: answered, with at least one warehouse run and one metric; abstained, when no metric or verified query covers the question; refused, for no identity or by policy; or stopped at a cap. Runs list only the jobs that returned.",
-      "required": ["asker", "agent", "question", "release", "outcome", "data", "metrics", "runs", "answer"],
+      "description": "One turn of a session: answered, with at least one warehouse run and one metric; abstained, when no metric or verified query covers the question; refused, for no identity or by policy; stopped at a cap; or failed, when the model, the tool policy, the connection-maker or the tool raised, with no answer shown and so no answer seal. Runs list only the jobs that returned.",
+      "required": ["asker", "agent", "question", "release", "outcome", "data", "metrics", "runs"],
       "properties": {
         "asker": {"$ref": "#/$defs/asker"},
         "agent": {"description": "Which agent took the turn.", "enum": ["native-agent", "own-agent"]},
         "question": {"description": "The seal of the question as asked.", "$ref": "#/$defs/sealed"},
         "release": {"$ref": "#/$defs/release"},
         "model": {"$ref": "#/$defs/model"},
-        "outcome": {"enum": ["answered", "abstained", "refused", "stopped"]},
-        "reason": {"description": "Why a turn was refused or stopped."},
+        "outcome": {"enum": ["answered", "abstained", "refused", "stopped", "failed"]},
+        "reason": {"description": "Why a turn was refused, stopped or failed."},
         "data": {"$ref": "#/$defs/data"},
         "metrics": {"type": "array", "items": {"$ref": "#/$defs/metric"}},
         "runs": {"type": "array", "items": {"$ref": "#/$defs/run"}},
-        "answer": {"description": "The seal of the text the turn showed.", "$ref": "#/$defs/sealed"}
+        "answer": {"description": "The seal of the text the turn showed; absent exactly when the turn failed.", "$ref": "#/$defs/sealed"}
       },
       "allOf": [
+        {
+          "if": {"properties": {"outcome": {"const": "failed"}}},
+          "then": {"required": ["reason"], "not": {"required": ["answer"]}, "properties": {"reason": {"enum": ["model-error", "policy-error", "connection-error", "tool-error"]}}},
+          "else": {"required": ["answer"]}
+        },
         {
           "if": {"properties": {"outcome": {"const": "answered"}}},
           "then": {"properties": {"metrics": {"minItems": 1}, "runs": {"minItems": 1}}}

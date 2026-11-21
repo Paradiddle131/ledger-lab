@@ -300,7 +300,7 @@ def sealed_paths(record: Mapping[str, Any]) -> set[str]:
     """The paths of a record's sealed fields, as its kept values are keyed."""
     kind = record.get("kind")
     if kind == "answer":
-        paths = {"question", "answer"}
+        paths = {"question"} | ({"answer"} if record.get("outcome") != "failed" else set())
         for index, run in enumerate(record.get("runs", [])):
             paths.add(f"runs/{index}/result")
             if "parameters" in run.get("query", {}):

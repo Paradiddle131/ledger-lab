@@ -11,14 +11,20 @@ What `ask` checks, in this order:
   not a string or not such an id writes a record refused for `no-identity` and raises
   `NoPersonaError` (or `AuditWriteFailed` when that record is not written), before the metric
   context is loaded, the model is asked or a connection is opened; a `NoPersonaError` that
-  `as_persona` raises later is a turn that raises, below, and writes no record;
+  `as_persona` raises later is a turn that raises, below, recorded as `failed` with
+  `connection-error`;
 - for each tool call: the query id names a verified query of the context; the tool policy
   (`agent/policy/tools.py`) allows the persona to run `run_metric_query` on the query's metric;
   only then is a connection opened, by calling `as_persona(persona)`, at most once per `ask`;
 - the model gets at most `MAX_TOOL_CALLS` tool calls; one more is refused and ends the turn;
 - once the turn has ended, its record is written (`AuditLog.append`, by default
   `agent.audit.FileLog`, which checks it against the schema and its seals before writing); when
-  that raises, for any `Exception`, `ask` raises `AuditWriteFailed` and returns no `Answer`.
+  that raises, for any `Exception`, `ask` raises `AuditWriteFailed` and returns no `Answer`;
+- when an `Exception` is raised by the model's step, the tool policy, `as_persona` or the tool
+  (`run_metric_query`), the turn's record is written as `failed`, with `model-error`,
+  `policy-error`, `connection-error` or `tool-error` for that step, holding the runs that returned
+  before it and no answer seal; then that same exception is raised again, or `AuditWriteFailed` in
+  its place when the record is not written.
 
 What the record holds: the asker's persona (none on a `no-identity` refusal), a session id `ask`
 makes and turn 1 (each `ask` is a session of one turn), `own-agent`, the time the turn ended,
@@ -27,9 +33,9 @@ that returned the SQL as sent, the persona, `duckdb`, a run id and its start tim
 question, the answer's text, each run's result (`agent.audit.sealed_result` of its columns and its
 cells as `cell_text`) and its bound values, a seal, each under its own salt, the salt and value
 kept by the log apart from the record.
-Its outcome is `refused` with `no-identity` for no persona, `stopped` with `model-call-cap` at the
-tool-call limit, else `answered` when a query returned, `refused` with `policy` when none did and
-the tool policy denied one, and `abstained` otherwise.
+Its outcome is `refused` with `no-identity` for no persona, `failed` when a step raised (above),
+`stopped` with `model-call-cap` at the tool-call limit, else `answered` when a query returned,
+`refused` with `policy` when none did and the tool policy denied one, and `abstained` otherwise.
 
 How the tool runs a query: on a new cursor of the persona's connection (in DuckDB a cursor is a
 connection of its own to the same database, so it sees none of the parent's temporary objects),
@@ -51,10 +57,11 @@ Stated limits:
   read-only, which is what stops a write;
 - the record names no model (the model protocol carries no name or settings yet), and its release
   and data are the caller's word, not checked here against the code or the connection;
-- a turn that raises before it ends (the model, the policy or `as_persona` raising) writes no
-  record and returns no answer, also when a query has already run as the persona and its rows have
-  been shown to the model; a run the engine refused is not among the record's runs, and a turn
-  with only such runs is recorded as `abstained`;
+- only `Exception` is caught for a `failed` record: a `KeyboardInterrupt`, `SystemExit` or other
+  `BaseException` during the turn writes no record (and returns no answer); so does an exception
+  loading the metric context or building the model, before the turn starts;
+- a run the engine refused is not among the record's runs, and a turn with only such runs is
+  recorded as `abstained`;
 - the log's head digest is not yet anchored outside the writer's reach, so whoever can write the
   log can still rewrite it from any record on, add to its end or cut its tail, and it verifies.
 """
@@ -107,6 +114,13 @@ ENGINE = "duckdb"
 AGENT = "own-agent"
 # The stop reason of a turn that reached MAX_TOOL_CALLS, from the schema's fixed list.
 CAP = "model-call-cap"
+# The reasons of a `failed` record, by the step that raised.
+MODEL_ERROR, POLICY_ERROR, CONNECTION_ERROR, TOOL_ERROR = (
+    "model-error",
+    "policy-error",
+    "connection-error",
+    "tool-error",
+)
 
 AsPersona = Callable[[str], duckdb.DuckDBPyConnection]
 
@@ -206,36 +220,57 @@ def ask(
     runs: list[Run] = []
     denied = stopped = False
     calls = 0
-    while True:
-        step = model.step(Turn(question, tuple(queries.values()), tuple(results)))
-        if isinstance(step, Reply):
-            text = step.text
-            break
-        if calls == MAX_TOOL_CALLS:
-            reason = f"the model made no reply within {MAX_TOOL_CALLS} tool calls"
-            results.append(Refusal(step.query, reason))
-            text, stopped = reason, True
-            break
-        calls += 1
-        query = queries.get(step.query)
-        if query is None:
-            results.append(Refusal(step.query, "the metric context holds no such verified query"))
-            continue
-        decision = authorize(
-            Entity("Persona", persona), TOOL, Entity("Metric", query.metric), {"session": session}
-        )
-        if not decision:
-            reasons = "; ".join(decision.reasons)
-            results.append(Refusal(query.id, f"the tool policy denied it: {reasons}"))
-            denied = True
-            continue
-        if connection is None:
-            connection = as_persona(persona)
-        result, run = _run(connection, query, persona)
-        results.append(result)
-        if run is not None:
-            runs.append(run)
+    # The reason a `failed` record gives when the step under way raises.
+    stage = MODEL_ERROR
+    raised: Exception | None = None
+    text = ""
+    try:
+        while True:
+            stage = MODEL_ERROR
+            step = model.step(Turn(question, tuple(queries.values()), tuple(results)))
+            if isinstance(step, Reply):
+                text = step.text
+                break
+            if calls == MAX_TOOL_CALLS:
+                reason = f"the model made no reply within {MAX_TOOL_CALLS} tool calls"
+                results.append(Refusal(step.query, reason))
+                text, stopped = reason, True
+                break
+            calls += 1
+            query = queries.get(step.query)
+            if query is None:
+                results.append(
+                    Refusal(step.query, "the metric context holds no such verified query")
+                )
+                continue
+            stage = POLICY_ERROR
+            decision = authorize(
+                Entity("Persona", persona),
+                TOOL,
+                Entity("Metric", query.metric),
+                {"session": session},
+            )
+            if not decision:
+                reasons = "; ".join(decision.reasons)
+                results.append(Refusal(query.id, f"the tool policy denied it: {reasons}"))
+                denied = True
+                continue
+            if connection is None:
+                stage = CONNECTION_ERROR
+                connection = as_persona(persona)
+            stage = TOOL_ERROR
+            result, run = _run(connection, query, persona)
+            results.append(result)
+            if run is not None:
+                runs.append(run)
+    except Exception as error:
+        raised = error
     citations = [r for r in results if isinstance(r, Citation)]
+    metrics = list(dict.fromkeys((c.metric, c.version) for c in citations))
+    if raised is not None:
+        # Written outside the `except`, so an `AuditWriteFailed` carries no context.
+        record(audit, persona, session, question, ("failed", stage), metrics, runs, None)
+        raise raised
     if stopped:
         outcome: tuple[str, str | None] = ("stopped", CAP)
     elif citations:
@@ -244,7 +279,6 @@ def ask(
         outcome = ("refused", "policy")
     else:
         outcome = ("abstained", None)
-    metrics = list(dict.fromkeys((c.metric, c.version) for c in citations))
     record(audit, persona, session, question, outcome, metrics, runs, text)
     return Answer(
         persona,
@@ -268,7 +302,7 @@ def record(
     outcome: tuple[str, str | None],
     metrics: list[tuple[str, int]],
     runs: list[Run],
-    text: str,
+    text: str | None,
 ) -> dict[str, Any]:
     """Write one turn's record to `audit.log`, each sealed value under a salt of its own; any
     `Exception` on the way is raised as `AuditWriteFailed`, raised after the failure is handled,
@@ -308,8 +342,9 @@ def record(
             "data": dict(audit.data),
             "metrics": [{"name": name, "version": version} for name, version in metrics],
             "runs": entries,
-            "answer": sealed("answer", text),
         }
+        if text is not None:
+            body["answer"] = sealed("answer", text)
         if reason is not None:
             body["reason"] = reason
         return audit.log.append(body, kept)

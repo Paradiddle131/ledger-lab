@@ -26,9 +26,10 @@ import pytest
 from conftest import REPO, SAMPLED_SOURCES, git_out
 from jsonschema import Draft202012Validator
 
+import agent.ask
 import agent.audit
 from access.compile import open_persona
-from agent.ask import MAX_TOOL_CALLS, Audit, ask, load_context
+from agent.ask import MAX_TOOL_CALLS, Audit, NoPersonaError, ask, load_context
 from agent.audit import (
     GENESIS,
     AuditWriteFailed,
@@ -361,6 +362,15 @@ class Looping:
         return ToolCall("duplicate-payment-rate")
 
 
+class ShownThenFails:
+    """Calls the verified query, then raises once it has seen the rows."""
+
+    def step(self, turn: Turn) -> ToolCall | Reply:
+        if not turn.results:
+            return ToolCall("duplicate-payment-rate")
+        raise TimeoutError("the model's endpoint timed out")
+
+
 def test_each_turn_writes_one_record_with_its_outcome(as_persona: AsPersona, audit: Audit) -> None:
     with pytest.raises(ValueError, match="persona"):
         ask(None, QUESTION, as_persona=as_persona, audit=audit)
@@ -370,6 +380,8 @@ def test_each_turn_writes_one_record_with_its_outcome(as_persona: AsPersona, aud
         ask(DENIED, QUESTION, as_persona=as_persona, audit=audit),
         ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=Looping()),
     ]
+    with pytest.raises(TimeoutError):
+        ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=ShownThenFails())
     assert isinstance(audit.log, FileLog)
     records = read_log(audit.log.path.read_bytes())
     verify_chain(records)
@@ -379,6 +391,7 @@ def test_each_turn_writes_one_record_with_its_outcome(as_persona: AsPersona, aud
         ("abstained", None, 0),
         ("refused", "policy", 0),
         ("stopped", "model-call-cap", MAX_TOOL_CALLS),
+        ("failed", "model-error", 1),
     ]
     for record in records:
         assert list(SCHEMA.iter_errors(record)) == [], record["seq"]
@@ -386,7 +399,7 @@ def test_each_turn_writes_one_record_with_its_outcome(as_persona: AsPersona, aud
         assert set(opened) == sealed_paths(record)
         for path, (salt, value) in opened.items():
             assert field(record, path) == seal(salt, value)
-    for answer, record in zip(answers, records[1:], strict=True):
+    for answer, record in zip(answers, records[1:-1], strict=True):
         opened = json.loads((audit.log.kept / f"{record['seq']}.json").read_text())
         assert opened["question"][1] == answer.question
         assert opened["answer"][1] == answer.text
@@ -441,8 +454,9 @@ class Broken:
         (DENIED, QUESTION, None),
         (CHICAGO, QUESTION, Looping()),
         ("nobody-at-all", QUESTION, None),
+        (CHICAGO, QUESTION, ShownThenFails()),
     ],
-    ids=["answered", "abstained", "policy", "stopped", "no-identity"],
+    ids=["answered", "abstained", "policy", "stopped", "no-identity", "failed"],
 )
 def test_a_broken_log_sink_returns_no_answer(
     who: str, question: str, model: Any, as_persona: AsPersona, audit: Audit
@@ -454,7 +468,8 @@ def test_a_broken_log_sink_returns_no_answer(
     (kept,) = sink.seen
     said = str(raised.value)
     assert "OSError" in said
-    assert question not in said and str(kept["answer"][1]) not in said
+    held = [str(leaf) for _, value in kept.values() for leaf in leaves(value) if leaf is not None]
+    assert [leaf for leaf in held if len(leaf) > 3 and leaf in said] == []
     assert raised.value.__cause__ is None and raised.value.__context__ is None
 
 
@@ -744,3 +759,96 @@ def test_a_leftover_temporary_file_is_replaced_not_followed(
 def test_bind_refuses_a_string_it_would_leave_in_clear(sql: str) -> None:
     with pytest.raises(UnboundValue, match="string form"):
         bind(sql, "duckdb")
+
+
+# A turn that raises
+
+
+def failed_record(audit: Audit) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The log's one record, checked with its seals opened, and its kept values."""
+    assert isinstance(audit.log, FileLog)
+    (record,) = read_log(audit.log.path.read_bytes())
+    verify_chain([record])
+    assert list(SCHEMA.iter_errors(record)) == []
+    opened = json.loads((audit.log.kept / "0.json").read_text())
+    assert set(opened) == sealed_paths(record) and "answer" not in record
+    for path, (salt, value) in opened.items():
+        assert field(record, path) == seal(salt, value)
+    return record, opened
+
+
+def test_a_model_that_raises_after_a_run_leaves_a_failed_record_of_that_run(
+    as_persona: AsPersona, audit: Audit
+) -> None:
+    with pytest.raises(TimeoutError, match="endpoint timed out") as raised:
+        ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=ShownThenFails())
+    assert type(raised.value) is TimeoutError
+    record, opened = failed_record(audit)
+    assert (record["outcome"], record["reason"]) == ("failed", "model-error")
+    (run,) = record["runs"]
+    assert run["as"] == CHICAGO
+    ((share,),) = opened["runs/0/result"][1]["rows"]
+    assert 0 <= float(share) <= 1
+    assert record["metrics"] == [{"name": "duplicate_payment_rate", "version": 1}]
+
+
+def test_a_connection_maker_that_raises_leaves_a_failed_record(audit: Audit) -> None:
+    def refusing(persona: str) -> duckdb.DuckDBPyConnection:
+        raise NoPersonaError("the connection-maker knows no such persona")
+
+    with pytest.raises(NoPersonaError, match="connection-maker"):
+        ask(CHICAGO, QUESTION, as_persona=refusing, audit=audit)
+    record, _ = failed_record(audit)
+    assert (record["outcome"], record["reason"], record["runs"]) == (
+        "failed",
+        "connection-error",
+        [],
+    )
+
+
+def test_a_policy_that_raises_leaves_a_failed_record(
+    as_persona: AsPersona, audit: Audit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def raising(*_: Any) -> Any:
+        raise RuntimeError("the policy engine failed to load")
+
+    monkeypatch.setattr(agent.ask, "authorize", raising)
+    with pytest.raises(RuntimeError, match="policy engine"):
+        ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit)
+    record, _ = failed_record(audit)
+    assert (record["outcome"], record["reason"]) == ("failed", "policy-error")
+
+
+class NoCursor:
+    """A connection whose cursor raises an error that is not the engine's."""
+
+    def cursor(self) -> Any:
+        raise RuntimeError("the connection was handed over to another thread")
+
+
+def test_a_tool_that_raises_leaves_a_failed_record(audit: Audit) -> None:
+    def handed_over(persona: str) -> Any:
+        return NoCursor()
+
+    with pytest.raises(RuntimeError, match="another thread"):
+        ask(CHICAGO, QUESTION, as_persona=handed_over, audit=audit)
+    record, _ = failed_record(audit)
+    assert (record["outcome"], record["reason"]) == ("failed", "tool-error")
+
+
+def test_a_failed_turn_whose_record_cannot_be_written_raises_only_the_write_failure(
+    as_persona: AsPersona, audit: Audit
+) -> None:
+    sink = Broken()
+    with pytest.raises(AuditWriteFailed) as raised:
+        ask(
+            CHICAGO,
+            QUESTION,
+            as_persona=as_persona,
+            audit=Audit(sink, audit.release, audit.data),
+            model=ShownThenFails(),
+        )
+    (kept,) = sink.seen
+    assert "answer" not in kept and "runs/0/result" in kept
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
+    assert "timed out" not in str(raised.value) and QUESTION not in str(raised.value)

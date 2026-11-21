@@ -217,8 +217,9 @@ def test_the_required_top_fields_are_the_schemas_lists(
             if errors(validator, changed):
                 refused.add(key)
         listed = set(schema["required"]) | set(schema["$defs"][record["kind"]]["required"])
-        # An approved decision also requires its posting.
-        assert refused == listed | ({"posting"} if record["kind"] == "approval" else set())
+        # An approved decision also requires its posting, and a turn that did not fail its answer.
+        conditional = {"approval": {"posting"}, "answer": {"answer"}}.get(record["kind"], set())
+        assert refused == listed | conditional
 
 
 @pytest.mark.parametrize(
@@ -325,6 +326,28 @@ def test_a_refused_or_stopped_turn_states_its_reason_and_only_no_identity_leaves
     assert errors(validator, record) != [], "a turn with no identity ran a query"
     record.update(runs=[], outcome="refused", reason="policy")
     assert errors(validator, record) != [], "only a turn with no identity has no persona"
+
+
+@pytest.mark.parametrize(
+    "reason", ["model-error", "policy-error", "connection-error", "tool-error"]
+)
+def test_a_failed_turn_states_its_reason_keeps_its_runs_and_has_no_answer_seal(
+    reason: str, validator: Draft202012Validator
+) -> None:
+    record = example(0)
+    record.update(outcome="failed", reason=reason)
+    assert errors(validator, record) != [], "a failed turn showed no answer to seal"
+    del record["answer"]
+    assert errors(validator, record) == [], "a failed turn keeps the runs that returned"
+    record.update(runs=[], metrics=[])
+    assert errors(validator, record) == []
+    for wrong in ("policy", "model-call-cap", "a sentence about the error"):
+        record["reason"] = wrong
+        assert errors(validator, record) != [], wrong
+    del record["reason"]
+    assert errors(validator, record) != [], "a failed turn states its reason"
+    record.update(outcome="answered", reason=reason)
+    assert errors(validator, record) != [], "only a failed turn takes an error reason"
 
 
 @pytest.mark.parametrize(
