@@ -13,12 +13,19 @@ With `LEDGER_LAB_GCP_PROJECT` set and no `GCP_PROJECT` it
   `platform/gcp` (`fences.py`); a fence that is missing, differs or answers in an unexpected shape
   fails. Where the environment hands gcloud its token (`CLOUDSDK_AUTH_ACCESS_TOKEN`, as a cloud
   session does), curl sends no credential and the session's proxy supplies it; elsewhere curl sends
-  the token of gcloud's own login, never a key file, and a read that login lacks the permission
-  for is not checked rather than failed, while any other refusal still fails;
+  the token of gcloud's own login, never a key file, and a read that login lacks the IAM
+  permission on the resource for is not checked rather than failed, while any other refusal still
+  fails, among them one by a login that may not spend the lab project's quota
+  (`USER_PROJECT_DENIED`);
 - asks `testIamPermissions` whether this account itself could move a fence, and fails if it can;
   off the proxy this account is gcloud's login, not the agent account, so it is not asked;
 - reports a fence this account may not read (the budget, the kill switch's project roles) as not
   checked, which neither passes nor fails.
+A REST read (`curl`) the API answers with a rate limit is sent again after each of
+`RATE_LIMIT_PAUSES`, and fails as any unread fence does once the last attempt is refused too. The
+billing reads name the lab project as the one whose quota they spend (`x-goog-user-project`): sent
+with gcloud's own login and no quota project, Google may charge a read to gcloud's shared project,
+which every gcloud user draws on (https://cloud.google.com/docs/quotas/quota-project).
 Every call reads; none creates, changes or deletes anything. The output names each fence by its
 role and never prints a project, billing account, service account or an API's error message.
 """
@@ -33,6 +40,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -157,13 +165,15 @@ def tool_failure(failed: Exception) -> str:
 class ReadError(Exception):
     """A read failed; `status` and `reason` are the API's words, never its message."""
 
-    def __init__(self, status: str, reason: str | None = None) -> None:
+    def __init__(self, status: str, reason: str | None = None, attempts: int = 1) -> None:
         super().__init__(status)
         self.status = status
         self.reason = reason
+        self.attempts = attempts
 
     def __str__(self) -> str:
-        return f"{self.status}, reason {self.reason}" if self.reason else self.status
+        said = f"{self.status}, reason {self.reason}" if self.reason else self.status
+        return said + (f", on each of {self.attempts} attempts" if self.attempts > 1 else "")
 
 
 class Shape(ValueError):
@@ -226,6 +236,17 @@ class Credential:
             self.folder = self.header = None
 
 
+# The pauses before each further attempt at a read the API answers with a rate limit: three
+# attempts with twenty seconds of pauses between them, so a minute's quota has had time to refill
+# in part; each attempt itself is bounded by curl's `--max-time`.
+RATE_LIMIT_PAUSES = (5.0, 15.0)
+
+
+def rate_limited(error: ReadError) -> bool:
+    """Whether the API refused the read for a quota, which a later attempt may pass."""
+    return error.status in ("RESOURCE_EXHAUSTED", "429") or error.reason == "RATE_LIMIT_EXCEEDED"
+
+
 def read(
     run: Runner,
     url: str,
@@ -233,8 +254,34 @@ def read(
     body: dict[str, Any] | None = None,
     bill_to: str | None = None,
     credential: Credential | None = None,
+    pause: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
-    """GET a Google API resource, or POST a read-only method such as `testIamPermissions`."""
+    """GET a Google API resource, or POST a read-only method such as `testIamPermissions`; a
+    rate-limited read is sent again after each of RATE_LIMIT_PAUSES, and its last refusal raised,
+    saying how many attempts were made."""
+    for waited in (*RATE_LIMIT_PAUSES, None):
+        try:
+            return read_once(run, url, body=body, bill_to=bill_to, credential=credential)
+        except ReadError as error:
+            if not rate_limited(error):
+                raise
+            if waited is None:
+                raise ReadError(
+                    error.status, error.reason, attempts=len(RATE_LIMIT_PAUSES) + 1
+                ) from error
+            pause(waited)
+    raise AssertionError("unreachable")
+
+
+def read_once(
+    run: Runner,
+    url: str,
+    *,
+    body: dict[str, Any] | None = None,
+    bill_to: str | None = None,
+    credential: Credential | None = None,
+) -> dict[str, Any]:
+    """One attempt at a read."""
     command = ["curl", "-sS", "--max-time", "60"]
     if credential is not None and not credential.injected:
         # `-q`, first: no curlrc, whose trace or header-dump options would write the token out.
@@ -357,10 +404,16 @@ class Fences:
     """The live reads of one lab project, compared with the declaration."""
 
     def __init__(
-        self, project: str, run: Runner, want: Declared, credential: Credential | None = None
+        self,
+        project: str,
+        run: Runner,
+        want: Declared,
+        credential: Credential | None = None,
+        pause: Callable[[float], None] = time.sleep,
     ) -> None:
         self.project = project
         self.run = run
+        self.pause = pause
         self.want = want
         self.credential = credential
         self.p = f"projects/{project}"
@@ -372,7 +425,7 @@ class Fences:
 
     def read(self, url: str, **kwargs: Any) -> dict[str, Any]:
         read_permission(url)
-        return read(self.run, url, credential=self.credential, **kwargs)
+        return read(self.run, url, credential=self.credential, pause=self.pause, **kwargs)
 
     def refused_to_login(self, fence: str, error: ReadError) -> Finding | None:
         """Off the proxy, a read gcloud's login lacks the permission for: not checked; else None.
@@ -390,7 +443,9 @@ class Fences:
         return refused or Finding("FAIL", fence, f"{failed}could not be read ({error})")
 
     def billing_link(self) -> tuple[Finding, str | None]:
-        info = self.read(f"https://cloudbilling.googleapis.com/v1/{self.p}/billingInfo")
+        info = self.read(
+            f"https://cloudbilling.googleapis.com/v1/{self.p}/billingInfo", bill_to=self.project
+        )
         enabled = optional(info, "billingEnabled", bool, False)
         account = optional(info, "billingAccountName", str, "")
         if not enabled or not account.startswith("billingAccounts/"):
@@ -768,7 +823,9 @@ def removed_on_termination(credential: Credential) -> Iterator[None]:
             signal.signal(s, handler)
 
 
-def check(env: Mapping[str, str], run: Runner = run_tool) -> tuple[int, str]:
+def check(
+    env: Mapping[str, str], run: Runner = run_tool, pause: Callable[[float], None] = time.sleep
+) -> tuple[int, str]:
     """The exit code and the lines to print."""
     if foreign_session(env):
         return 1, (
@@ -791,7 +848,7 @@ def check(env: Mapping[str, str], run: Runner = run_tool) -> tuple[int, str]:
     credential = Credential(env, run)
     try:
         with removed_on_termination(credential):
-            findings = Fences(project, run, declared(), credential).findings()
+            findings = Fences(project, run, declared(), credential, pause).findings()
     finally:
         credential.close()
     lines = [cost_line, *(f.line() for f in findings)]

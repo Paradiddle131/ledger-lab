@@ -1160,6 +1160,19 @@ def test_a_loaded_table_matches_its_local_file_only_when_it_holds_the_same_rows(
     assert check_table("chicago-contracts", local, ENV, bq) == why
 
 
+def test_the_live_comparison_in_another_labs_session_makes_no_call(tmp_path: Path) -> None:
+    """With both project variables set, the live comparison's first read, the table's metadata,
+    is refused through `lab`, so `check_table` answers not loaded and `bq` is never called."""
+    bq = Bq()
+    bq.tables["chicago_contracts"] = landed_table(tmp_path, ROWS, "loaded")
+    env = {**ENV, "GCP_PROJECT": "another-lab"}
+    why = check_table("chicago-contracts", landed_table(tmp_path, ROWS), env, bq)
+    assert why is not None
+    assert why.startswith("not loaded: LoadError"), why
+    assert "another lab" in why, why
+    assert bq.calls == []
+
+
 def test_a_digest_tells_a_cell_from_its_neighbour_and_a_null_from_text(tmp_path: Path) -> None:
     """Each cell's text carries its length and a null its own mark, so text moved across a column
     boundary, or a null for the text `N`, changes the row."""
