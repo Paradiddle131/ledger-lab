@@ -6,6 +6,7 @@ denial-of-wallet cases (`agent/evals/adversarial.yaml`): every payment against e
 """
 
 import dataclasses
+import threading
 import time
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
@@ -23,7 +24,7 @@ from agent.ask import (
     load_context,
     run_metric_query,
 )
-from agent.audit import FileLog, read_log
+from agent.audit import AuditWriteFailed, FileLog, read_log
 from agent.limits import (
     BYTES_CAP,
     TIME_CAP,
@@ -109,7 +110,19 @@ def cap_of(connection: duckdb.DuckDBPyConnection, limits: Limits) -> int:
         cursor.close()
 
 
-def test_runaway_join_stops_at_the_cap(as_persona: AsPersona, audit: Audit) -> None:
+@pytest.fixture(params=["local", "bigquery"])
+def engine(request: pytest.FixtureRequest) -> str:
+    """The engine a cap is proven on: the local engine, or BigQuery, skipped before any build since
+    the own agent has no BigQuery mode, so no job of it carries `maximum_bytes_billed` yet; nothing
+    here calls GCP."""
+    if request.param == "bigquery":
+        pytest.skip(
+            "the agent's BigQuery mode is not built: no job of it carries maximum_bytes_billed"
+        )
+    return request.param
+
+
+def test_runaway_join_stops_at_the_cap(as_persona: AsPersona, audit: Audit, engine: str) -> None:
     """Pairing every payment with every other is planned past the turn's row cap, so it is not
     run: the turn is stopped at the byte cap's stand-in, with no run and no rows."""
     limits = load_limits()
@@ -237,8 +250,7 @@ def test_a_turn_takes_no_more_model_calls_or_queries_than_the_ceilings() -> None
 
 def test_a_persons_turns_stop_at_the_daily_cap(as_persona: AsPersona, audit: Audit) -> None:
     """Past a person's turns in 24 hours, a turn asks no model and opens no connection, and is
-    recorded stopped at the turn cap; another persona still asks, and a turn stopped at the cap
-    does not count toward the next."""
+    recorded stopped at the turn cap; another persona still asks."""
     limits = dataclasses.replace(load_limits(), turns_per_person_per_day=2)
     opened: list[str] = []
 
@@ -264,6 +276,86 @@ def test_a_persons_turns_stop_at_the_daily_cap(as_persona: AsPersona, audit: Aud
     assert opened == [OTHER, OTHER]
     other = ask(UK, QUESTION, as_persona=connect, audit=audit, model=scripted, limits=limits)
     assert other.citations
+
+
+class Slow(Calls):
+    """A model whose plan takes long enough for the other turns asked with it to start."""
+
+    def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+        time.sleep(0.3)
+        return super().plan(turn)
+
+
+def test_turns_asked_at_once_are_held_to_the_daily_cap(as_persona: AsPersona, audit: Audit) -> None:
+    """One persona's turns asked at the same time run one at a time, so each counts the ones
+    before it: with a cap of one, one turn runs and the rest are stopped at the turn cap."""
+    limits = dataclasses.replace(load_limits(), turns_per_person_per_day=1)
+    lock = threading.Lock()
+
+    def connect(persona: str) -> duckdb.DuckDBPyConnection:
+        with lock:
+            return as_persona(persona)
+
+    model = Slow("duplicate-payment-rate")
+    raised: list[BaseException] = []
+
+    def turn() -> None:
+        try:
+            ask(OTHER, QUESTION, as_persona=connect, audit=audit, model=model, limits=limits)
+        except BaseException as error:  # noqa: BLE001 - reported by the assertion below
+            raised.append(error)
+
+    threads = [threading.Thread(target=turn) for _ in range(5)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert raised == []
+    assert isinstance(audit.log, FileLog)
+    reasons = [r.get("reason") for r in read_log(audit.log.path.read_bytes())]
+    assert sorted(reasons, key=str) == sorted([None] + [TURN_CAP] * 4, key=str)
+
+
+def test_a_log_that_cannot_be_read_takes_no_turn(as_persona: AsPersona, audit: Audit) -> None:
+    """A torn log raises before the model is asked or a connection is opened, and is left as it
+    was."""
+    assert isinstance(audit.log, FileLog)
+    audit.log.path.write_bytes(b'{"seq":0')
+    model = Calls("duplicate-payment-rate")
+    opened: list[str] = []
+
+    def connect(persona: str) -> duckdb.DuckDBPyConnection:
+        opened.append(persona)
+        return as_persona(persona)
+
+    with pytest.raises(AuditWriteFailed, match="could not be read"):
+        ask(OTHER, QUESTION, as_persona=connect, audit=audit, model=model)
+    assert (model.asked, opened) == (0, [])
+    assert audit.log.path.read_bytes() == b'{"seq":0'
+
+
+def test_no_planned_query_runs_after_one_stopped_at_a_cap(
+    as_persona: AsPersona, audit: Audit
+) -> None:
+    """On the refusal limit's path, a planned query after the one stopped at the row cap is not
+    run."""
+    answer = ask(
+        READER,
+        RUNAWAY.question,
+        as_persona=as_persona,
+        audit=audit,
+        model=Planned("not-a-query", RUNAWAY.id, COUNT.id),
+        queries={RUNAWAY.id: RUNAWAY, COUNT.id: COUNT},
+    )
+    assert answer.citations == ()
+    record = last(audit)
+    assert (record["outcome"], record["reason"]) == ("stopped", BYTES_CAP)
+    assert record["runs"] == []
+
+
+def test_the_time_cap_is_held_within_a_minute() -> None:
+    """The committed time cap is a cap: at most a minute a query."""
+    assert 0 < load_limits().seconds_per_query <= 60
 
 
 def answer_at(persona: str | None, at: datetime, reason: str | None = None) -> dict[str, Any]:

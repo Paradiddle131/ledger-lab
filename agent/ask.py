@@ -22,7 +22,10 @@ What `ask` checks, in this order:
   `ForeignSession` (or `AuditWriteFailed`), before the model is asked or a connection is opened;
   the history read is shown to the model on every step but the planning one, and no other
   session's exchange is read;
-- the persona's turns in the 24 hours before this one are counted in the audit log
+- the persona's turn lock is taken (`AuditLog.turn`) and held until the turn's record is written,
+  so one persona's turns run one at a time; a lock that cannot be taken raises `AuditWriteFailed`
+  with no record; then the persona's turns in the 24 hours before this one are counted in the
+  audit log
   (`AuditLog.records`, `agent.limits.turns_today`); at the `turns_per_person_per_day` of the cost
   ceilings (`agent/limits.py`), the turn is recorded `stopped` with `turn-cap` and answered with
   the fixed text `TURN_CAPPED`, before the metric context is loaded, the model is asked or a
@@ -134,6 +137,7 @@ Stated limits:
   holds none.
 """
 
+import contextlib
 import json
 import os
 import re
@@ -369,135 +373,164 @@ def ask(
             raise foreign
         session = conversation.session
     turn = history[-1].turn + 1 if history else 1
-    limits = load_limits() if limits is None else limits
-    asked = datetime.now(UTC)
-    if turns_today(_records(audit), persona, asked) >= limits.turns_per_person_per_day:
-        outcome = ("stopped", TURN_CAP)
-        written = record(audit, persona, session, question, outcome, [], [], TURN_CAPPED, turn)
-        _keep(conversation, session, persona, Exchange(turn, question, TURN_CAPPED), written)
-        return Answer(persona, question, TURN_CAPPED, (), ())
-    queries = load_context() if queries is None else queries
-    shown = (tuple(load_glossary() if glossary is None else glossary), tuple(columns))
-    model = model_from_config(os.environ, queries) if model is None else model
-    connection: duckdb.DuckDBPyConnection | None = None
-    results: list[Citation | Refusal] = []
-    runs: list[Run] = []
-    denied = unplanned = capped = False
-    stopped: str | None = None
-    calls = refused = 0
-    # The rows the turn's queries were estimated to read, against the turn's row cap.
-    spent = 0
-    # The reason a `failed` record gives when the step under way raises.
-    stage = MODEL_ERROR
-    raised: Exception | None = None
-    text = ""
-
-    def execute(call: ToolCall) -> bool:
-        """Put one planned call through the checks and run it; whether it was refused before the
-        tool."""
-        nonlocal connection, denied, calls, stage, spent, stopped, text
-        if not (isinstance(call.query, str) and isinstance(call.tool, str)):
-            reason = "the tool or the query is not a string"
-            results.append(Refusal(_text(call.query), reason, _text(call.tool)))
-            return True
-        query = queries.get(call.query) if call.tool == TOOL else None
-        if call.tool == TOOL and query is None:
-            results.append(Refusal(call.query, "the metric context holds no such verified query"))
-            return True
-        stage = POLICY_ERROR
-        resource = Entity(RESOURCE.get(call.tool, "Metric"), query.metric if query else call.query)
-        decision = authorize(Entity("Persona", persona), call.tool, resource, {"session": session})
-        if not decision:
-            reasons = "; ".join(decision.reasons)
-            results.append(Refusal(call.query, f"the tool policy denied it: {reasons}", call.tool))
-            denied = True
-            return True
-        if query is None:
-            results.append(Refusal(call.query, f"ask runs no tool named {call.tool}", call.tool))
-            return True
-        if connection is None:
-            stage = CONNECTION_ERROR
-            connection = as_persona(persona)
-        stage = TOOL_ERROR
-        calls += 1
-        result, run, read, cap = _run(connection, query, persona, limits, spent)
-        spent += read
-        results.append(result)
-        if run is not None:
-            runs.append(run)
-        if cap is not None and stopped is None:
-            stopped = cap.reason
-            text = QUERY_CAPPED.format(reason=cap)
-        return False
-
-    def past_the_cap(call: ToolCall) -> str:
-        reason = f"the model made no reply within {MAX_TOOL_CALLS} tool calls"
-        results.append(Refusal(_text(call.query), reason, _text(call.tool)))
-        return reason
-
-    try:
+    held = _turn_held(audit, persona)
+    with held:
+        limits = load_limits() if limits is None else limits
+        asked = datetime.now(UTC)
+        if turns_today(_records(audit), persona, asked) >= limits.turns_per_person_per_day:
+            outcome = ("stopped", TURN_CAP)
+            written = record(audit, persona, session, question, outcome, [], [], TURN_CAPPED, turn)
+            _keep(conversation, session, persona, Exchange(turn, question, TURN_CAPPED), written)
+            return Answer(persona, question, TURN_CAPPED, (), ())
+        queries = load_context() if queries is None else queries
+        shown = (tuple(load_glossary() if glossary is None else glossary), tuple(columns))
+        model = model_from_config(os.environ, queries) if model is None else model
+        connection: duckdb.DuckDBPyConnection | None = None
+        results: list[Citation | Refusal] = []
+        runs: list[Run] = []
+        denied = unplanned = capped = False
+        stopped: str | None = None
+        calls = refused = 0
+        # The rows the turn's queries were estimated to read, against the turn's row cap.
+        spent = 0
+        # The reason a `failed` record gives when the step under way raises.
         stage = MODEL_ERROR
-        planned = list(model.plan(Turn(question, tuple(queries.values()), ())))
-        while True:
-            stage = MODEL_ERROR
-            step = model.step(
-                Turn(question, tuple(queries.values()), tuple(results), *shown, history)
+        raised: Exception | None = None
+        text = ""
+
+        def execute(call: ToolCall) -> bool:
+            """Put one planned call through the checks and run it; whether it was refused before the
+            tool."""
+            nonlocal connection, denied, calls, stage, spent, stopped, text
+            if not (isinstance(call.query, str) and isinstance(call.tool, str)):
+                reason = "the tool or the query is not a string"
+                results.append(Refusal(_text(call.query), reason, _text(call.tool)))
+                return True
+            query = queries.get(call.query) if call.tool == TOOL else None
+            if call.tool == TOOL and query is None:
+                results.append(
+                    Refusal(call.query, "the metric context holds no such verified query")
+                )
+                return True
+            stage = POLICY_ERROR
+            resource = Entity(
+                RESOURCE.get(call.tool, "Metric"), query.metric if query else call.query
             )
-            if isinstance(step, Reply):
-                text = step.text
-                break
-            if calls == MAX_TOOL_CALLS:
-                text, stopped = past_the_cap(step), CAP
-                break
-            if step in planned:
-                planned.remove(step)
-                refused += execute(step)
-                if stopped is not None:
+            decision = authorize(
+                Entity("Persona", persona), call.tool, resource, {"session": session}
+            )
+            if not decision:
+                reasons = "; ".join(decision.reasons)
+                results.append(
+                    Refusal(call.query, f"the tool policy denied it: {reasons}", call.tool)
+                )
+                denied = True
+                return True
+            if query is None:
+                results.append(
+                    Refusal(call.query, f"ask runs no tool named {call.tool}", call.tool)
+                )
+                return True
+            if connection is None:
+                stage = CONNECTION_ERROR
+                connection = as_persona(persona)
+            stage = TOOL_ERROR
+            calls += 1
+            result, run, read, cap = _run(connection, query, persona, limits, spent)
+            spent += read
+            results.append(result)
+            if run is not None:
+                runs.append(run)
+            if cap is not None and stopped is None:
+                stopped = cap.reason
+                text = QUERY_CAPPED.format(reason=cap)
+            return False
+
+        def past_the_cap(call: ToolCall) -> str:
+            reason = f"the model made no reply within {MAX_TOOL_CALLS} tool calls"
+            results.append(Refusal(_text(call.query), reason, _text(call.tool)))
+            return reason
+
+        try:
+            stage = MODEL_ERROR
+            planned = list(model.plan(Turn(question, tuple(queries.values()), ())))
+            while True:
+                stage = MODEL_ERROR
+                step = model.step(
+                    Turn(question, tuple(queries.values()), tuple(results), *shown, history)
+                )
+                if isinstance(step, Reply):
+                    text = step.text
                     break
-            else:
-                results.append(Refusal(_text(step.query), UNPLANNED, _text(step.tool)))
-                unplanned = True
-                refused += 1
-            if refused == MAX_REFUSALS:
-                # The model is asked no more: the calls it planned and has not made run without it.
-                capped, text = True, CAPPED
-                for call in planned:
-                    if calls == MAX_TOOL_CALLS:
-                        past_the_cap(call)
-                        stopped = CAP
-                        break
-                    execute(call)
+                if calls == MAX_TOOL_CALLS:
+                    text, stopped = past_the_cap(step), CAP
+                    break
+                if step in planned:
+                    planned.remove(step)
+                    refused += execute(step)
                     if stopped is not None:
                         break
-                break
+                else:
+                    results.append(Refusal(_text(step.query), UNPLANNED, _text(step.tool)))
+                    unplanned = True
+                    refused += 1
+                if refused == MAX_REFUSALS:
+                    # The model is asked no more: the calls it planned and has not made run
+                    # without it.
+                    capped, text = True, CAPPED
+                    for call in planned:
+                        if calls == MAX_TOOL_CALLS:
+                            past_the_cap(call)
+                            stopped = CAP
+                            break
+                        execute(call)
+                        if stopped is not None:
+                            break
+                    break
+        except Exception as error:
+            raised = error
+        citations = [r for r in results if isinstance(r, Citation)]
+        metrics = list(dict.fromkeys((c.metric, c.version) for c in citations))
+        if raised is not None:
+            # Written outside the `except`, so an `AuditWriteFailed` carries no context.
+            record(audit, persona, session, question, ("failed", stage), metrics, runs, None, turn)
+            raise raised
+        if stopped is not None:
+            outcome: tuple[str, str | None] = ("stopped", stopped)
+        elif citations:
+            outcome = ("answered", None)
+        elif capped:
+            outcome = ("stopped", REFUSAL_CAP)
+        elif denied:
+            outcome = ("refused", "policy")
+        elif unplanned:
+            outcome = ("refused", UNPLANNED_REASON)
+        else:
+            outcome = ("abstained", None)
+        written = record(audit, persona, session, question, outcome, metrics, runs, text, turn)
+        _keep(conversation, session, persona, Exchange(turn, question, text), written)
+        return Answer(
+            persona,
+            question,
+            text,
+            tuple(r for r in results if isinstance(r, Citation)),
+            tuple(r for r in results if isinstance(r, Refusal)),
+        )
+
+
+def _turn_held(audit: Audit, persona: str) -> contextlib.ExitStack:
+    """The persona's turn lock (`AuditLog.turn`), held by the stack returned; any `Exception`
+    taking it raises `AuditWriteFailed` naming only its type, with no record."""
+    stack = contextlib.ExitStack()
+    failed = ""
+    try:
+        stack.enter_context(audit.log.turn(persona))
+        return stack
     except Exception as error:
-        raised = error
-    citations = [r for r in results if isinstance(r, Citation)]
-    metrics = list(dict.fromkeys((c.metric, c.version) for c in citations))
-    if raised is not None:
-        # Written outside the `except`, so an `AuditWriteFailed` carries no context.
-        record(audit, persona, session, question, ("failed", stage), metrics, runs, None, turn)
-        raise raised
-    if stopped is not None:
-        outcome: tuple[str, str | None] = ("stopped", stopped)
-    elif citations:
-        outcome = ("answered", None)
-    elif capped:
-        outcome = ("stopped", REFUSAL_CAP)
-    elif denied:
-        outcome = ("refused", "policy")
-    elif unplanned:
-        outcome = ("refused", UNPLANNED_REASON)
-    else:
-        outcome = ("abstained", None)
-    written = record(audit, persona, session, question, outcome, metrics, runs, text, turn)
-    _keep(conversation, session, persona, Exchange(turn, question, text), written)
-    return Answer(
-        persona,
-        question,
-        text,
-        tuple(r for r in results if isinstance(r, Citation)),
-        tuple(r for r in results if isinstance(r, Refusal)),
+        failed = type(error).__name__
+    raise AuditWriteFailed(
+        f"the persona's turn could not be held ({failed}), so the turn is not taken and no answer"
+        " is given"
     )
 
 

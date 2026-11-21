@@ -300,7 +300,7 @@
         "queries_per_turn": {"type": "integer", "minimum": 1},
         "model_calls_per_turn": {"type": "integer", "minimum": 1},
         "turns_per_person_per_day": {"type": "integer", "minimum": 1},
-        "seconds_per_query": {"description": "On the local engine: a query's run time, in seconds.", "type": "number", "exclusiveMinimum": 0}
+        "seconds_per_query": {"description": "On the local engine: a query's run time, in seconds.", "type": "number", "exclusiveMinimum": 0, "maximum": 60}
       }
     },
     "cases": {

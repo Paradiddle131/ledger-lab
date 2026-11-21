@@ -26,7 +26,8 @@ text_run: 12
 # itself reads it once per row. An answer cites one query per
 # figure, and twenty figures is more than any question here needs; ten model calls cover a plan,
 # tool rounds and the answer. tests/agent holds bytes times turns to the declared cap. Ten seconds
-# of run time stops, on the local engine, a query whose rows its plan estimated too low.
+# of run time interrupts, on the local engine, a query still running then, whatever its plan
+# estimated.
 cost_ceilings:
   bytes_billed_per_turn: 1073741824
   product_passes_per_turn: 10

@@ -6,8 +6,9 @@ What is capped, and where:
   steps, which a test holds within `model_calls_per_turn`;
 - a turn's queries: `agent/ask.py`'s `MAX_TOOL_CALLS`, which a test holds within
   `queries_per_turn`;
-- a person's turns: a persona whose turns in the 24 hours before a new one (`turns_today`, counted
-  in the audit log) reach `turns_per_person_per_day` is answered with no model call and no query;
+- a person's turns: a persona's turns are held one at a time (`AuditLog.turn`), and a persona whose
+  turns in the 24 hours before a new one (`turns_today`, counted in the audit log) reach
+  `turns_per_person_per_day` is answered with no model call and no query;
 - the rows a turn's queries read, on the local engine, as the stand-in for bytes billed: before a
   query runs, `estimated_rows` reads the engine's plan, and a query whose estimate, added to what
   the turn's earlier queries were estimated to read, passes `product_passes_per_turn` times the
@@ -16,14 +17,17 @@ What is capped, and where:
   `seconds_per_query`.
 
 Stated limits:
-- the row cap reads the engine's estimates, not the rows a query reads as it runs: an estimate
-  below the real count lets the query run, and the time cap is what then stops it;
+- the row cap reads the engine's estimates, not the rows a query reads as it runs: a query whose
+  plan estimates fewer rows than it reads runs, and is interrupted only if it is still running at
+  `seconds_per_query`;
 - `rows_held` counts the rows of the database's base tables by the engine's own estimate, so a view
   adds nothing to it;
 - the BigQuery mode of the own agent is not built, so nothing here sets `maximum_bytes_billed` on
   a job; `bytes_billed_per_turn` is the ceiling that mode is to set;
 - the 24 hours are counted back from the new turn's start on the records' own times, so a log whose
-  times were written wrong counts wrong.
+  times were written wrong counts wrong, and a log removed or replaced counts from what it holds;
+- the turn lock is `FileLog`'s `flock` on a file per persona beside the log, so it holds turns
+  apart only among processes that share that folder.
 """
 
 import json

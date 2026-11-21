@@ -13,11 +13,12 @@ as it was, and no value of the turn in the error; and they read every record a r
 values held in clear.
 """
 
+import contextlib
 import hashlib
 import json
 import os
 import stat
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -497,6 +498,10 @@ class Broken:
 
     def records(self) -> list[dict[str, Any]]:
         return []
+
+    @contextlib.contextmanager
+    def turn(self, persona: str) -> Iterator[None]:
+        yield
 
 
 @pytest.mark.parametrize(
