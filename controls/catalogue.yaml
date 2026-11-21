@@ -20,8 +20,13 @@ controls:
     layer: Identity and delegation
     owner: agent-operator
     asserts: Every agent query runs on the asking persona's identity; two personas asking the same question get different rows, and a question without a user identity gets no answer.
-    proven_by: [tests/agent/test_identity.py::test_two_personas_same_question_different_rows]
+    proven_by:
+      - tests/agent/test_ask.py::test_two_personas_asking_the_same_question_get_different_rows
+      - tests/agent/test_ask.py::test_a_question_without_a_persona_gets_no_answer
     status: not-implemented
+    awaits:
+      parameter: bigquery
+      until_then: "The tests pass on the local engine only: the agent's tool runs on the DuckDB database compiled for the asking persona (access/compile.py), where the Chicago accountant and the UK transport accountant asking the duplicate-payment-rate question get different rows, and a question asked with a value that is not a string, or with a string that is not exactly a persona id of access/personas.yaml (an empty, blank, unknown or space-padded id among those tested), raises before the model is asked or a connection is opened. BigQuery, where the persona's own warehouse grants would decide, is skipped: the agent has no BigQuery mode yet."
   - id: no-persona-holds-conflicting-duties
     layer: Identity and delegation
     owner: group-controller
