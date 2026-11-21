@@ -17,6 +17,9 @@ What `ask` checks, in this order:
   (`agent/policy/tools.py`) allows the persona to run `run_metric_query` on the query's metric;
   only then is a connection opened, by calling `as_persona(persona)`, at most once per `ask`;
 - the model gets at most `MAX_TOOL_CALLS` tool calls; one more is refused and ends the turn;
+- a reply that ends the turn is traced (`agent.integrity.trace`): when one of its numbers is not
+  a cell or version of a run it cites, `agent.integrity.WITHHELD`, which holds no digit, is shown
+  and recorded in its place, and the turn is not `answered`;
 - once the turn has ended, its record is written (`AuditLog.append`, by default
   `agent.audit.FileLog`, which checks it against the schema and its seals before writing); when
   that raises, for any `Exception`, `ask` raises `AuditWriteFailed` and returns no `Answer`;
@@ -34,8 +37,9 @@ question, the answer's text, each run's result (`agent.audit.sealed_result` of i
 cells as `cell_text`) and its bound values, a seal, each under its own salt, the salt and value
 kept by the log apart from the record.
 Its outcome is `refused` with `no-identity` for no persona, `failed` when a step raised (above),
-`stopped` with `model-call-cap` at the tool-call limit, else `answered` when a query returned,
-`refused` with `policy` when none did and the tool policy denied one, and `abstained` otherwise.
+`stopped` with `model-call-cap` at the tool-call limit, else `answered` when a query returned and
+the reply was not withheld, `refused` with `policy` when the tool policy denied a query and the
+turn is not answered, and `abstained` otherwise, a withheld reply's turn among them.
 
 How the tool runs a query: on a new cursor of the persona's connection (in DuckDB a cursor is a
 connection of its own to the same database, so it sees none of the parent's temporary objects),
@@ -91,6 +95,7 @@ from agent.audit import (
     seal,
     sealed_result,
 )
+from agent.integrity import WITHHELD, trace
 from agent.model import (
     Citation,
     Model,
@@ -272,9 +277,13 @@ def ask(
         # Written outside the `except`, so an `AuditWriteFailed` carries no context.
         record(audit, persona, session, question, ("failed", stage), metrics, runs, None)
         raise raised
+    # A reply holding a number no cited run returned is not shown (`agent/integrity.py`).
+    withheld = not stopped and bool(trace(text, citations).failures)
+    if withheld:
+        text = WITHHELD
     if stopped:
         outcome: tuple[str, str | None] = ("stopped", CAP)
-    elif citations:
+    elif citations and not withheld:
         outcome = ("answered", None)
     elif denied:
         outcome = ("refused", "policy")

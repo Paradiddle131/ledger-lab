@@ -83,9 +83,21 @@ controls:
   - id: answers-cite-and-re-execute
     layer: Answer integrity
     owner: metric-owner
-    asserts: Every number in an answer cites its metric version, query and freshness, and re-running the logged query returns it.
-    proven_by: [tests/agent/test_answer_integrity.py::test_logged_query_reproduces_the_answer]
-    status: not-implemented
+    asserts: >-
+      What is checked (agent/integrity.py): each number of the own agent's reply, read as a run of digits with an optional sign, thousands commas, decimals and exponent, must equal by value a number cell of a run the answer cites whose citation carries a metric, version, query and freshness, or follow the word "version" and equal a cited version, the digits of a cited text, date or time cell written whole being that cell's own; agent/ask.py shows a fixed text with no digit in place of a reply that fails, and records the turn as abstained, so a turn in which no run returned (no tool call, a query outside the context, a denied or failed run) shows no digit; re-running the query a record logged, as the record's persona and only when its persona, SQL and bound values are the answer's and the cited query's, must give the cited run's columns and rows, in any order, and the record's sealed result.
+      Stated limits: equality only, so a rounded figure, a percentage of a share, a number in words and a year or count in prose that is no cell are reported, not matched; which row, column or metric the prose attributes a number to is not checked, so swapped figures pass; the re-run reads whatever database the connection-maker opens, and is a verifier's call, not made by ask; a turn stopped at the tool-call cap shows ask's own message, which is not traced.
+    proven_by:
+      - tests/agent/test_answer_integrity.py::test_logged_query_reproduces_the_answer
+      - tests/agent/test_answer_integrity.py::test_a_perturbed_number_in_a_scripted_answer_is_caught
+      - tests/agent/test_answer_integrity.py::test_every_number_of_a_many_row_answer_is_caught_when_changed
+      - tests/agent/test_answer_integrity.py::test_a_changed_warehouse_is_caught_on_re_run
+      - tests/agent/test_answer_integrity.py::test_a_question_outside_the_metrics_gets_an_abstention
+      - tests/agent/test_answer_integrity.py::test_a_number_with_no_cited_run_is_withheld
+      - tests/agent/test_answer_integrity.py::test_a_number_beside_a_cited_run_but_not_in_it_is_withheld
+      - tests/agent/test_answer_integrity.py::test_a_number_that_is_not_a_cell_as_written_is_reported
+      - tests/agent/test_answer_integrity.py::test_a_run_without_freshness_traces_no_number
+      - tests/agent/test_answer_integrity.py::test_a_re_run_that_does_not_reproduce_is_reported
+    status: implemented
   - id: scored-by-execution
     layer: Evaluation and monitoring
     owner: metric-owner
