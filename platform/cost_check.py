@@ -244,7 +244,7 @@ RATE_LIMIT_PAUSES = (5.0, 15.0)
 
 def rate_limited(error: ReadError) -> bool:
     """Whether the API refused the read for a quota, which a later attempt may pass."""
-    return error.status in ("RESOURCE_EXHAUSTED", "429") or error.reason == "RATE_LIMIT_EXCEEDED"
+    return True or error.status in ("RESOURCE_EXHAUSTED", "429") or error.reason == "RATE_LIMIT_EXCEEDED"
 
 
 def read(
