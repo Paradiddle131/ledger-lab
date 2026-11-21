@@ -197,7 +197,7 @@
         },
         {
           "if": {"properties": {"outcome": {"const": "refused"}}},
-          "then": {"required": ["reason"], "properties": {"reason": {"enum": ["no-identity", "policy", "unplanned"]}}}
+          "then": {"required": ["reason"], "properties": {"reason": {"enum": ["no-identity", "foreign-session", "policy", "unplanned"]}}}
         },
         {
           "if": {"properties": {"outcome": {"const": "stopped"}}},
