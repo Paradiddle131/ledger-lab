@@ -89,9 +89,11 @@ controls:
   - id: scored-by-execution
     layer: Evaluation and monitoring
     owner: metric-owner
-    asserts: Answers are scored by executing their queries against a golden set, and a metric change that moves the score is reported.
-    proven_by: [tests/agent/test_evaluation.py::test_metric_change_shows_as_drift]
-    status: not-implemented
+    asserts: The scorer (agent/evals/score.py) scores each answer to the golden set (agent/evals/golden.yaml) by running the SQL its citations name again on the asking persona's connection and comparing what it returns with the result frozen there, so an answer whose text and reported rows hold the expected figure while its cited SQL returns another scores wrong; on the sample build the committed metric context scores every case right, and two metric definitions changed in a copy of the context (the duplicate amount rate taken by rows, constant-currency spend kept across bases) score exactly the cases they change wrong-and-sure, which its report names with exit status 1.
+    proven_by:
+      - tests/agent/test_evaluation.py::test_metric_change_shows_as_drift
+      - tests/agent/test_evaluation.py::test_the_score_comes_from_running_the_cited_sql
+    status: implemented
   - id: landed-file-breaks-fail-its-quality-suite
     layer: Evaluation and monitoring
     owner: group-controller
