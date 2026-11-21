@@ -13,7 +13,7 @@ with no value bound from the question or the model.
 The glossary's definitions, the column descriptions and the cells of a result are text the model
 reads and the lab does not vouch for: a model may take an instruction it finds there as its own.
 So `ask` refuses a call that is not in the plan, made before that text was shown, and asks the
-tool policy before it runs any call; the call past the tool-call or step limit is refused without
+tool policy before it runs any call; the call past the tool-call limit is refused without
 asking it.
 
 `model_from_config(environ, context)` is the one place a model is chosen, by the variable
@@ -88,10 +88,8 @@ class Citation:
 
 @dataclass(frozen=True)
 class Refusal:
-    """A tool call that was not run or failed, and why: the context holds no such query, the tool
-    policy denied it, `ask` runs no such tool, the persona's database holds a table name in two
-    schemas or a schema name the tool does not quote, the engine raised an error, or the model went
-    past the tool-call limit. `query` and `tool` are the call's, as the model made it."""
+    """A tool call that was not run or failed, and why (`agent/ask.py` lists each check).
+    `query` and `tool` are the call's, or the `repr` of either that is not a string."""
 
     query: str
     reason: str

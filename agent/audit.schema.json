@@ -170,7 +170,7 @@
       }
     },
     "answer": {
-      "description": "One turn of a session: answered, with at least one warehouse run and one metric; abstained, when no metric or verified query covers the question; refused, for no identity, by policy, or for a tool call the model did not plan before it read untrusted text; stopped at a cap; or failed, when the model, the tool policy, the connection-maker or the tool raised, with no answer shown and so no answer seal. Runs list only the jobs that returned.",
+      "description": "One turn of a session: answered, with at least one warehouse run and one metric; abstained, when no metric or verified query covers the question; refused, for no identity, by policy, or for a tool call the model did not plan before it was shown the glossary, column descriptions or any result; stopped at a cap; or failed, when the model, the tool policy, the connection-maker or the tool raised, with no answer shown and so no answer seal. Runs list only the jobs that returned.",
       "required": ["asker", "agent", "question", "release", "outcome", "data", "metrics", "runs"],
       "properties": {
         "asker": {"$ref": "#/$defs/asker"},
@@ -201,7 +201,7 @@
         },
         {
           "if": {"properties": {"outcome": {"const": "stopped"}}},
-          "then": {"required": ["reason"], "properties": {"reason": {"enum": ["query-bytes-cap", "query-time-cap", "model-call-cap", "model-step-cap", "turn-cap"]}}}
+          "then": {"required": ["reason"], "properties": {"reason": {"enum": ["query-bytes-cap", "query-time-cap", "model-call-cap", "model-refusal-cap", "turn-cap"]}}}
         },
         {
           "if": {"properties": {"outcome": {"enum": ["answered", "abstained"]}}},
