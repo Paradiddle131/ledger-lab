@@ -1,0 +1,30 @@
+models:
+  - name: payments_masked
+    description: >
+      The payments data product as its masked readers read it: the columns a tag in
+      access/columns.yaml marks under that tag's masking rule (the published payee, its document
+      number and the keyed hash that stands for a person, each hashed), every other column as in
+      `payments`. On BigQuery its governed copy is the table the masked readers' row access
+      policies grant.
+    columns:
+      - name: payment_key
+        data_tests:
+          - unique
+          - not_null
+
+unit_tests:
+  - name: a_masked_reader_reads_each_tagged_column_hashed_and_the_rest_as_it_is
+    description: >
+      Invented rows, labelled as invented: the published payee, the document number and the
+      person's keyed hash read as SHA-256 in Base64, as BigQuery's hash rule renders them; a null
+      stays null, and an untagged column such as the clear organisation name is unchanged.
+    model: payments_masked
+    given:
+      - input: ref('payments')
+        rows:
+          - {payment_key: hashed, entity_id: chicago, vendor_name: "person:invented", document_number: PV1, vendor_person_key: "person:invented"}
+          - {payment_key: clear, entity_id: chicago, vendor_name: PV1, vendor_organisation_name: EXAMPLE A LLC}
+    expect:
+      rows:
+        - {payment_key: hashed, entity_id: chicago, vendor_name: "Sgk7K1yJWY5T51xG+PufTD0lRGAoSX9Q8oA3rQv24gQ=", document_number: "6Evesw1qxBN5BfUELnC1UtsEuWB0AGcQRTEv40wjsF4=", vendor_person_key: "Sgk7K1yJWY5T51xG+PufTD0lRGAoSX9Q8oA3rQv24gQ=", vendor_organisation_name: null}
+        - {payment_key: clear, entity_id: chicago, vendor_name: "6Evesw1qxBN5BfUELnC1UtsEuWB0AGcQRTEv40wjsF4=", document_number: null, vendor_person_key: null, vendor_organisation_name: EXAMPLE A LLC}
