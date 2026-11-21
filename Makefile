@@ -31,7 +31,7 @@ typecheck: sync
 # - `own`: the cost read (`platform/cost_check.py`), pytest, then the cost read again, in that
 #   order on one shell line. A failed read before stops pytest from running; the read after also
 #   runs after a failed pytest; the line fails if either read or pytest fails.
-# - `elsewhere` (the lab variable unset or blank, or GCP_PROJECT set): pytest alone.
+# - `elsewhere` (the lab variable unset or blank, or GCP_PROJECT non-empty): pytest alone.
 # - any other output, the empty output of a failed decider included: a message, a failure, no pytest.
 # tests/platform/test_cost_read_around_tests.py checks these over a stub `uv`. Limits: an interrupt
 # (Ctrl-C) stops the line, the read after included; pytest runs in other targets (`stack-test`,
