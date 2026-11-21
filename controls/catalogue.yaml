@@ -84,19 +84,32 @@ controls:
     layer: Answer integrity
     owner: metric-owner
     asserts: >-
-      What is checked (agent/integrity.py): each number of the own agent's reply, read as a run of digits with an optional sign, thousands commas, decimals and exponent, must equal by value a number cell of a run the answer cites whose citation carries a metric, version, query and freshness, or follow the word "version" and equal a cited version, the digits of a cited text, date or time cell written whole being that cell's own; agent/ask.py shows a fixed text with no digit in place of a reply that fails, and records the turn as abstained, so a turn in which no run returned (no tool call, a query outside the context, a denied or failed run) shows no digit; re-running the query a record logged, as the record's persona and only when its persona, SQL and bound values are the answer's and the cited query's, must give the cited run's columns and rows, in any order, and the record's sealed result.
-      Stated limits: equality only, so a rounded figure, a percentage of a share, a number in words and a year or count in prose that is no cell are reported, not matched; which row, column or metric the prose attributes a number to is not checked, so swapped figures pass; the re-run reads whatever database the connection-maker opens, and is a verifier's call, not made by ask; a turn stopped at the tool-call cap shows ask's own message, which is not traced.
+      What is checked (agent/integrity.py, applied by agent/ask.py when the model replies): the reply is shown, and the turn recorded answered, only when a cited query's verified question equals the asked question after NFKC, casefolding and white-space collapsing, and each number of the reply traces to a run of such a query whose citation carries a freshness; otherwise a fixed text with no digit is shown and the turn is recorded abstained, which includes a turn that cites no run, whatever its reply says.
+      A number is read as decimal digits with thousands commas, decimals, an exponent and a leading ASCII minus, U+2212 or one of the other dashes agent/integrity.py lists (DASHES), read as a minus; it traces when its value equals a cited int, float or Decimal cell (not a bool), or when it follows the word "version" and equals the cited version; the digits of a cited text, date or time cell written whole are that cell's own.
+      Reported, so withheld: a number no cited cell equals, a number in parentheses or followed by a minus, a number whose value cannot be read, a numeral of Unicode category No, and an exception raised by the check.
+      Re-running the query a record logged, as the record's persona and only when its persona, SQL and bound values are the answer's and the cited query's, in the citations' order, must give the cited run's columns and rows, in any order, and the record's sealed result.
+      Stated limits: equality only, so rounded figures, percentages of a share and years or counts in prose that are no cell are withheld; a paraphrase of a verified question is withheld, so the agent answers only the verified questions' own wording; a number written in words is not read and passes on a reply not withheld for another reason; which row, column or metric the prose attributes a number to is not checked, so swapped figures pass; the re-run reads whatever database the connection-maker opens and is a verifier's call, not made by ask; a turn stopped at the tool-call cap shows ask's own message, which names the cap and is not checked.
     proven_by:
       - tests/agent/test_answer_integrity.py::test_logged_query_reproduces_the_answer
       - tests/agent/test_answer_integrity.py::test_a_perturbed_number_in_a_scripted_answer_is_caught
-      - tests/agent/test_answer_integrity.py::test_every_number_of_a_many_row_answer_is_caught_when_changed
+      - tests/agent/test_answer_integrity.py::test_each_number_of_a_many_row_answer_is_caught_with_a_digit_appended
       - tests/agent/test_answer_integrity.py::test_a_changed_warehouse_is_caught_on_re_run
       - tests/agent/test_answer_integrity.py::test_a_question_outside_the_metrics_gets_an_abstention
+      - tests/agent/test_answer_integrity.py::test_only_a_verified_question_as_worded_is_answered
+      - tests/agent/test_answer_integrity.py::test_a_reply_with_no_cited_run_is_withheld_whatever_it_says
       - tests/agent/test_answer_integrity.py::test_a_number_with_no_cited_run_is_withheld
       - tests/agent/test_answer_integrity.py::test_a_number_beside_a_cited_run_but_not_in_it_is_withheld
+      - tests/agent/test_answer_integrity.py::test_a_sign_flipped_figure_is_withheld
+      - tests/agent/test_answer_integrity.py::test_a_number_with_an_ambiguous_sign_is_reported
+      - tests/agent/test_answer_integrity.py::test_a_numeral_that_is_no_decimal_digit_is_reported
+      - tests/agent/test_answer_integrity.py::test_a_reply_the_check_cannot_read_is_withheld_and_recorded
       - tests/agent/test_answer_integrity.py::test_a_number_that_is_not_a_cell_as_written_is_reported
       - tests/agent/test_answer_integrity.py::test_a_run_without_freshness_traces_no_number
       - tests/agent/test_answer_integrity.py::test_a_re_run_that_does_not_reproduce_is_reported
+      - tests/agent/test_answer_integrity.py::test_a_run_logged_unlike_its_citation_is_not_re_run
+      - tests/agent/test_answer_integrity.py::test_the_re_run_is_made_as_the_logged_persona
+      - tests/agent/test_answer_integrity.py::test_runs_are_compared_with_citations_in_order
+      - tests/agent/test_answer_integrity.py::test_a_turn_stopped_at_the_cap_shows_its_own_message
     status: implemented
   - id: scored-by-execution
     layer: Evaluation and monitoring

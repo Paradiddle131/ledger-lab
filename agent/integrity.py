@@ -1,77 +1,96 @@
-"""Answer integrity: trace each number of an answer's text to a run it cites, and re-run the
-query a turn's audit record logged to see that it returns the cited rows.
+"""Answer integrity: whether an answer's reply may be shown, by the verified question it answers
+and the runs it cites, and whether the query a turn's audit record logged reproduces those runs.
 
-`trace(text, citations)` is a pure check of a text against the runs it cites; `agent.ask.ask`
-calls it on the model's reply and, when it reports a failure, shows `WITHHELD` in place of the
-reply and records the turn as abstained. `reproduce(answer, runs, as_persona)` re-runs the queries
-a record logged (`logged(record, kept)` reads them with the kept values) and is the caller's or a
-verifier's to run; `ask` does not call it.
+`withheld(question, text, citations, queries)` is what `agent.ask.ask` calls on the model's reply
+once the tool-call loop has ended (not on a turn stopped at the tool-call cap): when it is true,
+`ask` shows `WITHHELD` in place of the reply and records the turn as abstained.
+`reproduce(answer, runs, as_persona)` re-runs the queries a record logged (`logged(record, kept)`
+reads them with the kept values) and is the caller's or a verifier's to run; `ask` does not call it.
 
-The matching rule of `trace`:
-- a number is a maximal run of Unicode decimal digits, with a leading `-` when no letter, digit or
-  `_` comes before it, thousands separated by `,` in groups of three, one decimal part and one
-  exponent (`e` or `E`); every digit of the text that is not set aside (below) belongs to one such
-  number, so no other digit is left unread, digits written inside a word (`42M`, `Q3`) among them;
+What `withheld` checks; the reply is withheld when any of these fails:
+- a cited query covers the question: its verified question equals the asked one once both are put
+  in Unicode NFKC form, casefolded and their whitespace runs collapsed to one space (`same`);
+  a turn that cites no run is withheld whatever its reply says;
+- `trace(text, covering)` reports no failure, where `covering` is the cited runs of the queries
+  that cover the question;
+- an `Exception` raised by either check withholds the reply.
+
+What `trace` reads and checks:
+- a number is a run of Unicode decimal digits (category Nd), with thousands separated by `,` in
+  groups of three, one decimal part and one exponent (`e` or `E`), and a leading sign when no
+  letter, digit or `_` comes before it: an ASCII `-`, U+2212 minus, or one of the dashes U+2010
+  to U+2015, U+FE58, U+FE63 and U+FF0D, each read as a minus;
 - before numbers are read, each place where the `str` or the `repr` of a cited cell that is not a
-  number (a text, a date, a time) is written, with no letter, digit or `_` on either side, is
-  set aside: its digits are that cell's own text (`payments-over-25k`, a timestamp);
-- a number written right after the word `version` and space is traced when it equals the version
-  of a cited run;
+  number (a text, a date, a time) is written, with no letter, digit or `_` on either side, is set
+  aside: its digits are that cell's own text (`payments-over-25k`, a timestamp);
+- a number written in parentheses, `(12.25)`, or followed directly by a minus or one of those
+  dashes, `12.25-`, is reported: its sign is ambiguous;
+- a number whose value cannot be read (an exponent past the decimal context's range) is reported;
+- a number written right after the word `version` and white space is traced when it equals the
+  version of a cited run;
 - any other number is traced when its value, its separators removed, equals the value of a cited
-  cell that is an int, a float (by the shortest text that gives back the float, Python's `repr`)
+  cell that is an int, a float (by Python's `repr`, the shortest text that gives back the float)
   or a Decimal, and not a bool: `1,234,567.5`, `1234567.50` and `1.2345675e6` each equal
   1234567.5;
 - only runs whose citation carries a freshness count; a number found only in a run without one is
   reported as such;
+- each character of Unicode category No (a superscript, a fraction, a circled number) is reported;
 - each number not traced is a `Failure` naming it.
 
 What `reproduce` checks, per run, in order: the record logs one run per citation, in the same
 order; the run was logged as the answer's persona; its SQL and values are the cited query's SQL
-bound (`agent.audit.bind`); then, re-run as that persona on a new cursor of
-`as_persona(persona)`'s connection with the search path set to the schemas that hold its tables,
-its columns and rows (as `agent.audit.sealed_result` of their `cell_text`, so in any row order)
-equal the cited run's, and their seal under the kept salt equals the record's sealed result. A
-run whose persona, SQL or values differ is not re-run.
+bound (`agent.audit.bind`); a run failing one of those is reported and not re-run; the others are
+re-run as the logged persona on a new cursor of `as_persona(persona)`'s connection, with the search
+path set to the schemas that hold its tables, and their columns and rows (as
+`agent.audit.sealed_result` of their `cell_text`, so in any row order) must equal the cited run's,
+and their seal under the kept salt the record's sealed result.
 
 Stated limits:
-- equality only: a rounded figure, a percentage of a share, a number written in words or with
-  another separator (a space, `'`, a decimal comma) is not matched and is reported, so the check
-  fails closed on them; so is a year or a count in prose that is no cell's value;
-- a number is matched to any cell of any cited run: which row, column or metric the prose
+- equality only: a rounded figure, a percentage of a share, a number written with another
+  separator (a space, `'`, a decimal comma), and a year or a count in prose that is no cell's value
+  are reported, not matched;
+- a number written in words (`forty-two million`) is not read, and passes on a turn whose reply
+  is not withheld for another reason;
+- the question must be a verified question's own wording, as `same` compares it: a paraphrase is
+  withheld, so with any model the agent answers only the verified questions;
+- a number is matched to any cell of any covering run: which row, column or metric the prose
   attributes it to is not checked, so two cited figures swapped in the text pass;
 - a cell that is not a number is matched only by its `str` or `repr` written whole; a number equal
   to a cited text cell's whole text passes as that cell;
-- the text need not name a metric, a query or a freshness: those are the citations' fields, and
-  the text's only check is that its numbers are cells or versions of cited runs;
-- `ask` applies `trace` to a reply that ends the turn; a turn stopped at the tool-call cap shows
-  `ask`'s own message, which names the cap and is not traced;
+- the text need not name a metric, a query or a freshness: those are the citations' fields;
+- a turn stopped at the tool-call cap shows `ask`'s own message, which names the cap and is not
+  checked;
 - `reproduce` re-runs on whatever connection `as_persona` returns, so it shows a change of the
   persona's database since the run, not which build that database came from; it does not re-ask
   the model or open the record's answer seal (`tests/agent/test_audit.py` rebuilds those);
-- `reproduce` refuses, as a failed re-run, a database holding a schema name the tool does not
+- `reproduce` reports, as a failed re-run, a database holding a schema name the tool does not
   quote, and does not close the connections `as_persona` returns, which stay their maker's.
 """
 
 import re
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 import duckdb
 
 from agent.audit import bind, cell_text, seal, sealed_result
-from agent.model import Citation
+from agent.model import Citation, VerifiedQuery
 
 if TYPE_CHECKING:
     from agent.ask import Answer
 
 ENGINE = "duckdb"
 WITHHELD = (
-    "No answer is shown: the reply held a number that no query it cites returned,"
-    " so no verified query covers it."
+    "No answer is shown: no verified query for this question returned the figures the reply gives."
 )
-NUMBER = re.compile(r"(?:(?<!\w)-)?(?:\d{1,3}(?:,\d{3})+(?!\d)|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?")
+# The characters read as a minus directly before or after a number.
+DASHES = "-\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe58\ufe63\uff0d"
+NUMBER = re.compile(
+    rf"(?:(?<!\w)[{DASHES}])?(?:\d{{1,3}}(?:,\d{{3}})+(?!\d)|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?"
+)
 VERSION = re.compile(r"(?<!\w)version\s+$", re.IGNORECASE)
 # The schema names `agent/ask.py`'s tool sets on the search path, and no other.
 SCHEMA = re.compile(r"[a-z_][a-z0-9_]*")
@@ -132,6 +151,14 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, int | float | Decimal) and not isinstance(value, bool)
 
 
+def _read(number: str) -> Decimal:
+    """A number as written, its separators removed and a dash before it read as a minus."""
+    digits = number.replace(",", "")
+    if digits[0] in DASHES:
+        digits = "-" + digits[1:]
+    return Decimal(digits)
+
+
 def _value(value: Any) -> Decimal:
     return Decimal(repr(value)) if isinstance(value, float) else Decimal(value)
 
@@ -167,23 +194,62 @@ def trace(text: str, citations: Sequence[Citation]) -> Trace:
     failures: list[Failure] = []
     for start, end in numbers(aside):
         number = text[start:end]
-        value = Decimal(number.replace(",", ""))
-        if VERSION.search(aside[:start]):
+        if aside[start - 1 : start] == "(" and aside[end : end + 1] == ")":
+            failures.append(Failure(number, None, "a number in parentheses has an ambiguous sign"))
+            continue
+        if aside[end : end + 1] and aside[end] in DASHES:
+            failures.append(
+                Failure(number, None, "a number followed by a minus has an ambiguous sign")
+            )
+            continue
+        try:
+            value = _read(number)
             versioned = [c for c in fresh if c.version == value]
-            if versioned:
-                traced.append(Traced(number, versioned[0].query))
-                continue
-        found = [c for c in fresh if _cited(c, value)]
+            found = [c for c in fresh if _cited(c, value)]
+            unfresh = [c for c in stale if _cited(c, value)]
+        except (InvalidOperation, OverflowError, ValueError):
+            failures.append(Failure(number, None, "its value cannot be read"))
+            continue
+        if VERSION.search(aside[:start]) and versioned:
+            traced.append(Traced(number, versioned[0].query))
+            continue
         if found:
             traced.append(Traced(number, found[0].query))
             continue
-        unfresh = [c for c in stale if _cited(c, value)]
         if unfresh:
             reason = "only a run whose citation carries no freshness returned it"
             failures.append(Failure(number, unfresh[0].query, reason))
             continue
         failures.append(Failure(number, None, "no run the answer cites returned it"))
+    for char in text:
+        if unicodedata.category(char) == "No":
+            reason = "a numeral that is not a decimal digit is not read"
+            failures.append(Failure(char, None, reason))
     return Trace(tuple(traced), tuple(failures))
+
+
+def same(asked: str, verified: str) -> bool:
+    """Whether two questions are the same wording: each in NFKC form, casefolded, with each run of
+    white space made one space and none at either end."""
+
+    def form(question: str) -> str:
+        return " ".join(unicodedata.normalize("NFKC", question).casefold().split())
+
+    return form(asked) == form(verified)
+
+
+def withheld(
+    question: str,
+    text: str,
+    citations: Sequence[Citation],
+    queries: Mapping[str, VerifiedQuery],
+) -> bool:
+    """Whether `ask` must show `WITHHELD` in place of `text`; see the module's docstring."""
+    try:
+        covering = [c for c in citations if same(question, queries[c.query].question)]
+        return not covering or bool(trace(text, covering).failures)
+    except Exception:  # noqa: BLE001 - a check that raises withholds the reply, it is not shown
+        return True
 
 
 def logged(record: Mapping[str, Any], kept: Mapping[str, Sequence[Any]]) -> tuple[Logged, ...]:

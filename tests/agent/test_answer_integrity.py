@@ -20,10 +20,11 @@ from typing import Any
 import duckdb
 import pytest
 
+import agent.integrity
 from access.compile import quote
-from agent.ask import Answer, Audit, ask, load_context
+from agent.ask import MAX_TOOL_CALLS, Answer, Audit, ask, load_context
 from agent.audit import FileLog, bind, cell_text, new_salt, read_log, seal, sealed_result
-from agent.integrity import WITHHELD, Logged, logged, numbers, reproduce, trace
+from agent.integrity import WITHHELD, Logged, logged, numbers, reproduce, same, trace
 from agent.model import Citation, Model, Reply, ToolCall, Turn, model_from_config
 
 AsPersona = Callable[[str], duckdb.DuckDBPyConnection]
@@ -137,10 +138,10 @@ def test_logged_query_reproduces_the_answer(
     assert rerun.reproduced == (citation.query,)
 
 
-def test_every_number_of_a_many_row_answer_is_caught_when_changed(
+def test_each_number_of_a_many_row_answer_is_caught_with_a_digit_appended(
     as_persona: AsPersona, scripted: Model, audit: Audit
 ) -> None:
-    """Each number of the auditor's answer by basis and fiscal year, changed in its last digit on
+    """Each number of the auditor's answer by basis and fiscal year, with a 7 appended to it on
     its own, is reported by that changed text; the unchanged text passes."""
     answer = ask(AUDITOR, BY_YEAR, as_persona=as_persona, audit=audit)
     assert trace(answer.text, answer.citations).failures == ()
@@ -156,7 +157,7 @@ def test_every_number_of_a_many_row_answer_is_caught_when_changed(
 def test_a_perturbed_number_in_a_scripted_answer_is_caught(
     as_persona: AsPersona, scripted: Model, audit: Audit
 ) -> None:
-    """The scripted reply with one digit of its figure changed: `trace` names the changed number,
+    """The scripted reply with a 7 appended to its figure: `trace` names the changed number,
     and `ask` shows no number, recording the turn as abstained with the run it made."""
     model = Perturbing(scripted)
     answer = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=model)
@@ -208,12 +209,104 @@ def test_a_changed_warehouse_is_caught_on_re_run(
 # No number where no verified query covers the question
 
 
+def share_of_chicago(as_persona: AsPersona, audit: Audit) -> float:
+    """The figure the verified duplicate-payment query returns for Chicago's accountant."""
+    ((share,),) = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit).citations[0].rows
+    return share
+
+
+@pytest.mark.parametrize("model", ["scripted", "quotes-another-query"])
 def test_a_question_outside_the_metrics_gets_an_abstention(
-    as_persona: AsPersona, scripted: Model, audit: Audit
+    as_persona: AsPersona, audit: Audit, model: str
 ) -> None:
-    answer = ask(CHICAGO, OUTSIDE, as_persona=as_persona, audit=audit)
-    assert answer.citations == ()
-    assert not re.search(r"\d", answer.text)
+    """A question no verified query is worded as: the scripted model calls no tool; a model that
+    runs an unrelated verified query and quotes its cell gets the reply withheld. Either way no
+    digit is shown and the turn is abstained."""
+    share = share_of_chicago(as_persona, audit)
+    chosen = (
+        model_from_config({}, load_context())
+        if model == "scripted"
+        else Saying("duplicate-payment-rate", f"The top vendor was paid {share!r}.")
+    )
+    answer = ask(CHICAGO, OUTSIDE, as_persona=as_persona, audit=audit, model=chosen)
+    assert answer.text == WITHHELD and not re.search(r"\d", answer.text)
+    assert records(audit)[-1]["outcome"] == "abstained"
+
+
+def test_only_a_verified_question_as_worded_is_answered(
+    as_persona: AsPersona, audit: Audit
+) -> None:
+    """The verified question with its case, white space and compatibility forms changed is
+    answered; a paraphrase of it, with the same run and figure, is withheld."""
+    share = share_of_chicago(as_persona, audit)
+    # Upper case, doubled spaces and a fullwidth letter, which NFKC makes the plain one.
+    reworded = "  " + QUESTION.upper().replace(" ", "  ").replace("ROWS", "\uff32OWS")
+    assert same(reworded, QUESTION)
+    paraphrase = "How often does a served Chicago payment row repeat another?"
+    for question, shown in [(reworded, True), (paraphrase, False)]:
+        model = Saying("duplicate-payment-rate", f"The share is {share!r}.")
+        answer = ask(CHICAGO, question, as_persona=as_persona, audit=audit, model=model)
+        assert (answer.text != WITHHELD, records(audit)[-1]["outcome"]) == (
+            shown,
+            "answered" if shown else "abstained",
+        )
+
+
+def test_a_reply_with_no_cited_run_is_withheld_whatever_it_says(
+    as_persona: AsPersona, audit: Audit
+) -> None:
+    """Figures in words or in numerals that are no decimal digit, with no run: not shown."""
+    model = Saying(
+        None, "The top vendor was paid about one point two million, \u00b9\u00b2 dollars."
+    )
+    answer = ask(CHICAGO, OUTSIDE, as_persona=as_persona, audit=audit, model=model)
+    assert answer.text == WITHHELD
+    assert records(audit)[-1]["outcome"] == "abstained"
+
+
+def test_a_turn_stopped_at_the_cap_shows_its_own_message(
+    as_persona: AsPersona, audit: Audit
+) -> None:
+    class Looping:
+        def step(self, turn: Turn) -> ToolCall | Reply:
+            return ToolCall("duplicate-payment-rate")
+
+    answer = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=Looping())
+    assert answer.text == f"the model made no reply within {MAX_TOOL_CALLS} tool calls"
+    assert records(audit)[-1]["outcome"] == "stopped"
+
+
+@pytest.mark.parametrize("cause", ["an-unreadable-exponent", "a-check-that-raises"])
+def test_a_reply_the_check_cannot_read_is_withheld_and_recorded(
+    as_persona: AsPersona, audit: Audit, monkeypatch: pytest.MonkeyPatch, cause: str
+) -> None:
+    """A number whose value cannot be read is reported; a check that raises withholds the reply;
+    either way the turn's record is written."""
+    text = "It was 1e999999999999999999999."
+    (failure,) = trace(text, (cited(((0.5,),)),)).failures
+    assert (failure.number, failure.reason) == (
+        "1e999999999999999999999",
+        "its value cannot be read",
+    )
+    if cause == "a-check-that-raises":
+
+        def raising(*_: Any) -> Any:
+            raise RuntimeError("the check failed")
+
+        monkeypatch.setattr(agent.integrity, "trace", raising)
+        text = "The share is 0.5."
+    model = Saying("duplicate-payment-rate", text)
+    answer = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=model)
+    assert answer.text == WITHHELD
+    record = records(audit)[-1]
+    assert (record["outcome"], len(record["runs"])) == ("abstained", 1)
+
+
+def test_a_sign_flipped_figure_is_withheld(as_persona: AsPersona, audit: Audit) -> None:
+    share = share_of_chicago(as_persona, audit)
+    model = Saying("duplicate-payment-rate", f"The share fell to \u2212{share!r}.")
+    answer = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=model)
+    assert answer.text == WITHHELD
     assert records(audit)[-1]["outcome"] == "abstained"
 
 
@@ -301,6 +394,38 @@ def test_a_version_counts_only_after_the_word_and_only_when_cited() -> None:
     assert failed_numbers("metric (version 3): 0.5", citation) == []
     assert failed_numbers("metric (version 4): 0.5", citation) == ["4"]
     assert failed_numbers("metric 3: 0.5", citation) == ["3"]
+    # The word must come right before the number, and be a word of its own.
+    assert failed_numbers("version 3, then 3", citation) == ["3"]
+    assert failed_numbers("subversion 3", citation) == ["3"]
+
+
+DASHES = ["-", "\u2212", "\u2010", "\u2012", "\u2013", "\u2014", "\ufe63", "\uff0d"]
+
+
+@pytest.mark.parametrize("dash", DASHES)
+def test_a_dash_before_a_number_is_its_minus(dash: str) -> None:
+    assert failed_numbers(f"it fell to {dash}12.25", cited(((12.25,),))) == [f"{dash}12.25"]
+    assert failed_numbers(f"it fell to {dash}12.25", cited(((-12.25,),))) == []
+
+
+@pytest.mark.parametrize("text", ["(12.25)", "12.25-", "12.25\u2212", "(\u221212.25)"])
+def test_a_number_with_an_ambiguous_sign_is_reported(text: str) -> None:
+    for cell in (12.25, -12.25):
+        (failure,) = trace(text, (cited(((cell,),)),)).failures
+        assert "ambiguous sign" in failure.reason
+
+
+@pytest.mark.parametrize("numeral", ["\u2075\u2070", "\u00bd", "\u2460"])
+def test_a_numeral_that_is_no_decimal_digit_is_reported(numeral: str) -> None:
+    assert failed_numbers(f"paid {numeral}", cited(((5.0,),))) == list(numeral)
+
+
+def test_a_bool_cell_is_no_number() -> None:
+    assert failed_numbers("1 vendor", cited(((True,),))) == ["1"]
+
+
+def test_a_text_cell_is_set_aside_only_where_it_is_written_whole() -> None:
+    assert failed_numbers("Q1 and Q10", cited((("Q1",),))) == ["10"]
 
 
 def test_a_cell_that_is_not_a_number_covers_only_its_own_text() -> None:
@@ -378,6 +503,7 @@ def change_run(runs: tuple[Logged, ...], **fields: Any) -> tuple[Logged, ...]:
         ("another-query", "the logged query is not the cited query bound"),
         ("other-values", "the logged values are not the cited query's"),
         ("other-cited-rows", "the re-run returned other rows than the cited run"),
+        ("other-cited-columns", "the re-run returned other rows than the cited run"),
         ("another-seal", "the re-run does not match the record's sealed result"),
         ("a-failing-query", "the re-run failed"),
         ("one-run-too-many", "the record logs 2 runs where the answer cites 1"),
@@ -398,6 +524,8 @@ def test_a_re_run_that_does_not_reproduce_is_reported(
         runs = change_run(runs, parameters={"p0": 2})
     elif case == "other-cited-rows":
         answer = replace(answer, citations=(replace(citation, rows=((2,),)),))
+    elif case == "other-cited-columns":
+        answer = replace(answer, citations=(replace(citation, columns=("y",)),))
     elif case == "another-seal":
         runs = change_run(runs, salt=new_salt())
     elif case == "a-failing-query":
@@ -437,3 +565,55 @@ def test_a_schema_name_the_tool_does_not_quote_fails_the_re_run(
     report = reproduce(answer, runs, lambda _: duckdb.connect(str(database), read_only=True))
     (failure,) = report.failures
     assert failure.reason.startswith("the re-run failed: a schema name the tool does not quote")
+
+
+def test_a_run_logged_unlike_its_citation_is_not_re_run(
+    invented: tuple[Answer, tuple[Logged, ...], AsPersona],
+) -> None:
+    answer, runs, _ = invented
+
+    def refusing(persona: str) -> duckdb.DuckDBPyConnection:
+        raise AssertionError(f"a connection was opened for {persona}")
+
+    report = reproduce(answer, change_run(runs, persona=UK, parameters={"p0": 2}), refusing)
+    assert [(f.query, f.reason) for f in report.failures] == [
+        ("invented", "the run was logged as another persona than the answer's"),
+        ("invented", "the logged values are not the cited query's"),
+    ]
+
+
+def test_the_re_run_is_made_as_the_logged_persona(
+    invented: tuple[Answer, tuple[Logged, ...], AsPersona], tmp_path: Path
+) -> None:
+    """Each persona gets its own database, with other rows of `t`: the re-run reproduces only on
+    the database of the persona the run was logged as."""
+    answer, runs, connect = invented
+    other = crafted(tmp_path / "other.duckdb", "create table t as select * from range(9) r(x)")
+
+    def by_persona(persona: str) -> duckdb.DuckDBPyConnection:
+        if persona == CHICAGO:
+            return connect(persona)
+        return duckdb.connect(str(other), read_only=True)
+
+    assert reproduce(answer, runs, by_persona).failures == ()
+
+
+def test_runs_are_compared_with_citations_in_order(
+    invented: tuple[Answer, tuple[Logged, ...], AsPersona],
+) -> None:
+    from dataclasses import replace
+
+    answer, runs, connect = invented
+    (citation,) = answer.citations
+    sql = "select x from t where x > 2"
+    rows = ((3,),)
+    second = replace(citation, query="second", sql=sql, rows=rows)
+    salt = new_salt()
+    result = seal(salt, sealed_result(("x",), ([cell_text(v) for v in r] for r in rows)))
+    text, parameters = bind(sql, "duckdb")
+    logged_second = Logged(text, parameters, CHICAGO, result, salt)
+    both = replace(answer, citations=(citation, second))
+    assert reproduce(both, (*runs, logged_second), connect).reproduced == ("invented", "second")
+    swapped = reproduce(both, (logged_second, *runs), connect)
+    assert swapped.reproduced == ()
+    assert "the logged query is not the cited query bound" in {f.reason for f in swapped.failures}
