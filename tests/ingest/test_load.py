@@ -878,7 +878,7 @@ def test_a_one_row_query_answered_with_another_number_of_rows_is_refused(
 def test_a_query_outside_the_lab_project_is_refused_before_any_call(env: dict[str, str]) -> None:
     bq = Bq()
     for ask in (counts, digest, lambda n, e, r: distinct_values(n, "vendor_name", e, r)):
-        with pytest.raises(LoadError, match="belongs to another lab"):
+        with pytest.raises(LoadError, match="may belong to another lab"):
             ask("chicago-contracts", env, bq)
     assert bq.calls == []
 

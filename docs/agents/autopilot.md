@@ -49,7 +49,13 @@ Area labels: `data`, `access`, `semantics`, `agent`, `workflow`, `operations`, `
 
 **Review leftovers:** a finding the item did not fix (the skill's step 8) goes as a checkbox comment on the open `Review leftovers: <area>` issue of the item's area (its area label, the epic's where it has several), never as a new issue; with none open, the wake opens it with `$AP/scripts/file_issue.sh --epic <the area's epic>`, labelled `leftover`, `ready` and the area's label, its findings as checkboxes.
 
-**An item that turns out to need GCP or the owner:** commit nothing half-done; swap `ready` and `agent:claimed` for `needs-gcp` (the step calls GCP while `LEDGER_LAB_GCP_PROJECT` is unset or empty or a `GCP_PROJECT` is set, or while the Digest says `Mode: offline`, or this lab's own project is missing) or `needs-owner` (a decision packet as the last comment); say why on the issue; `git stash -u`; take the next.
+**An item that turns out to need GCP or the owner:** commit nothing half-done; swap `ready` and `agent:claimed` for `needs-gcp` (the step calls GCP while `LEDGER_LAB_GCP_PROJECT` is unset or blank or a `GCP_PROJECT` is non-empty, or while the Digest says `Mode: offline`, or this lab's own project is missing) or `needs-owner` (a decision packet as the last comment); say why on the issue; `git stash -u`; take the next.
+
+**The lab's own environment** is a session where `LEDGER_LAB_GCP_PROJECT` is not blank (blank: empty or only whitespace, which `platform/gcp_project.py` strips) and `GCP_PROJECT` is unset or empty; `uv run python platform/gcp_project.py` prints `own` there and `elsewhere` in any other session, never the project.
+
+**Giving a `needs-gcp` item back:** at orient, a wake in the lab's own environment whose Digest says `Mode: full` (or has no `Mode` line) lists the open `needs-gcp` issues.
+An issue whose last parking comment gives only the session's environment or `Mode: offline` as the reason gets `ready` back in place of `needs-gcp`, with a comment saying this wake's environment can run its GCP step; the picker can then take it.
+An issue parked because the lab's own project is missing, or for any other reason, keeps `needs-gcp`, and the owner lifts it.
 
 ## Gates
 
@@ -60,7 +66,7 @@ No `local` gates: wakes run only the `cloud` gates; a session on the owner's com
 
 ## Never
 
-- Call GCP outside this lab's own environment: while `LEDGER_LAB_GCP_PROJECT` is unset or empty or a `GCP_PROJECT` is set, where the injected credential may be another lab's (`AGENTS.md`, own project only; in a session that has a `GCP_PROJECT`, the session-start hook prints that `docs/agents/no-session-gcp` declines it); label the item `needs-gcp` instead.
+- Call GCP outside this lab's own environment: while `LEDGER_LAB_GCP_PROJECT` is unset or blank or a `GCP_PROJECT` is non-empty, where the injected credential may be another lab's (`AGENTS.md`, own project only; in a session that has a `GCP_PROJECT`, the session-start hook prints that `docs/agents/no-session-gcp` declines it); label the item `needs-gcp` instead.
 - Commit a download, a sample whose licence is unconfirmed, or a person's name; commit the fetch script and its checksum.
 - Call a paid model; wait for the free quota or report the gap.
 - Edit a guardrail in `AGENTS.md`; post a conflict packet on the issue.
