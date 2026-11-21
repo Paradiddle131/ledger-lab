@@ -71,9 +71,12 @@ controls:
   - id: untrusted-content-cannot-instruct
     layer: Injection and tool authorisation
     owner: agent-operator
-    asserts: An instruction planted in a cell, a column description or a glossary entry changes no tool call; tools are read-only and denied by default.
-    proven_by: [tests/agent/test_injection.py::test_planted_instructions_are_ignored]
-    status: not-implemented
+    asserts: The own agent's model plans its tool calls on a turn holding the question and the verified queries only, and a call it then makes that is not in the plan is refused and not put to the tool policy; an instruction planted in a cell of the persona's database, a column description or a glossary entry passed to the agent, read by a test model that obeys it, to call a tool the policy does not declare, the write tool, a query the metric context lacks, a verified query the asking persona may run, or the question's own query once more, comes back refused as unplanned, and the queries run, with the metric, version, SQL, columns and rows each cites (the planted cell put back), and the turn's audit record equal those of the same question asked with nothing planted; so do three planted calls in one glossary entry, and twenty across a glossary entry, a column description and a cell or all in a cell, where after five refused calls the agent asks the model no more and runs the planned query itself; the text of the reply is not checked.
+    proven_by:
+      - tests/agent/test_injection.py::test_planted_instructions_are_ignored
+      - tests/agent/test_injection.py::test_three_planted_calls_leave_the_questions_query_to_run
+      - tests/agent/test_injection.py::test_more_planted_calls_than_the_refusal_limit_leave_the_questions_query_to_run
+    status: implemented
   - id: no-outbound-channel-carries-data
     layer: Injection and tool authorisation
     owner: agent-operator
@@ -84,11 +87,11 @@ controls:
     layer: Answer integrity
     owner: metric-owner
     asserts: >-
-      What is checked (agent/integrity.py, applied by agent/ask.py when the model replies): the reply is shown, and the turn recorded answered, only when a cited query's verified question equals the asked question after NFKC, casefolding and white-space collapsing, and each number of the reply traces to a run of such a query whose citation carries a freshness; otherwise a fixed text with no digit is shown and the turn is recorded abstained, which includes a turn that cites no run, whatever its reply says.
+      What is checked (agent/integrity.py, applied by agent/ask.py when the model replies on a turn stopped at neither cap): the reply is shown, and the turn recorded answered, only when a cited query's verified question equals the asked question after NFKC, casefolding and white-space collapsing, and each number of the reply traces to a run of such a query whose citation carries a freshness; otherwise a fixed text with no digit is shown and the turn is not recorded answered (it is recorded abstained, or refused for the policy or as unplanned when a call was), which includes a turn that cites no run, whatever its reply says.
       A number is read as decimal digits with thousands commas, decimals, an exponent and a leading ASCII minus, U+2212 or one of the other dashes agent/integrity.py lists (DASHES), read as a minus; it traces when its value equals a cited int, float or Decimal cell (not a bool), or when it follows the word "version" and equals the cited version; the digits of a cited text, date or time cell written whole are that cell's own.
       Reported, so withheld: a number no cited cell equals, a number in parentheses or followed by a minus, a number whose value cannot be read, a numeral of Unicode category No, and an exception raised by the check.
       Re-running the query a record logged, as the record's persona and only when its persona, SQL and bound values are the answer's and the cited query's, in the citations' order, must give the cited run's columns and rows, in any order, and the record's sealed result.
-      Stated limits: equality only, so rounded figures, percentages of a share and years or counts in prose that are no cell are withheld; a paraphrase of a verified question is withheld, so the agent answers only the verified questions' own wording; a number written in words is not read and passes on a reply not withheld for another reason; which row, column or metric the prose attributes a number to is not checked, so swapped figures pass; the re-run reads whatever database the connection-maker opens and is a verifier's call, not made by ask; a turn stopped at the tool-call cap shows ask's own message, which names the cap and is not checked.
+      Stated limits: equality only, so rounded figures, percentages of a share and years or counts in prose that are no cell are withheld; a paraphrase of a verified question is withheld, so the agent answers only the verified questions' own wording; a number written in words is not read and passes on a reply not withheld for another reason; which row, column or metric the prose attributes a number to is not checked, so swapped figures pass; the re-run reads whatever database the connection-maker opens and is a verifier's call, not made by ask; a turn stopped at the tool-call cap or the refusal cap shows ask's own fixed message, which names the cap and is not checked.
     proven_by:
       - tests/agent/test_answer_integrity.py::test_logged_query_reproduces_the_answer
       - tests/agent/test_answer_integrity.py::test_a_perturbed_number_in_a_scripted_answer_is_caught
@@ -110,6 +113,7 @@ controls:
       - tests/agent/test_answer_integrity.py::test_the_re_run_is_made_as_the_logged_persona
       - tests/agent/test_answer_integrity.py::test_runs_are_compared_with_citations_in_order
       - tests/agent/test_answer_integrity.py::test_a_turn_stopped_at_the_cap_shows_its_own_message
+      - tests/agent/test_answer_integrity.py::test_a_withheld_reply_keeps_the_refusal_the_turn_records
     status: implemented
   - id: scored-by-execution
     layer: Evaluation and monitoring

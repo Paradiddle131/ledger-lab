@@ -22,7 +22,7 @@ import pytest
 
 import agent.integrity
 from access.compile import quote
-from agent.ask import MAX_TOOL_CALLS, Answer, Audit, ask, load_context
+from agent.ask import CAPPED, MAX_TOOL_CALLS, Answer, Audit, ask, load_context
 from agent.audit import FileLog, bind, cell_text, new_salt, read_log, seal, sealed_result
 from agent.integrity import WITHHELD, Logged, logged, numbers, reproduce, same, trace
 from agent.model import Citation, Model, Reply, ToolCall, Turn, model_from_config
@@ -69,6 +69,9 @@ class Saying:
     def __init__(self, query: str | None, text: str) -> None:
         self._query, self._text = query, text
 
+    def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+        return () if self._query is None else (ToolCall(self._query),)
+
     def step(self, turn: Turn) -> ToolCall | Reply:
         if self._query is None or turn.results:
             return Reply(self._text)
@@ -81,6 +84,9 @@ class Perturbing:
     def __init__(self, model: Model) -> None:
         self._model = model
         self.said = ""
+
+    def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+        return self._model.plan(turn)
 
     def step(self, turn: Turn) -> ToolCall | Reply:
         step = self._model.step(turn)
@@ -264,16 +270,30 @@ def test_a_reply_with_no_cited_run_is_withheld_whatever_it_says(
     assert records(audit)[-1]["outcome"] == "abstained"
 
 
+@pytest.mark.parametrize("cap", ["tool-call-cap", "refusal-cap"])
 def test_a_turn_stopped_at_the_cap_shows_its_own_message(
-    as_persona: AsPersona, audit: Audit
+    as_persona: AsPersona, audit: Audit, cap: str
 ) -> None:
+    """At the tool-call cap (every call planned) and at the refusal cap (no call planned), the
+    turn shows `ask`'s own fixed message, which names the cap with digits, unchecked."""
+
     class Looping:
+        def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+            if cap == "refusal-cap":
+                return ()
+            return (ToolCall("duplicate-payment-rate"),) * (MAX_TOOL_CALLS + 1)
+
         def step(self, turn: Turn) -> ToolCall | Reply:
             return ToolCall("duplicate-payment-rate")
 
     answer = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=Looping())
-    assert answer.text == f"the model made no reply within {MAX_TOOL_CALLS} tool calls"
-    assert records(audit)[-1]["outcome"] == "stopped"
+    record = records(audit)[-1]
+    if cap == "tool-call-cap":
+        assert answer.text == f"the model made no reply within {MAX_TOOL_CALLS} tool calls"
+        assert (record["outcome"], record["reason"]) == ("stopped", "model-call-cap")
+    else:
+        assert answer.text == CAPPED and re.search(r"\d", CAPPED)
+        assert (record["outcome"], record["reason"]) == ("stopped", "model-refusal-cap")
 
 
 @pytest.mark.parametrize("cause", ["an-unreadable-exponent", "a-check-that-raises"])
@@ -617,3 +637,33 @@ def test_runs_are_compared_with_citations_in_order(
     swapped = reproduce(both, (logged_second, *runs), connect)
     assert swapped.reproduced == ()
     assert "the logged query is not the cited query bound" in {f.reason for f in swapped.failures}
+
+
+class Unplanned:
+    """Plans nothing, calls the verified query anyway, then replies with a figure."""
+
+    def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+        return ()
+
+    def step(self, turn: Turn) -> ToolCall | Reply:
+        return Reply("The share is 0.5.") if turn.results else ToolCall("duplicate-payment-rate")
+
+
+@pytest.mark.parametrize(
+    ("asker", "unplanned", "outcome"),
+    [
+        ("agent-operator", False, ("refused", "policy")),
+        (CHICAGO, True, ("refused", "unplanned")),
+    ],
+    ids=["denied", "unplanned"],
+)
+def test_a_withheld_reply_keeps_the_refusal_the_turn_records(
+    as_persona: AsPersona, audit: Audit, asker: str, unplanned: bool, outcome: tuple[str, str]
+) -> None:
+    """A withheld reply whose call the policy denied is recorded refused for the policy; one whose
+    call was unplanned, refused as unplanned."""
+    model: Model = Unplanned() if unplanned else Saying("duplicate-payment-rate", "It is 0.5.")
+    answer = ask(asker, QUESTION, as_persona=as_persona, audit=audit, model=model)
+    assert answer.text == WITHHELD
+    record = records(audit)[-1]
+    assert (record["outcome"], record["reason"]) == outcome

@@ -2,8 +2,9 @@
 and the runs it cites, and whether the query a turn's audit record logged reproduces those runs.
 
 `withheld(question, text, citations, queries)` is what `agent.ask.ask` calls on the model's reply
-once the tool-call loop has ended (not on a turn stopped at the tool-call cap): when it is true,
-`ask` shows `WITHHELD` in place of the reply and records the turn as abstained.
+once the tool-call loop has ended (not on a turn stopped at the tool-call cap or the refusal
+cap): when it is true, `ask` shows `WITHHELD` in place of the reply and does not record the turn
+as answered (it records it abstained, or refused for the policy or as unplanned when a call was).
 `reproduce(answer, runs, as_persona)` re-runs the queries a record logged (`logged(record, kept)`
 reads them with the kept values) and is the caller's or a verifier's to run; `ask` does not call it.
 
@@ -58,8 +59,8 @@ Stated limits:
 - a cell that is not a number is matched only by its `str` or `repr` written whole; a number equal
   to a cited text cell's whole text passes as that cell;
 - the text need not name a metric, a query or a freshness: those are the citations' fields;
-- a turn stopped at the tool-call cap shows `ask`'s own message, which names the cap and is not
-  checked;
+- a turn stopped at the tool-call cap or the refusal cap shows `ask`'s own fixed message, which
+  names the cap and is not checked;
 - `reproduce` re-runs on whatever connection `as_persona` returns, so it shows a change of the
   persona's database since the run, not which build that database came from; it does not re-ask
   the model or open the record's answer seal (`tests/agent/test_audit.py` rebuilds those);
