@@ -363,6 +363,10 @@ class AuditLog(Protocol):
         salt and value of each of its seals by field path; return the record, or raise."""
         ...
 
+    def records(self) -> list[dict[str, Any]]:
+        """The log's records in order, its chain verified; raise when it cannot be read."""
+        ...
+
 
 def _read_all(fd: int, size: int) -> bytes:
     chunks, offset = [], 0
@@ -427,6 +431,21 @@ class FileLog:
                     self._forget(record["seq"])
                 raise
             return record
+        finally:
+            os.close(fd)
+
+    def records(self) -> list[dict[str, Any]]:
+        """The log's records under a shared `flock`, refusing a torn last line or a chain that does
+        not verify; a log not yet written holds none."""
+        try:
+            fd = os.open(self.path, os.O_RDONLY)
+        except FileNotFoundError:
+            return []
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            records = read_log(_read_all(fd, os.fstat(fd).st_size))
+            verify_chain(records)
+            return records
         finally:
             os.close(fd)
 

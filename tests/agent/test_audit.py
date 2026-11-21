@@ -495,6 +495,9 @@ class Broken:
         self.seen.append(kept)
         raise OSError(f"no space left writing {json.dumps({p: v for p, (_, v) in kept.items()})}")
 
+    def records(self) -> list[dict[str, Any]]:
+        return []
+
 
 @pytest.mark.parametrize(
     ("who", "question", "model"),
