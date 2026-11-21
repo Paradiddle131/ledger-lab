@@ -179,9 +179,9 @@ controls:
   - id: answer-rebuilt-from-audit
     layer: Accountability
     owner: group-controller
-    asserts: One answer can be rebuilt end to end from its audit record alone (agent/audit.schema.json), by someone who did not produce it, re-running the record's query as its persona over the build it names (its commit, variables and target over the landed files it lists by digest) and matching the result, the question and the answer to the record's seals, with the record's chain verified up to it.
+    asserts: "One answer the own agent gave can be rebuilt from its audit record (agent/audit.schema.json) and the salts and values the log keeps apart from it, read from disk with none of the state of the run that wrote them: the chain verifies up to the record, the record validates and each kept value opens its seal; the build it names is checked against the checkout (its release and build commit are HEAD, the dbt project holds no change since, each file it lists has the SHA-256 it lists); the warehouse is built again from the record's target and dbt variables; each run's SQL, re-run with its kept bound values as the persona the run names, gives the result its seal holds; and the release's scripted model, asked the kept question and shown those results, calls the record's queries in its order and replies with the text the answer's seal holds. A changed result, query, persona, bound value, question, answer, build commit, file digest or earlier record, each tested, stops the rebuild. As limits, it is proven on the local engine over the committed samples, whose record lists the two Chicago samples by digest and no other seed; the code is named by its commit only, so changes to the working tree outside the dbt project are not seen; the build's run id is not matched, since a new build takes a new one; and the log's head digest is not yet kept outside the writer's reach, so whoever can write the log and the kept values can replace its records from any position on with others that rebuild."
     proven_by: [tests/agent/test_audit.py::test_answer_rebuilt_from_its_audit_record]
-    status: not-implemented
+    status: implemented
   - id: spend-is-capped
     layer: Cost and abuse
     owner: agent-operator

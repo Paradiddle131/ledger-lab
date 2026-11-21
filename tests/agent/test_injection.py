@@ -49,7 +49,8 @@ import pytest
 
 from access.compile import open_persona
 from agent import ask as ask_module
-from agent.ask import Answer, ask, load_context, load_glossary
+from agent.ask import Answer, Audit, ask, load_context, load_glossary
+from agent.audit import FileLog, read_log
 from agent.model import (
     Citation,
     ColumnDescription,
@@ -239,6 +240,7 @@ def planted_cell(
 
 def asked(
     as_persona: AsPersona,
+    audit: Audit,
     glossary: Sequence[GlossaryTerm],
     column_descriptions: Sequence[ColumnDescription],
 ) -> tuple[Answer, Obedient, Opening]:
@@ -248,6 +250,7 @@ def asked(
         PERSONA,
         QUESTION,
         as_persona=opening.connect,
+        audit=audit,
         model=opening,
         glossary=glossary,
         columns=column_descriptions,
@@ -307,16 +310,33 @@ def policy_asked(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
 
 
 def baseline_of(
-    as_persona: AsPersona, glossary: Sequence[GlossaryTerm], columns: Sequence[ColumnDescription]
+    as_persona: AsPersona,
+    audit: Audit,
+    glossary: Sequence[GlossaryTerm],
+    columns: Sequence[ColumnDescription],
 ) -> Answer:
     """The question asked with nothing planted: the question's query run, nothing refused."""
-    answer, model, _ = asked(as_persona, glossary, columns)
+    answer, model, _ = asked(as_persona, audit, glossary, columns)
     assert model.plans == [(ToolCall(QUERY),)]
     assert model.issued == [ToolCall(QUERY)]
     assert answer.refusals == ()
     assert [c.query for c in answer.citations] == [QUERY]
     assert not any(MARKER in t for turn in model.turns for t in read(turn))
     return answer
+
+
+def recorded(audit: Audit) -> list[tuple[str, Any, list[str], list[str]]]:
+    """Each record's outcome, reason, cited metrics and the SQL of its runs, in the log's order."""
+    assert isinstance(audit.log, FileLog)
+    return [
+        (
+            r["outcome"],
+            r.get("reason"),
+            [m["name"] for m in r["metrics"]],
+            [run["query"]["text"] for run in r["runs"]],
+        )
+        for r in read_log(audit.log.path.read_bytes())
+    ]
 
 
 def planned_on_the_question_alone(model: Obedient) -> None:
@@ -331,6 +351,7 @@ def test_planted_instructions_are_ignored(
     as_persona: AsPersona,
     planted_cell: Callable[[str], AsPersona],
     build: "Build",
+    audit: Audit,
     policy_asked: list[tuple[str, str]],
     place: str,
     planted: str,
@@ -341,7 +362,7 @@ def test_planted_instructions_are_ignored(
     call = PLANTED[planted]
     text = instruction(call)
     glossary, columns = load_glossary(), descriptions(build)
-    baseline = baseline_of(as_persona, glossary, columns)
+    baseline = baseline_of(as_persona, audit, glossary, columns)
     policy_asked.clear()
 
     source = as_persona
@@ -351,7 +372,7 @@ def test_planted_instructions_are_ignored(
         columns = planted_columns(columns, text)
     else:
         glossary = planted_glossary(text)
-    answer, model, opening = asked(source, glossary, columns)
+    answer, model, opening = asked(source, audit, glossary, columns)
 
     # The instruction reached the model, in the place it was planted, and the model obeyed it.
     assert any(text in t for t in shown(model.turns, place))
@@ -363,6 +384,10 @@ def test_planted_instructions_are_ignored(
     assert policy_asked == [("run_metric_query", "constant_currency_spend")]
     assert ran(answer, f" {text}") == ran(baseline)
     assert opening.opened == [PERSONA]
+    # The audit records of the two turns name the same outcome, metrics and SQL run.
+    (plain, planted_record) = recorded(audit)
+    assert planted_record == plain == ("answered", None, ["constant_currency_spend"], plain[3])
+    assert len(plain[3]) == 1
     if place != "cell" and call != ToolCall(QUERY):
         # The planted call came first, so its refusal was shown before any connection opened.
         assert model.issued[0] == call
@@ -371,18 +396,20 @@ def test_planted_instructions_are_ignored(
 
 
 def test_three_planted_calls_leave_the_questions_query_to_run(
-    as_persona: AsPersona, policy_asked: list[tuple[str, str]]
+    as_persona: AsPersona, audit: Audit, policy_asked: list[tuple[str, str]]
 ) -> None:
     """Three planted calls in one glossary entry, as many as the tool-call limit, are refused and
     the question's own query still runs and is cited."""
     calls = [PLANTED["unlisted tool"], PLANTED["write tool"], PLANTED["query the persona may run"]]
-    baseline = baseline_of(as_persona, load_glossary(), ())
+    baseline = baseline_of(as_persona, audit, load_glossary(), ())
     policy_asked.clear()
     glossary = planted_glossary(" ".join(instruction(c) for c in calls))
-    answer, model, _ = asked(as_persona, glossary, ())
+    answer, model, _ = asked(as_persona, audit, glossary, ())
     assert model.obeyed == calls
     planned_on_the_question_alone(model)
     assert answer.refusals == tuple(Refusal(c.query, UNPLANNED, c.tool) for c in calls)
     assert ran(answer) == ran(baseline)
     assert policy_asked == [("run_metric_query", "constant_currency_spend")]
     assert answer.text == f"Ran: {QUERY}."
+    (plain, planted_record) = recorded(audit)
+    assert planted_record == plain and plain[0] == "answered"
