@@ -65,6 +65,7 @@ import os
 import re
 import secrets
 import stat
+import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
@@ -77,6 +78,10 @@ from jsonschema import Draft202012Validator
 from sqlglot import exp
 from sqlglot.errors import ParseError
 from sqlglot.expressions.core import Expression
+
+# How long a turn waits for the persona's earlier turn to end before it is refused, in seconds:
+# above a turn's queries at their time cap (agent/limits.py).
+TURN_WAIT = 120.0
 
 # The `prev` of the first record of the log.
 GENESIS = "0" * 64
@@ -465,14 +470,28 @@ class FileLog:
     @contextlib.contextmanager
     def turn(self, persona: str) -> Iterator[None]:
         """An exclusive `flock` on the persona's lock file, held while the block runs: one file per
-        persona, named by the SHA-256 of its id, in an owner-only folder beside the log."""
+        persona, named by the SHA-256 of its id, in a folder beside the log, created owner-only
+        when absent; a folder that is a link or whose mode grants anything to group or others is
+        refused (`KeptFolderRefused`), and a lock another turn still holds after `TURN_WAIT`
+        seconds raises `TimeoutError`."""
         folder = self.path.with_name(f"{self.path.name}.turns")
         with contextlib.suppress(FileExistsError):
             folder.mkdir(mode=0o700)
+        mode = os.lstat(folder).st_mode
+        if not stat.S_ISDIR(mode) or stat.S_IMODE(mode) & 0o077:
+            raise KeptFolderRefused("the folder of turn locks is a link or open to others")
         name = hashlib.sha256(persona.encode("utf-8")).hexdigest()
         fd = os.open(folder / name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            deadline = time.monotonic() + TURN_WAIT
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("another turn of the persona holds its lock") from None
+                    time.sleep(0.05)
             yield
         finally:
             os.close(fd)

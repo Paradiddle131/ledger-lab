@@ -23,8 +23,9 @@ What `ask` checks, in this order:
   the history read is shown to the model on every step but the planning one, and no other
   session's exchange is read;
 - the persona's turn lock is taken (`AuditLog.turn`) and held until the turn's record is written,
-  so one persona's turns run one at a time; a lock that cannot be taken raises `AuditWriteFailed`
-  with no record; then the persona's turns in the 24 hours before this one are counted in the
+  so one persona's turns run one at a time; a lock that cannot be taken (its folder a link or
+  open to others, or another turn holding it past `agent.audit.TURN_WAIT`) raises
+  `AuditWriteFailed` with no record; then the persona's turns in the 24 hours before this one are counted in the
   audit log
   (`AuditLog.records`, `agent.limits.turns_today`); at the `turns_per_person_per_day` of the cost
   ceilings (`agent/limits.py`), the turn is recorded `stopped` with `turn-cap` and answered with

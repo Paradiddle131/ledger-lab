@@ -6,15 +6,21 @@ denial-of-wallet cases (`agent/evals/adversarial.yaml`): every payment against e
 """
 
 import dataclasses
+import json
+import os
 import threading
 import time
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import duckdb
 import pytest
+import yaml
+from jsonschema import Draft202012Validator
 
+from agent import audit as audit_module
 from agent.ask import (
     MAX_STEPS,
     MAX_TOOL_CALLS,
@@ -24,6 +30,7 @@ from agent.ask import (
     load_context,
     run_metric_query,
 )
+from agent.ask import MAX_TOOL_CALLS as QUERIES
 from agent.audit import AuditWriteFailed, FileLog, read_log
 from agent.limits import (
     BYTES_CAP,
@@ -38,6 +45,7 @@ from agent.limits import (
 from agent.model import Refusal, Reply, ToolCall, Turn, VerifiedQuery, model_from_config
 
 AsPersona = Callable[[str], duckdb.DuckDBPyConnection]
+REPO_EVALS = Path(__file__).resolve().parents[2] / "agent" / "evals"
 # A reader of every entity's payments, as in the denial-of-wallet cases.
 READER = "group-controller"
 OTHER = "accountant-chicago"
@@ -354,8 +362,80 @@ def test_no_planned_query_runs_after_one_stopped_at_a_cap(
 
 
 def test_the_time_cap_is_held_within_a_minute() -> None:
-    """The committed time cap is a cap: at most a minute a query."""
+    """The committed time cap is a cap: at most a minute a query, and the cases' schema refuses
+    more."""
     assert 0 < load_limits().seconds_per_query <= 60
+    cases = yaml.safe_load((REPO_EVALS / "adversarial.yaml").read_text(encoding="utf-8"))
+    schema = json.loads((REPO_EVALS / "adversarial.schema.json").read_text(encoding="utf-8"))
+    validator = Draft202012Validator(schema)
+    assert validator.is_valid(cases)
+    cases["cost_ceilings"]["seconds_per_query"] = 61
+    assert not validator.is_valid(cases)
+
+
+def test_a_turn_waits_for_the_one_before_longer_than_its_queries_may_run() -> None:
+    assert QUERIES * load_limits().seconds_per_query < audit_module.TURN_WAIT
+
+
+def lock_folder(audit: Audit) -> Path:
+    assert isinstance(audit.log, FileLog)
+    return audit.log.path.with_name(f"{audit.log.path.name}.turns")
+
+
+@pytest.mark.parametrize("arrange", ["a file", "open to others", "a link"])
+def test_a_turn_lock_that_cannot_be_held_takes_no_turn(
+    as_persona: AsPersona, audit: Audit, tmp_path: Path, arrange: str
+) -> None:
+    """A lock folder that is a file, open to others or a link raises before the model is asked,
+    with no record."""
+    folder = lock_folder(audit)
+    if arrange == "a file":
+        folder.write_bytes(b"")
+    elif arrange == "open to others":
+        folder.mkdir()
+        os.chmod(folder, 0o770)  # noqa: S103 - the mode under test
+    else:
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir(mode=0o700)
+        folder.symlink_to(elsewhere)
+    model = Calls("duplicate-payment-rate")
+    with pytest.raises(AuditWriteFailed, match="could not be held"):
+        ask(OTHER, QUESTION, as_persona=as_persona, audit=audit, model=model)
+    assert model.asked == 0
+    assert isinstance(audit.log, FileLog)
+    assert not audit.log.path.exists()
+
+
+def test_a_turn_waits_no_longer_than_the_turn_wait(
+    as_persona: AsPersona, audit: Audit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """While another turn of the persona holds its lock past the wait, the turn is refused with no
+    model call; another persona is not held."""
+    monkeypatch.setattr(audit_module, "TURN_WAIT", 0.2)
+    assert isinstance(audit.log, FileLog)
+    model = Calls("duplicate-payment-rate")
+    with audit.log.turn(OTHER):
+        with pytest.raises(AuditWriteFailed, match="could not be held"):
+            ask(OTHER, QUESTION, as_persona=as_persona, audit=audit, model=model)
+        assert model.asked == 0
+        assert ask(UK, QUESTION, as_persona=as_persona, audit=audit, model=model).citations
+
+
+def test_a_log_whose_chain_does_not_verify_takes_no_turn(
+    as_persona: AsPersona, audit: Audit
+) -> None:
+    """A record edited in place breaks the chain the turn count reads, so the next turn is refused
+    before the model is asked."""
+    scripted = model_from_config({}, load_context())
+    ask(OTHER, QUESTION, as_persona=as_persona, audit=audit, model=scripted)
+    assert isinstance(audit.log, FileLog)
+    data = audit.log.path.read_bytes()
+    assert data.count(b'"answered"') == 1
+    audit.log.path.write_bytes(data.replace(b'"answered"', b'"abstained"'))
+    model = Calls("duplicate-payment-rate")
+    with pytest.raises(AuditWriteFailed, match="could not be read"):
+        ask(OTHER, QUESTION, as_persona=as_persona, audit=audit, model=model)
+    assert model.asked == 0
 
 
 def answer_at(persona: str | None, at: datetime, reason: str | None = None) -> dict[str, Any]:

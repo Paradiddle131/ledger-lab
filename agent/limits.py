@@ -27,7 +27,8 @@ Stated limits:
 - the 24 hours are counted back from the new turn's start on the records' own times, so a log whose
   times were written wrong counts wrong, and a log removed or replaced counts from what it holds;
 - the turn lock is `FileLog`'s `flock` on a file per persona beside the log, so it holds turns
-  apart only among processes that share that folder.
+  apart only among processes that share that folder, and a turn that waits past
+  `agent.audit.TURN_WAIT` for the one before is refused.
 """
 
 import json
