@@ -877,6 +877,18 @@ ROUTING_REFUSED: dict[str, tuple[Edit, list[str]]] = {
         payments_on("invocation_args_dict.get('which') == 'build'"),
         [reads_invocation(PAYMENTS_SQL, "invocation_args_dict")],
     ),
+    "a config() call behind a quoted tag end that only a command other than parse reaches": (
+        payments_on("'%}' and flags.WHICH != 'parse'"),
+        [reads_invocation(PAYMENTS_SQL, "flags")],
+    ),
+    "a config() call behind a double-quoted tag end that only a command other than parse reaches": (
+        payments_on("\"%}\" and flags.WHICH != 'parse'"),
+        [reads_invocation(PAYMENTS_SQL, "flags")],
+    ),
+    "a config() call in a tag over two lines that only a command other than parse reaches": (
+        payments_on("\n    flags.WHICH != 'parse'\n"),
+        [reads_invocation(PAYMENTS_SQL, "flags")],
+    ),
     "a generic test's schema that renders by the command": (
         replaced(
             CHICAGO_DOCS,
@@ -1794,7 +1806,21 @@ PASSES: dict[str, Edit] = {
         metric("remaining_commitment", lambda b: None),
         moved(CONTRACTS, "models/macros/contracts.yml"),
     ),
+    "an invocation name as part of another name, in a comment, a raw block or plain SQL": replaced(
+        PAYMENTS_SQL,
+        "\nselect",
+        "\n-- flags.WHICH\n{# flags.WHICH #}{% raw %}{{ flags.WHICH }}{% endraw %}"
+        "{% set my_flags_col = 'invocation_id' %}\nselect",
+    ),
 }
+
+
+def test_jinja_the_lexer_cannot_read_is_refused() -> None:
+    """A file whose Jinja dbt's lexer cannot read is refused, since what it runs is unknown."""
+    assert versions.invocation_reads("models/seeds/odd.csv", "a,b\n{{ x },1\n") == [
+        "models/seeds/odd.csv: its Jinja does not lex (line 2), so the gate cannot read what it"
+        " runs, which the gate refuses"
+    ]
 
 
 @pytest.mark.parametrize("name", list(PASSES))
