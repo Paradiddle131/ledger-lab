@@ -387,6 +387,21 @@ def duplicate_schema(name: str) -> Change:
     return change
 
 
+def duplicate_rule(rule_id: str, on: str | None = None, **settings: object) -> Change:
+    """A copy of the schema's quality rule `rule_id`, changed by `settings`, added under the
+    same id to the schema, or to property `on` beside a copy of its own."""
+
+    def change(c: Contract) -> None:
+        copied = copy.deepcopy(next(q for q in schema_of(c)["quality"] if q["id"] == rule_id))
+        copied.update(settings)
+        if on is None:
+            schema_of(c)["quality"].append(copied)
+        else:
+            column(c, on)["quality"] = [copy.deepcopy(copied), copied]
+
+    return change
+
+
 IN = "origin/main"
 SWAPPED = "payments's payments.payee (payments.vendor_name)"
 REFUSED_BY_VERSION: dict[str, tuple[Change, str, list[str]]] = {
@@ -457,6 +472,16 @@ REFUSED_BY_VERSION: dict[str, tuple[Change, str, list[str]]] = {
         duplicate("amount", physicalType="FLOAT64", required=False),
         "schema payments has two properties named amount",
         ["1.0.0"],
+    ),
+    "a second quality rule with a rule's id": (
+        duplicate_rule(HASHED),
+        f"schema payments has two quality rules with id {HASHED}",
+        ["1.0.0", "2.0.0"],
+    ),
+    "two quality rules with one id on a property": (
+        duplicate_rule(HASHED, on="vendor_name"),
+        f"payments.vendor_name has two quality rules with id {HASHED}",
+        ["1.0.0", "2.0.0"],
     ),
     "a field nested in a column's properties": (
         nest("properties"),
@@ -730,6 +755,7 @@ def with_id(text: str, cid: object) -> str:
 
 NO_TEXT_ID: dict[str, tuple[object, str]] = {
     "no id": (None, "is unreadable: no contract id"),
+    "an empty id": ("", "is unreadable: no contract id"),
     "a number as id": (42, "is unreadable: its contract id 42 is not text"),
     "a list as id": (["x"], "is unreadable: its contract id ['x'] is not text"),
 }
@@ -770,15 +796,31 @@ def test_a_schema_rename_hides_no_break_and_in_place_each_needs_its_line(
 ) -> None:
     retyped = found(bigquery_types)
     assert len(retyped) == 16
-    ok, report = gate_on(
-        published_repo, both(bigquery_types, declaring("2.0.0", listed(retyped[1:])))
-    )
-    assert not ok
-    assert f"payments: {retyped[0]} (not listed in {gate.DECLARED})" in report
+    for n, left_out in enumerate(retyped):
+        others = retyped[:n] + retyped[n + 1 :]
+        ok, report = gate_on(
+            published_repo, both(bigquery_types, declaring("2.0.0", listed(others)))
+        )
+        assert not ok, left_out
+        assert f"payments: {left_out} (not listed in {gate.DECLARED})" in report, report
+        assert report.count("not listed in") == 1, report
     renamed = both(rename_schema("payments_v2"), bigquery_types)
     ok, report = gate.check(with_files(published_repo, {PATH: declared(renamed, "2.0.0")}))
     assert not ok
     assert "schema payments is gone or renamed, which no version can declare" in report
+
+
+def test_a_rule_copied_under_its_id_then_weakened_fails_the_gate(tmp_path: Path) -> None:
+    """Of two rules sharing an id only the last is compared, so a copy added first and weakened
+    later would pass both steps; the copy is refused in the working tree, whatever origin/main
+    holds."""
+    original = next(q for q in schema_of(committed())["quality"] if q["id"] == HASHED)
+    repo = git_repo(tmp_path, {PATH: changed(duplicate_rule(HASHED))})
+    weakened = duplicate_rule(HASHED, query="select 0")
+    ok, report = gate.check(with_files(repo, {PATH: changed(weakened)}))
+    assert original["query"] != "select 0"
+    assert not ok, report
+    assert f"payments: schema payments has two quality rules with id {HASHED}" in report, report
 
 
 @pytest.fixture(scope="module")
@@ -825,6 +867,27 @@ def test_a_merged_major_versions_list_excuses_no_later_break(merged_repo: Path, 
     change, passes = AFTER_MERGE[name]
     ok, report = gate.check(with_files(merged_repo, {PATH: changed(change)}))
     assert ok == passes, report
+
+
+def test_the_gate_exits_with_failure_on_a_break_or_when_it_cannot_compare(
+    published_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`main`, which `make contract` runs, returns the process's exit status."""
+    check = gate.check
+    with_files(published_repo, {PATH: CONTRACT.read_text()})
+    monkeypatch.setattr(gate, "check", lambda: check(published_repo))
+    assert gate.main() == 0
+    assert "no change breaks a consumer" in capsys.readouterr().out
+    with_files(published_repo, {PATH: changed(drop("amount"))})
+    assert gate.main() == 1
+    assert "break consumers" in capsys.readouterr().err
+
+    def cannot() -> tuple[bool, str]:
+        raise gate.GateError("origin/main is not fetched")
+
+    monkeypatch.setattr(gate, "check", cannot)
+    assert gate.main() == 1
+    assert "contract: origin/main is not fetched" in capsys.readouterr().err
 
 
 GIT = ["git"]
