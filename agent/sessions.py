@@ -25,14 +25,14 @@ conversation, each `ask` is a session of one turn that keeps no transcript.
 
 `purge(store, log, now)` is the one purge: it takes `RETENTION`, the one setting both purges read,
 from `now`, deletes the audit log's kept values and salts of the records written before that instant
-(`agent.audit.FileLog.purge`, which refuses a missing log, a log whose chain does not verify and a
-missing folder of kept values, removing nothing), then the transcripts that ended before it
-(`Sessions.purge`), so the
-record still shows the turn happened, who asked and which query ran on which data, and no figure
-in it can be checked any more. `python -m agent.sessions purge --log <log> --kept <folder>` runs it
-now, connecting by libpq's own variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`,
-`PGDATABASE`, ...), and prints the counts it removed; a `--log` that is not a file is refused
-before it connects (exit 2), and a refusal of the log's purge exits with its error.
+(`agent.audit.FileLog.purge`, which refuses a missing log, a log whose chain does not verify and,
+once the log holds a record, a missing folder of kept values, removing nothing), then the
+transcripts that ended before it (`Sessions.purge`), so the record still shows the turn happened,
+who asked and which query ran on which data, and no figure in it can be checked any more. `python -m
+agent.sessions purge --log <log> --kept <folder>` runs it now, connecting by libpq's own variables
+(`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, ...), and prints the counts it removed; a
+`--log` that is not a file is refused before it connects (exit 2), and a refusal of the log's purge
+exits with its error.
 
 Stated limits:
 - the scoping is the queries': any client holding the database's credentials reads every
@@ -44,10 +44,12 @@ Stated limits:
   is recorded and its answer is not returned, and the session misses that exchange;
 - the turn number is the one after the session's last kept exchange: a failed turn keeps no
   exchange, so the session's next turn is recorded under the failed turn's number again, and a
-  `foreign-session` refusal is recorded as turn 1;
+  `foreign-session` refusal is recorded as turn 1 of a session id `ask` makes;
 - two turns in one session at once may take the same turn number, and the second exchange is then
   refused by the table's key after its record was written;
-- a `--kept` folder that exists but belongs to another log is not told apart from the log's own.
+- a `--log` that names another existing log (an empty file among them), or a `--kept` folder that
+  exists but belongs to another log, is not told apart from the agent's own: an empty log purges
+  no kept values and the transcripts go.
 """
 
 import argparse

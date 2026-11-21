@@ -17,8 +17,8 @@ What `ask` checks, in this order:
   `connection-error`;
 - with a `conversation` (`agent/sessions.py`), the session must be the persona's: its history is
   read by session and persona together, and a session that is not the persona's (another's, a
-  purged one, one never started, or an id not of the record's session form, which is recorded
-  under a session id `ask` makes) writes a record refused for `foreign-session` and raises
+  purged one, one never started, or an id not of the form the store's ids take) writes a record
+  refused for `foreign-session`, under a session id `ask` makes and never the one given, and raises
   `ForeignSession` (or `AuditWriteFailed`), before the model is asked or a connection is opened;
   the history read is shown to the model on every step but the planning one, and no other
   session's exchange is read;
@@ -59,13 +59,13 @@ What `ask` checks, in this order:
   its place when the record is not written.
 
 What the record holds: the asker's persona (none on a `no-identity` refusal), the conversation's
-session id and the turn after its last kept exchange (turn 1 on a `foreign-session` refusal, and a
-session id `ask` makes for an id not of the record's form), or, with no conversation or on a
-`no-identity` refusal, a session id `ask` makes and turn 1, `own-agent`, the time the turn ended,
-`audit.release` and `audit.data` as the caller gives them, the metrics cited, and per query run
-that returned the SQL as sent, the persona, `duckdb`, a run id and its start time; in place of the
-question, the answer's text, each run's result (`agent.audit.sealed_result` of its columns and its
-cells as `cell_text`) and its bound values, a seal, each under its own salt, the salt and value
+session id and the turn after its last kept exchange, or, with no conversation, on a `no-identity`
+refusal or on a `foreign-session` refusal, a session id `ask` makes and turn 1 (so a
+`foreign-session` record does not say which session was named), `own-agent`, the time the turn
+ended, `audit.release` and `audit.data` as the caller gives them, the metrics cited, and per query
+run that returned the SQL as sent, the persona, `duckdb`, a run id and its start time; in place of
+the question, the answer's text, each run's result (`agent.audit.sealed_result` of its columns and
+its cells as `cell_text`) and its bound values, a seal, each under its own salt, the salt and value
 kept by the log apart from the record.
 Its outcome is `refused` with `no-identity` for no persona, `refused` with `foreign-session` for a
 session that is not the persona's, `failed` when a step raised (above),
@@ -203,7 +203,8 @@ CAP = "model-call-cap"
 REFUSAL_CAP = "model-refusal-cap"
 UNPLANNED_REASON = "unplanned"
 # The refusal reason of a question asked in a session that is not the asking persona's, and the
-# form of a session id the audit record's schema takes (`agent/audit.schema.json`).
+# form of the session ids the store starts, which the audit record's schema takes
+# (`agent/audit.schema.json`, whose pattern also lets a trailing newline through).
 FOREIGN_SESSION = "foreign-session"
 SESSION_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,62}[a-z0-9]")
 # The reasons of a `failed` record, by the step that raised.
@@ -321,23 +322,26 @@ def ask(
         record(audit, None, session, question, ("refused", "no-identity"), [], [], str(refusal))
         raise refusal
     if conversation is not None:
-        session = conversation.session
         foreign: ForeignSession | None = None
-        if not isinstance(session, str) or not SESSION_ID.fullmatch(session):
-            # No session the store starts has such an id; the refusal is recorded under a session
-            # id `ask` makes, since the record's schema takes no other.
+        if not isinstance(conversation.session, str) or not SESSION_ID.fullmatch(
+            conversation.session
+        ):
+            # No session the store starts has such an id.
             foreign = ForeignSession("no session of that id belongs to the asking persona")
-            session = uuid.uuid4().hex
         else:
             try:
-                history = conversation.store.history(session, persona)
+                history = conversation.store.history(conversation.session, persona)
             except ForeignSession as error:
                 foreign = error
         if foreign is not None:
-            # Written outside the `except`, so an `AuditWriteFailed` carries no context.
+            # Recorded under the session id `ask` made, never the one given: an id the store did
+            # not start for this persona is the caller's text, which may hold a personal value,
+            # and a record line is never purged. Written outside the `except`, so an
+            # `AuditWriteFailed` carries no context.
             outcome = ("refused", FOREIGN_SESSION)
             record(audit, persona, session, question, outcome, [], [], str(foreign))
             raise foreign
+        session = conversation.session
     turn = history[-1].turn + 1 if history else 1
     queries = load_context() if queries is None else queries
     shown = (tuple(load_glossary() if glossary is None else glossary), tuple(columns))

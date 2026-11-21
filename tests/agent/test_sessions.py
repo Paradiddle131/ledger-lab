@@ -25,7 +25,14 @@ from psycopg import sql
 from agent import ask as ask_module
 from agent import sessions as sessions_module
 from agent.ask import Audit, ask, load_context
-from agent.audit import ChainBroken, FileLog, read_log, verify_chain, verify_links
+from agent.audit import (
+    ChainBroken,
+    FileLog,
+    KeptFolderRefused,
+    read_log,
+    verify_chain,
+    verify_links,
+)
 from agent.model import Exchange, Reply, ToolCall, Turn, model_from_config
 from agent.sessions import RETENTION, Conversation, ForeignSession, Sessions
 
@@ -159,10 +166,13 @@ def test_no_cross_session_recall(as_persona: AsPersona, audit: Audit, store: Ses
         (first, 1, "answered"),
         (second, 1, "answered"),
         (first, 2, "answered"),
-        (first, 1, "refused"),
+        (records[-2]["asker"]["session"], 1, "refused"),
         (records[-1]["asker"]["session"], 1, "refused"),
     ]
-    assert records[-1]["asker"]["session"] not in (first, second, "Someone-Elses-Session")
+    # Each refusal is recorded under a session id `ask` made, never the one the caller named.
+    made = {r["asker"]["session"] for r in records[-2:]}
+    assert len(made) == 2
+    assert made.isdisjoint({first, second, "Someone-Elses-Session"})
     for refused in records[-2:]:
         assert refused["reason"] == "foreign-session"
         assert refused["asker"]["persona"] == UK
@@ -264,6 +274,25 @@ def test_the_log_purge_refuses_a_missing_log_a_missing_folder_and_a_broken_chain
     assert sorted(p.name for p in log.kept.iterdir()) == ["0.json", "1.json", "2.json"]
 
 
+def test_the_log_purge_refuses_a_folder_of_kept_values_open_to_others_or_a_link(
+    tmp_path: Path,
+) -> None:
+    records, sealed = examples()
+    log = FileLog(tmp_path / "log.jsonl", tmp_path / "kept")
+    for record in records:
+        body = {k: v for k, v in record.items() if k not in ("seq", "prev", "digest")}
+        log.append(body, {path: tuple(pair) for path, pair in sealed[record["seq"]].items()})
+    later = datetime.now(UTC)
+    log.kept.chmod(0o750)
+    with pytest.raises(KeptFolderRefused):
+        log.purge(later)
+    log.kept.chmod(0o700)
+    (tmp_path / "link").symlink_to(log.kept)
+    with pytest.raises(KeptFolderRefused):
+        FileLog(log.path, tmp_path / "link").purge(later)
+    assert sorted(p.name for p in log.kept.iterdir()) == ["0.json", "1.json", "2.json"]
+
+
 def examples() -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
     data = yaml.safe_load(EXAMPLES.read_text(encoding="utf-8"))
     return data["records"], data["sealed"]
@@ -291,8 +320,10 @@ def test_a_purge_removes_an_approvals_kept_draft_with_its_proposal(tmp_path: Pat
     assert [r["digest"] for r in kept] == [r["digest"] for r in records]
 
 
-# An invented personal value, as a person might type it into a question.
+# An invented personal value, as a person might type it into a question, and one in the form the
+# store's session ids take.
 PLANTED = "Planted Person, born 1970-01-02, planted.person@example.org"
+SHAPED = "planted-person-1970-01-02-07700900123"
 
 
 def test_a_planted_personal_value_never_reaches_the_logs(
@@ -336,7 +367,9 @@ def test_a_planted_personal_value_asked_in_a_session_never_reaches_the_logs(
             model=Recorder(),
             conversation=Conversation(store, session),
         )
-    for named in (session, PLANTED):
+    # Named as the session: another's real session, the planted text, and a personal value of the
+    # session ids' own form, which only the store can tell from a real id.
+    for named in (session, PLANTED, SHAPED):
         with pytest.raises(ForeignSession):
             ask(
                 UK,
@@ -348,9 +381,9 @@ def test_a_planted_personal_value_asked_in_a_session_never_reaches_the_logs(
             )
 
     records = read_log(log.path.read_bytes())
-    assert [r["outcome"] for r in records][-2:] == ["refused", "refused"]
+    assert [r["outcome"] for r in records][-3:] == ["refused"] * 3
     written = capfd.readouterr()
-    for part in (PLANTED, "Planted Person", "1970-01-02", "planted.person@example.org"):
+    for part in (PLANTED, SHAPED, "Planted Person", "1970-01-02", "planted.person@example.org"):
         assert part not in log.path.read_text(encoding="utf-8")
         assert part not in caplog.text
         assert all(part not in record.getMessage() for record in caplog.records)
