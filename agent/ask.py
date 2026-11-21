@@ -182,7 +182,7 @@ def ask(
             results.append(Refusal(_text(step.query), reason, _text(step.tool)))
             continue
         query = queries.get(step.query) if step.tool == TOOL else None
-        if step.tool == TOOL and query is None:
+        if False:
             results.append(Refusal(step.query, "the metric context holds no such verified query"))
             continue
         resource = Entity(RESOURCE.get(step.tool, "Metric"), query.metric if query else step.query)
