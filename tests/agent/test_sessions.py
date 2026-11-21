@@ -25,7 +25,7 @@ from psycopg import sql
 from agent import ask as ask_module
 from agent import sessions as sessions_module
 from agent.ask import Audit, ask, load_context
-from agent.audit import FileLog, read_log, verify_chain, verify_links
+from agent.audit import ChainBroken, FileLog, read_log, verify_chain, verify_links
 from agent.model import Exchange, Reply, ToolCall, Turn, model_from_config
 from agent.sessions import RETENTION, Conversation, ForeignSession, Sessions
 
@@ -115,16 +115,22 @@ def asked(
 
 @pytest.mark.stack
 def test_no_cross_session_recall(as_persona: AsPersona, audit: Audit, store: Sessions) -> None:
+    opened: list[str] = []
+
+    def connect(persona: str) -> duckdb.DuckDBPyConnection:
+        opened.append(persona)
+        return as_persona(persona)
+
     first, second = store.start(CHICAGO), store.start(CHICAGO)
     model = Recorder()
-    answered = asked(model, as_persona, audit, CHICAGO, Conversation(store, first))
+    answered = asked(model, connect, audit, CHICAGO, Conversation(store, first))
 
     # A second session of the same person starts with nothing of the first.
-    asked(model, as_persona, audit, CHICAGO, Conversation(store, second))
+    asked(model, connect, audit, CHICAGO, Conversation(store, second))
     assert model.turns[-1].history == ()
 
     # The first session, asked again, shows its own exchange, on steps only, and counts the turn.
-    asked(model, as_persona, audit, CHICAGO, Conversation(store, first))
+    asked(model, connect, audit, CHICAGO, Conversation(store, first))
     assert model.turns[-1].history == (Exchange(1, QUESTION, answered.text),)
     assert all(turn.history == () for turn in model.planned)
     assert store.history(first, CHICAGO) == (
@@ -135,8 +141,12 @@ def test_no_cross_session_recall(as_persona: AsPersona, audit: Audit, store: Ses
     # Another person naming the first session reads nothing of it: no model step, no connection.
     steps, plans = len(model.turns), len(model.planned)
     with pytest.raises(ForeignSession):
-        asked(model, as_persona, audit, UK, Conversation(store, first))
+        asked(model, connect, audit, UK, Conversation(store, first))
+    # An id no session the store starts can have is refused the same way, under an id `ask` makes.
+    with pytest.raises(ForeignSession):
+        asked(model, connect, audit, UK, Conversation(store, "Someone-Elses-Session"))
     assert (len(model.turns), len(model.planned)) == (steps, plans)
+    assert opened == [CHICAGO, CHICAGO, CHICAGO]
     with pytest.raises(ForeignSession):
         store.history(first, UK)
     with pytest.raises(ForeignSession):
@@ -150,10 +160,13 @@ def test_no_cross_session_recall(as_persona: AsPersona, audit: Audit, store: Ses
         (second, 1, "answered"),
         (first, 2, "answered"),
         (first, 1, "refused"),
+        (records[-1]["asker"]["session"], 1, "refused"),
     ]
-    assert records[-1]["reason"] == "foreign-session"
-    assert records[-1]["asker"]["persona"] == UK
-    assert records[-1]["runs"] == []
+    assert records[-1]["asker"]["session"] not in (first, second, "Someone-Elses-Session")
+    for refused in records[-2:]:
+        assert refused["reason"] == "foreign-session"
+        assert refused["asker"]["persona"] == UK
+        assert refused["runs"] == []
 
 
 @pytest.mark.stack
@@ -166,9 +179,11 @@ def test_the_purge_command_removes_expired_transcripts_and_keeps_young_ones(
 ) -> None:
     log = audit.log
     assert isinstance(log, FileLog)
-    old = datetime.now(UTC) - RETENTION - timedelta(days=1)
+    # Written out, not taken from `RETENTION`, so a changed retention fails here.
+    old = datetime.now(UTC) - timedelta(days=31)
     stale = store.start(CHICAGO, at=old)
     session = store.start(CHICAGO, at=old)
+    young = store.start(CHICAGO, at=datetime.now(UTC) - timedelta(days=29))
     model = Recorder()
     # The first turn of the kept session ends past the retention, the second within it.
     with monkeypatch.context() as patched:
@@ -183,6 +198,7 @@ def test_the_purge_command_removes_expired_transcripts_and_keeps_young_ones(
     )
 
     assert [e.turn for e in store.history(session, CHICAGO)] == [2]
+    assert store.history(young, CHICAGO) == ()
     with pytest.raises(ForeignSession):
         store.history(stale, CHICAGO)
     # The record of the purged turn stays, and the chain still verifies; its values are gone.
@@ -190,6 +206,62 @@ def test_the_purge_command_removes_expired_transcripts_and_keeps_young_ones(
     verify_chain(records)
     assert [r["asker"]["turn"] for r in records] == [1, 2]
     assert sorted(p.name for p in log.kept.iterdir()) == ["1.json"]
+
+
+def test_the_retention_is_thirty_days() -> None:
+    assert timedelta(days=30) == RETENTION
+
+
+@pytest.mark.stack
+def test_a_purge_refused_by_the_log_leaves_the_transcripts(
+    as_persona: AsPersona, audit: Audit, store: Sessions, tmp_path: Path
+) -> None:
+    log = audit.log
+    assert isinstance(log, FileLog)
+    old = datetime.now(UTC) - timedelta(days=31)
+    session = store.start(CHICAGO, at=old)
+    store.add(session, CHICAGO, Exchange(1, QUESTION, "an old answer"), old)
+
+    # A `--log` that is not a file: refused before anything is purged, and no file is made.
+    with pytest.raises(SystemExit) as refused:
+        sessions_module.main(["purge", "--log", str(tmp_path / "typo"), "--kept", str(log.kept)])
+    assert refused.value.code == 2
+    assert not (tmp_path / "typo").exists()
+
+    # A log whose chain does not verify, or a folder of kept values that does not exist: the
+    # log's purge refuses first, so the transcripts stay.
+    asked(Recorder(), as_persona, audit, CHICAGO, Conversation(store, session))
+    for wrong in ("missing-kept", "torn"):
+        kept = tmp_path / "typo-kept" if wrong == "missing-kept" else log.kept
+        if wrong == "torn":
+            with log.path.open("ab") as line:
+                line.write(b'{"torn"')
+        with pytest.raises(Exception):  # noqa: B017
+            sessions_module.main(["purge", "--log", str(log.path), "--kept", str(kept)])
+        assert [e.turn for e in store.history(session, CHICAGO)] == [1, 2]
+        assert sorted(p.name for p in log.kept.iterdir()) == ["0.json"]
+
+
+def test_the_log_purge_refuses_a_missing_log_a_missing_folder_and_a_broken_chain(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(FileNotFoundError):
+        FileLog(tmp_path / "none.jsonl", tmp_path / "kept").purge(datetime.now(UTC))
+    assert not (tmp_path / "none.jsonl").exists()
+
+    records, sealed = examples()
+    log = FileLog(tmp_path / "log.jsonl", tmp_path / "kept")
+    for record in records:
+        body = {k: v for k, v in record.items() if k not in ("seq", "prev", "digest")}
+        log.append(body, {path: tuple(pair) for path, pair in sealed[record["seq"]].items()})
+    later = datetime.now(UTC)
+    with pytest.raises(FileNotFoundError):
+        FileLog(log.path, tmp_path / "typo").purge(later)
+    lines = log.path.read_bytes().splitlines(keepends=True)
+    log.path.write_bytes(lines[0] + lines[2])
+    with pytest.raises(ChainBroken):
+        log.purge(later)
+    assert sorted(p.name for p in log.kept.iterdir()) == ["0.json", "1.json", "2.json"]
 
 
 def examples() -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
@@ -241,3 +313,47 @@ def test_a_planted_personal_value_never_reaches_the_logs(
         assert all(part not in record.getMessage() for record in caplog.records)
     # The value went through the turn: it is among the kept values the purge deletes.
     assert any(PLANTED in p.read_text(encoding="utf-8") for p in log.kept.iterdir())
+
+
+@pytest.mark.stack
+def test_a_planted_personal_value_asked_in_a_session_never_reaches_the_logs(
+    as_persona: AsPersona,
+    audit: Audit,
+    store: Sessions,
+    caplog: pytest.LogCaptureFixture,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    log = audit.log
+    assert isinstance(log, FileLog)
+    session = store.start(CHICAGO)
+    for question in (f"{QUESTION} {PLANTED}", PLANTED, QUESTION):
+        ask(
+            CHICAGO,
+            question,
+            as_persona=as_persona,
+            audit=audit,
+            model=Recorder(),
+            conversation=Conversation(store, session),
+        )
+    for named in (session, PLANTED):
+        with pytest.raises(ForeignSession):
+            ask(
+                UK,
+                PLANTED,
+                as_persona=as_persona,
+                audit=audit,
+                model=Recorder(),
+                conversation=Conversation(store, named),
+            )
+
+    records = read_log(log.path.read_bytes())
+    assert [r["outcome"] for r in records][-2:] == ["refused", "refused"]
+    written = capfd.readouterr()
+    for part in (PLANTED, "Planted Person", "1970-01-02", "planted.person@example.org"):
+        assert part not in log.path.read_text(encoding="utf-8")
+        assert part not in caplog.text
+        assert all(part not in record.getMessage() for record in caplog.records)
+        assert part not in written.out + written.err
+    # The value went through the session: its transcript keeps it until the purge.
+    assert any(PLANTED in e.question for e in store.history(session, CHICAGO))

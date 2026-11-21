@@ -20,16 +20,19 @@ What `Sessions` does:
 
 `ask(..., conversation=Conversation(store, session))` (`agent/ask.py`) reads the history before
 the turn, shows it to the model on every step but the planning one, writes the audit record with
-that session id and the next turn number, then keeps the exchange; without a conversation, each
-`ask` is a session of one turn that keeps no transcript.
+that session id and the number after its last kept exchange, then keeps the exchange; without a
+conversation, each `ask` is a session of one turn that keeps no transcript.
 
 `purge(store, log, now)` is the one purge: it takes `RETENTION`, the one setting both purges read,
-from `now`, deletes the transcripts that ended before that instant (`Sessions.purge`) and the audit
-log's kept values and salts of the records written before it (`agent.audit.FileLog.purge`), so the
+from `now`, deletes the audit log's kept values and salts of the records written before that instant
+(`agent.audit.FileLog.purge`, which refuses a missing log, a log whose chain does not verify and a
+missing folder of kept values, removing nothing), then the transcripts that ended before it
+(`Sessions.purge`), so the
 record still shows the turn happened, who asked and which query ran on which data, and no figure
 in it can be checked any more. `python -m agent.sessions purge --log <log> --kept <folder>` runs it
 now, connecting by libpq's own variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`,
-`PGDATABASE`, ...), and prints the counts it removed.
+`PGDATABASE`, ...), and prints the counts it removed; a `--log` that is not a file is refused
+before it connects (exit 2), and a refusal of the log's purge exits with its error.
 
 Stated limits:
 - the scoping is the queries': any client holding the database's credentials reads every
@@ -39,8 +42,12 @@ Stated limits:
 - nothing runs the purge on a schedule: whoever operates the agent runs the command;
 - an exchange is kept after its turn's audit record is written: when keeping it raises, the turn
   is recorded and its answer is not returned, and the session misses that exchange;
+- the turn number is the one after the session's last kept exchange: a failed turn keeps no
+  exchange, so the session's next turn is recorded under the failed turn's number again, and a
+  `foreign-session` refusal is recorded as turn 1;
 - two turns in one session at once may take the same turn number, and the second exchange is then
-  refused by the table's key after its record was written.
+  refused by the table's key after its record was written;
+- a `--kept` folder that exists but belongs to another log is not told apart from the log's own.
 """
 
 import argparse
@@ -175,10 +182,15 @@ class Sessions:
 
 
 def purge(store: Sessions, log: FileLog, now: datetime) -> Purged:
-    """Remove the transcripts and the audit log's kept values older than `RETENTION` at `now`."""
+    """Remove the audit log's kept values, then the transcripts, older than `RETENTION` at `now`.
+
+    The log goes first, so a log the purge refuses (`FileLog.purge`) leaves the transcripts as they
+    were and the command fails; when the transcripts' purge then raises, the kept values are
+    already gone and a second run removes the transcripts."""
     before = now - RETENTION
+    kept = tuple(log.purge(before))
     exchanges, sessions = store.purge(before)
-    return Purged(exchanges, sessions, tuple(log.purge(before)))
+    return Purged(exchanges, sessions, kept)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -188,6 +200,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     command.add_argument("--log", type=Path, required=True, help="the audit log file")
     command.add_argument("--kept", type=Path, required=True, help="its folder of kept values")
     arguments = parser.parse_args(argv)
+    if not arguments.log.is_file():
+        parser.error(f"--log {arguments.log} is not a file: the purge needs the log that exists")
     store = Sessions.connect()
     try:
         store.create()
