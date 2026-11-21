@@ -1074,8 +1074,10 @@ def test_each_sign_of_a_rate_limit_alone_is_retried(refusal: dict[str, Any]) -> 
 
 
 def test_the_retries_are_the_two_pauses_the_architecture_names() -> None:
-    """ARCHITECTURE.md says twice more, after 5 and 15 seconds."""
     assert RATE_LIMIT_PAUSES == (5.0, 15.0)
+    assert (
+        "sent twice more after pauses of 5 and 15 seconds" in (REPO / "ARCHITECTURE.md").read_text()
+    )
 
 
 def test_a_refusal_that_is_no_rate_limit_is_not_retried() -> None:

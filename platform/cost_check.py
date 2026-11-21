@@ -14,9 +14,9 @@ With `LEDGER_LAB_GCP_PROJECT` set and no `GCP_PROJECT` it
   fails. Where the environment hands gcloud its token (`CLOUDSDK_AUTH_ACCESS_TOKEN`, as a cloud
   session does), curl sends no credential and the session's proxy supplies it; elsewhere curl sends
   the token of gcloud's own login, never a key file, and a read that login lacks the IAM
-  permission on the resource for is not checked rather than failed, while any other refusal still
-  fails, among them one by a login that may not spend the lab project's quota
-  (`USER_PROJECT_DENIED`);
+  permission on the resource for is not checked rather than failed, while any other refusal of a
+  fence read still fails, among them one by a login that may not spend the lab project's quota
+  (`USER_PROJECT_DENIED`); the budget and the kill switch's project roles are the exception below;
 - asks `testIamPermissions` whether this account itself could move a fence, and fails if it can;
   off the proxy this account is gcloud's login, not the agent account, so it is not asked;
 - reports a fence this account may not read (the budget, the kill switch's project roles) as not

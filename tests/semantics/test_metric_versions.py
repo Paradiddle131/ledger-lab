@@ -830,8 +830,11 @@ def test_each_case_gets_its_own_copy_of_the_committed_parse(
     committed: Block, committed_once: Block
 ) -> None:
     assert committed == committed_once and committed is not committed_once
+    kept = copy.deepcopy(committed_once)
+    committed["metrics"][0]["config"]["meta"].clear()
+    committed["semantic_models"][0]["measures"].clear()
     committed["metrics"].clear()
-    assert committed_once["metrics"]
+    assert committed_once == kept
 
 
 CLOCK_STEP = Path(__file__).resolve().parents[1] / "models" / "clock_step.py"
