@@ -322,10 +322,45 @@ def test_a_reply_the_check_cannot_read_is_withheld_and_recorded(
     assert (record["outcome"], len(record["runs"])) == ("abstained", 1)
 
 
-def test_a_sign_flipped_figure_is_withheld(as_persona: AsPersona, audit: Audit) -> None:
+@pytest.mark.parametrize("form", ["\u2212{}", "-${}", "(${})", "\u2212\u20ac{}", "- {}", "USD-{}"])
+def test_a_sign_flipped_figure_is_withheld(as_persona: AsPersona, audit: Audit, form: str) -> None:
+    """The cited positive share written as a negative, the minus touching the digits or parted
+    from them by a currency sign, a space or a code: withheld, not answered."""
     share = share_of_chicago(as_persona, audit)
-    model = Saying("duplicate-payment-rate", f"The share fell to \u2212{share!r}.")
+    model = Saying("duplicate-payment-rate", f"The share fell to {form.format(repr(share))}.")
     answer = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=model)
+    assert answer.text == WITHHELD
+    assert records(audit)[-1]["outcome"] == "abstained"
+
+
+class TwoQueries:
+    """Plans the verified query of the question and the by-month one, then replies with a figure
+    the by-month run returned and the covering run did not."""
+
+    def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+        return (ToolCall("duplicate-payment-rate"), ToolCall("duplicate-payment-rate-by-month"))
+
+    def step(self, turn: Turn) -> ToolCall | Reply:
+        calls = self.plan(turn)
+        if len(turn.results) < len(calls):
+            return calls[len(turn.results)]
+        covering, other = turn.results
+        assert isinstance(covering, Citation) and isinstance(other, Citation)
+        figures = [v for (_, v) in other.rows if isinstance(v, float) and (v,) not in covering.rows]
+        assert figures, "the by-month run returns no figure the covering run lacks"
+        return Reply(f"The share is {figures[0]!r}.")
+
+
+def test_a_figure_from_a_run_that_does_not_cover_the_question_is_withheld(
+    as_persona: AsPersona, audit: Audit
+) -> None:
+    """Both runs are cited, one covering the question; a figure only the other returned is
+    withheld."""
+    answer = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=TwoQueries())
+    assert [c.query for c in answer.citations] == [
+        "duplicate-payment-rate",
+        "duplicate-payment-rate-by-month",
+    ]
     assert answer.text == WITHHELD
     assert records(audit)[-1]["outcome"] == "abstained"
 
@@ -428,14 +463,49 @@ def test_a_dash_before_a_number_is_its_minus(dash: str) -> None:
     assert failed_numbers(f"it fell to {dash}12.25", cited(((-12.25,),))) == []
 
 
-@pytest.mark.parametrize("text", ["(12.25)", "12.25-", "12.25\u2212", "(\u221212.25)"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "(12.25)",
+        "12.25-",
+        "12.25\u2212",
+        "(\u221212.25)",
+        "-$12.25",
+        "($12.25)",
+        "\u2212\u20ac12.25",
+        "- 12.25",
+        "( 12.25 )",
+        "($ 12.25)",
+        "-\xa012.25",
+        "USD-12.25",
+        "(USD 12.25)",
+        "12.25 USD-",
+        "( 12.25",
+    ],
+)
 def test_a_number_with_an_ambiguous_sign_is_reported(text: str) -> None:
+    """A dash or parenthesis parted from the digits by white space, a currency sign or code, or
+    a dash with a letter before it, is not read as a sign: the number is reported whichever sign
+    its cell has."""
     for cell in (12.25, -12.25):
         (failure,) = trace(text, (cited(((cell,),)),)).failures
-        assert "ambiguous sign" in failure.reason
+        assert failure.number in ("12.25", "\u221212.25")
+        assert "sign" in failure.reason
 
 
-@pytest.mark.parametrize("numeral", ["\u2075\u2070", "\u00bd", "\u2460"])
+def test_a_range_is_reported_not_matched() -> None:
+    assert failed_numbers("10-12", cited(((10, 12),))) == ["10", "12"]
+
+
+def test_a_tuple_of_figures_is_no_parenthesis_sign() -> None:
+    assert failed_numbers("[(12.25,), (2026, 3)]", cited(((12.25, 2026, 3),))) == []
+
+
+def test_thousands_are_read_only_in_groups_of_three() -> None:
+    assert failed_numbers("1,2345", cited(((1234, 5),))) == ["1", "2345"]
+
+
+@pytest.mark.parametrize("numeral", ["\u2075\u2070", "\u00bd", "\u2460", "\u216b"])
 def test_a_numeral_that_is_no_decimal_digit_is_reported(numeral: str) -> None:
     assert failed_numbers(f"paid {numeral}", cited(((5.0,),))) == list(numeral)
 
@@ -446,6 +516,9 @@ def test_a_bool_cell_is_no_number() -> None:
 
 def test_a_text_cell_is_set_aside_only_where_it_is_written_whole() -> None:
     assert failed_numbers("Q1 and Q10", cited((("Q1",),))) == ["10"]
+    # Not as the whole or the fraction of a decimal number.
+    assert failed_numbers("the total was 12.25", cited((("12", 25),))) == ["12.25"]
+    assert failed_numbers("the total was 0.12", cited((("12", 0),))) == ["0.12"]
 
 
 def test_a_cell_that_is_not_a_number_covers_only_its_own_text() -> None:

@@ -18,14 +18,19 @@ What `withheld` checks; the reply is withheld when any of these fails:
 
 What `trace` reads and checks:
 - a number is a run of Unicode decimal digits (category Nd), with thousands separated by `,` in
-  groups of three, one decimal part and one exponent (`e` or `E`), and a leading sign when no
-  letter, digit or `_` comes before it: an ASCII `-`, U+2212 minus, or one of the dashes U+2010
-  to U+2015, U+FE58, U+FE63 and U+FF0D, each read as a minus;
+  groups of three, one decimal part and one exponent (`e` or `E`), and a leading sign touching
+  the digits when no letter, digit or `_` comes before it: an ASCII `-`, U+2212 minus, or one of
+  the dashes U+2010 to U+2015, U+FE58, U+FE63 and U+FF0D (`DASHES`), each read as a minus;
 - before numbers are read, each place where the `str` or the `repr` of a cited cell that is not a
-  number (a text, a date, a time) is written, with no letter, digit or `_` on either side, is set
-  aside: its digits are that cell's own text (`payments-over-25k`, a timestamp);
-- a number written in parentheses, `(12.25)`, or followed directly by a minus or one of those
-  dashes, `12.25-`, is reported: its sign is ambiguous;
+  number (a text, a date, a time) is written, with no letter, digit or `_` on either side and no
+  `.` or `,` joining it to a digit, is set aside: its digits are that cell's own text
+  (`payments-over-25k`, a timestamp);
+- a number's sign is reported as ambiguous, and the number not matched, when, past only white
+  space, currency symbols (category Sc) and three-capital currency codes (`USD`): a dash of that
+  set (ASCII `-` included) comes before it and is not its own leading minus (`-$12.25`,
+  `- 12.25`, `USD-12.25`); a dash comes after it (`12.25-`, `12.25 USD-`); or a `(` comes before
+  it with a `)` after it or with filler between it and the digits (`(12.25)`, `($12.25)`,
+  `( 12.25`); a `(` touching the digits with no `)` after them, as in a tuple `(12.25,)`, is not;
 - a number whose value cannot be read (an exponent past the decimal context's range) is reported;
 - a number written right after the word `version` and white space is traced when it equals the
   version of a cited run;
@@ -35,7 +40,8 @@ What `trace` reads and checks:
   1234567.5;
 - only runs whose citation carries a freshness count; a number found only in a run without one is
   reported as such;
-- each character of Unicode category No (a superscript, a fraction, a circled number) is reported;
+- each character of Unicode category No (a superscript, a fraction, a circled number) or Nl (a
+  letter numeral, `Ⅻ`) is reported;
 - each number not traced is a `Failure` naming it.
 
 What `reproduce` checks, per run, in order: the record logs one run per citation, in the same
@@ -49,7 +55,7 @@ and their seal under the kept salt the record's sealed result.
 Stated limits:
 - equality only: a rounded figure, a percentage of a share, a number written with another
   separator (a space, `'`, a decimal comma), and a year or a count in prose that is no cell's value
-  are reported, not matched;
+  are reported, not matched; so is each end of a range written with a dash (`10-12`);
 - a number written in words (`forty-two million`) is not read, and passes on a turn whose reply
   is not withheld for another reason;
 - the question must be a verified question's own wording, as `same` compares it: a paraphrase is
@@ -60,7 +66,8 @@ Stated limits:
   to a cited text cell's whole text passes as that cell;
 - the text need not name a metric, a query or a freshness: those are the citations' fields;
 - a turn stopped at the tool-call cap or the refusal cap shows `ask`'s own fixed message, which
-  names the cap and is not checked;
+  names the cap and is not checked; a turn at the refusal cap is recorded answered when a planned
+  call returned;
 - `reproduce` re-runs on whatever connection `as_persona` returns, so it shows a change of the
   persona's database since the run, not which build that database came from; it does not re-ask
   the model or open the record's answer seal (`tests/agent/test_audit.py` rebuilds those);
@@ -176,9 +183,53 @@ def _set_aside(text: str, citations: Sequence[Citation]) -> str:
         if re.search(r"\d", form)
     }
     for form in sorted(written, key=len, reverse=True):
-        pattern = re.compile(rf"(?<!\w){re.escape(form)}(?!\w)")
+        pattern = re.compile(rf"(?<!\w)(?<!\d[.,]){re.escape(form)}(?!\w)(?![.,]\d)")
         text = pattern.sub(lambda match: ASIDE * len(match.group()), text)
     return text
+
+
+def _code(text: str, start: int) -> bool:
+    """Whether `text[start:start + 3]` is a currency code: three capital letters, A to Z, with no
+    letter on either side."""
+    word = text[start : start + 3]
+    return (
+        len(word) == 3
+        and all("A" <= char <= "Z" for char in word)
+        and not text[start - 1 : start].isalpha()
+        and not text[start + 3 : start + 4].isalpha()
+    )
+
+
+def _filler(text: str, index: int) -> int:
+    """How many characters at `index` are filler between a sign and its digits: one white space
+    or currency symbol (category Sc), three for a currency code, else none."""
+    char = text[index : index + 1]
+    if char and (char.isspace() or unicodedata.category(char) == "Sc"):
+        return 1
+    return 3 if _code(text, index) else 0
+
+
+def _ambiguous(text: str, start: int, end: int) -> str | None:
+    """Why the sign of the number at `text[start:end]` is ambiguous, or None: a dash or `(` before
+    it, or a dash or `)` after it, parted from it by filler only (see `_filler`), the number's own
+    leading minus aside."""
+    before = start
+    while before > 0:
+        width = next((w for w in (1, 3) if before >= w and _filler(text, before - w) == w), 0)
+        if not width:
+            break
+        before -= width
+    after = end
+    while width := _filler(text, after):
+        after += width
+    left, right = text[before - 1 : before], text[after : after + 1]
+    if left and left in DASHES:
+        return "a minus before the number is not read as its sign"
+    if right and right in DASHES:
+        return "a number followed by a minus has an ambiguous sign"
+    if left == "(" and (right == ")" or before < start):
+        return "a number in parentheses has an ambiguous sign"
+    return None
 
 
 def _cited(citation: Citation, value: Decimal) -> bool:
@@ -195,13 +246,8 @@ def trace(text: str, citations: Sequence[Citation]) -> Trace:
     failures: list[Failure] = []
     for start, end in numbers(aside):
         number = text[start:end]
-        if aside[start - 1 : start] == "(" and aside[end : end + 1] == ")":
-            failures.append(Failure(number, None, "a number in parentheses has an ambiguous sign"))
-            continue
-        if aside[end : end + 1] and aside[end] in DASHES:
-            failures.append(
-                Failure(number, None, "a number followed by a minus has an ambiguous sign")
-            )
+        if (ambiguous := _ambiguous(aside, start, end)) is not None:
+            failures.append(Failure(number, None, ambiguous))
             continue
         try:
             value = _read(number)
@@ -223,7 +269,7 @@ def trace(text: str, citations: Sequence[Citation]) -> Trace:
             continue
         failures.append(Failure(number, None, "no run the answer cites returned it"))
     for char in text:
-        if unicodedata.category(char) == "No":
+        if unicodedata.category(char) in ("No", "Nl"):
             reason = "a numeral that is not a decimal digit is not read"
             failures.append(Failure(char, None, reason))
     return Trace(tuple(traced), tuple(failures))
