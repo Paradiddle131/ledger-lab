@@ -65,9 +65,13 @@ controls:
   - id: one-person-one-session
     layer: The conversation
     owner: agent-operator
-    asserts: No answer recalls another session, and the purge removes transcripts past their retention.
-    proven_by: [tests/agent/test_sessions.py::test_no_cross_session_recall]
-    status: not-implemented
+    asserts: "The own agent asked in a session shows its model, on every step but the planning one, the earlier exchanges of that session only, read by session and persona together, and a persona naming a session that is not theirs reads none of it: the turn is recorded refused for foreign-session, before any model step or connection. The purge command removes every transcript exchange that ended, and every session with none left that started, more than 30 days before it ran, keeps younger ones, and removes the audit log's kept values and salts of the records older than that, with those of an approval whose proposal's go, while every record line stays and the chain verifies. A personal value planted in a question, or given as the persona, is in neither the audit log's lines nor any Python log record of the turn."
+    proven_by:
+      - tests/agent/test_sessions.py::test_no_cross_session_recall
+      - tests/agent/test_sessions.py::test_the_purge_command_removes_expired_transcripts_and_keeps_young_ones
+      - tests/agent/test_sessions.py::test_a_purge_removes_an_approvals_kept_draft_with_its_proposal
+      - tests/agent/test_sessions.py::test_a_planted_personal_value_never_reaches_the_logs
+    status: implemented
   - id: untrusted-content-cannot-instruct
     layer: Injection and tool authorisation
     owner: agent-operator

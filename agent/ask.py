@@ -15,6 +15,12 @@ What `ask` checks, in this order:
   context is loaded, the model is asked or a connection is opened; a `NoPersonaError` that
   `as_persona` raises later is a turn that raises, below, recorded as `failed` with
   `connection-error`;
+- with a `conversation` (`agent/sessions.py`), the session must be the persona's: its history is
+  read by session and persona together, and a session that is not the persona's (another's, a
+  purged one, one never started) writes a record refused for `foreign-session` and raises
+  `ForeignSession` (or `AuditWriteFailed`), before the model is asked or a connection is opened;
+  the history read is shown to the model on every step but the planning one, and no other
+  session's exchange is read;
 - plan, then execute: the model first plans its tool calls (`Model.plan`) on a turn holding the
   question and the verified queries only, with no glossary, no column description and no result;
   the turns after it show those as well;
@@ -51,14 +57,16 @@ What `ask` checks, in this order:
   before it and no answer seal; then that same exception is raised again, or `AuditWriteFailed` in
   its place when the record is not written.
 
-What the record holds: the asker's persona (none on a `no-identity` refusal), a session id `ask`
-makes and turn 1 (each `ask` is a session of one turn), `own-agent`, the time the turn ended,
+What the record holds: the asker's persona (none on a `no-identity` refusal), the conversation's
+session id and the turn after its last kept exchange, or, with no conversation or on a
+`no-identity` refusal, a session id `ask` makes and turn 1, `own-agent`, the time the turn ended,
 `audit.release` and `audit.data` as the caller gives them, the metrics cited, and per query run
 that returned the SQL as sent, the persona, `duckdb`, a run id and its start time; in place of the
 question, the answer's text, each run's result (`agent.audit.sealed_result` of its columns and its
 cells as `cell_text`) and its bound values, a seal, each under its own salt, the salt and value
 kept by the log apart from the record.
-Its outcome is `refused` with `no-identity` for no persona, `failed` when a step raised (above),
+Its outcome is `refused` with `no-identity` for no persona, `refused` with `foreign-session` for a
+session that is not the persona's, `failed` when a step raised (above),
 `stopped` with `model-call-cap` at the tool-call limit, else `answered` when a query returned,
 `stopped` with `model-refusal-cap` when none did and the refusal limit was reached, `refused` with
 `policy` when none did and the tool policy denied one, `refused` with `unplanned` when none did,
@@ -75,7 +83,14 @@ executed with those values bound, so nothing of the question or the model's outp
 it. A table or view name held in two of those schemas is refused as ambiguous, and a text `bind`
 refuses or an engine error comes back as a `Refusal` carrying the message, with no rows.
 
+Once the record of a turn that did not raise is written, the conversation's store keeps the turn's
+question and the text it showed as the session's next exchange, at the record's time; a failed
+turn and a `foreign-session` refusal keep none.
+
 Stated limits:
+- a session store that raises anything but `ForeignSession` reading the history writes no record
+  and raises that error; one that raises keeping the exchange raises after the record is written,
+  and no answer is returned;
 - `ask` holds no connection of its own: the rows are whatever the connection `as_persona` returns
   can read, so the scoping is the connection-maker's (on the local engine, `access/compile.py`);
 - `ask` does not close that connection, which stays its maker's to close;
@@ -135,6 +150,7 @@ from agent.model import (
     READ_ONLY_TOOL,
     Citation,
     ColumnDescription,
+    Exchange,
     GlossaryTerm,
     Model,
     Refusal,
@@ -145,6 +161,7 @@ from agent.model import (
     model_from_config,
 )
 from agent.policy.tools import Entity, authorize
+from agent.sessions import Conversation, ForeignSession
 
 REPO = Path(__file__).resolve().parents[1]
 CONTEXT = REPO / "semantics" / "context.json"
@@ -183,6 +200,8 @@ AGENT = "own-agent"
 CAP = "model-call-cap"
 REFUSAL_CAP = "model-refusal-cap"
 UNPLANNED_REASON = "unplanned"
+# The refusal reason of a question asked in a session that is not the asking persona's.
+FOREIGN_SESSION = "foreign-session"
 # The reasons of a `failed` record, by the step that raised.
 MODEL_ERROR, POLICY_ERROR, CONNECTION_ERROR, TOOL_ERROR = (
     "model-error",
@@ -273,14 +292,18 @@ def ask(
     catalogue: Mapping[str, Any] | None = None,
     glossary: Sequence[GlossaryTerm] | None = None,
     columns: Sequence[ColumnDescription] = (),
+    conversation: Conversation | None = None,
 ) -> Answer:
     """Answer `question` for `persona`, running tools only on `as_persona(persona)`'s connection.
 
     `model` defaults to `model_from_config(os.environ, queries)`, `queries` to the committed
-    metric context, `catalogue` to `access/personas.yaml`; see the module's docstring for what is
-    checked and what the record written to `audit.log` holds.
+    metric context, `catalogue` to `access/personas.yaml`; `conversation` names the session the
+    question is asked in (`agent/sessions.py`), none for a session of one turn that keeps no
+    transcript; see the module's docstring for what is checked and what the record written to
+    `audit.log` holds.
     """
     session = uuid.uuid4().hex
+    history: tuple[Exchange, ...] = ()
     refusal: NoPersonaError | None = None
     if not isinstance(persona, str):
         refusal = NoPersonaError(f"a question needs the asking persona, not {persona!r}")
@@ -293,6 +316,19 @@ def ask(
     if refusal is not None:
         record(audit, None, session, question, ("refused", "no-identity"), [], [], str(refusal))
         raise refusal
+    if conversation is not None:
+        session = conversation.session
+        foreign: ForeignSession | None = None
+        try:
+            history = conversation.store.history(session, persona)
+        except ForeignSession as error:
+            foreign = error
+        if foreign is not None:
+            # Written outside the `except`, so an `AuditWriteFailed` carries no context.
+            outcome = ("refused", FOREIGN_SESSION)
+            record(audit, persona, session, question, outcome, [], [], str(foreign))
+            raise foreign
+    turn = history[-1].turn + 1 if history else 1
     queries = load_context() if queries is None else queries
     shown = (tuple(load_glossary() if glossary is None else glossary), tuple(columns))
     model = model_from_config(os.environ, queries) if model is None else model
@@ -351,7 +387,9 @@ def ask(
         planned = list(model.plan(Turn(question, tuple(queries.values()), ())))
         while True:
             stage = MODEL_ERROR
-            step = model.step(Turn(question, tuple(queries.values()), tuple(results), *shown))
+            step = model.step(
+                Turn(question, tuple(queries.values()), tuple(results), *shown, history)
+            )
             if isinstance(step, Reply):
                 text = step.text
                 break
@@ -381,7 +419,7 @@ def ask(
     metrics = list(dict.fromkeys((c.metric, c.version) for c in citations))
     if raised is not None:
         # Written outside the `except`, so an `AuditWriteFailed` carries no context.
-        record(audit, persona, session, question, ("failed", stage), metrics, runs, None)
+        record(audit, persona, session, question, ("failed", stage), metrics, runs, None, turn)
         raise raised
     if stopped is not None:
         outcome: tuple[str, str | None] = ("stopped", stopped)
@@ -395,7 +433,10 @@ def ask(
         outcome = ("refused", UNPLANNED_REASON)
     else:
         outcome = ("abstained", None)
-    record(audit, persona, session, question, outcome, metrics, runs, text)
+    written = record(audit, persona, session, question, outcome, metrics, runs, text, turn)
+    if conversation is not None:
+        ended = datetime.strptime(written["at"], "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+        conversation.store.add(session, persona, Exchange(turn, question, text), ended)
     return Answer(
         persona,
         question,
@@ -424,6 +465,7 @@ def record(
     metrics: list[tuple[str, int]],
     runs: list[Run],
     text: str | None,
+    turn: int = 1,
 ) -> dict[str, Any]:
     """Write one turn's record to `audit.log`, each sealed value under a salt of its own; any
     `Exception` on the way is raised as `AuditWriteFailed`, raised after the failure is handled,
@@ -437,7 +479,7 @@ def record(
             kept[path] = (salt, value)
             return seal(salt, value)
 
-        asker: dict[str, Any] = {"session": session, "turn": 1}
+        asker: dict[str, Any] = {"session": session, "turn": turn}
         if persona is not None:
             asker["persona"] = persona
         entries = []

@@ -3,15 +3,17 @@
 The agent (`agent/ask.py`) first asks the model to plan: `plan(turn)` gets a `Turn` holding the
 question and the verified queries only, and returns the tool calls the model will make. Then it
 shows the model a `Turn` at each step: the question, the verified queries it may name, the
-glossary's terms, the column descriptions `ask` is given, and the results of the tool calls made
-so far. The model answers each such turn with one step: a `ToolCall` naming a tool (by
-default the one read-only tool, `run_metric_query`) and what it acts on (for that tool a verified
-query by its id), or a `Reply` that ends the turn. A model names a query only by id; the SQL the
-tool runs is the text of the verified queries `ask` is given (by default the metric context's),
-with no value bound from the question or the model.
+glossary's terms, the column descriptions `ask` is given, the results of the tool calls made so
+far, and, when the question is asked in a session (`agent/sessions.py`), that session's earlier
+questions and answers. The model answers each such turn with one step: a `ToolCall` naming a tool
+(by default the one read-only tool, `run_metric_query`) and what it acts on (for that tool a
+verified query by its id), or a `Reply` that ends the turn. A model names a query only by id; the
+SQL the tool runs is the text of the verified queries `ask` is given (by default the metric
+context's), with no value bound from the question or the model.
 
-The glossary's definitions, the column descriptions and the cells of a result are text the model
-reads and the lab does not vouch for: a model may take an instruction it finds there as its own.
+The glossary's definitions, the column descriptions, the cells of a result and the session's
+earlier questions and answers are text the model reads and the lab does not vouch for: a model may
+take an instruction it finds there as its own.
 So `ask` refuses a call that is not in the plan, made before that text was shown, and asks the
 tool policy before it runs any call; the call past the tool-call limit is refused without
 asking it.
@@ -113,15 +115,27 @@ class Reply:
 
 
 @dataclass(frozen=True)
+class Exchange:
+    """One earlier turn of the session the question is asked in, as its transcript keeps it: the
+    turn's number, the question and the text the turn showed."""
+
+    turn: int
+    question: str
+    answer: str
+
+
+@dataclass(frozen=True)
 class Turn:
     """What the model sees at one step: the question, the verified queries, the results so far,
-    the glossary's terms and the column descriptions; it holds no persona id and no connection."""
+    the glossary's terms, the column descriptions and the earlier turns of the question's own
+    session (`history`); it holds no persona id and no connection."""
 
     question: str
     queries: tuple[VerifiedQuery, ...]
     results: tuple[Citation | Refusal, ...]
     glossary: tuple[GlossaryTerm, ...] = ()
     columns: tuple[ColumnDescription, ...] = ()
+    history: tuple[Exchange, ...] = ()
 
 
 class Model(Protocol):
