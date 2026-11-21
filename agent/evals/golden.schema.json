@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "The golden set of finance questions the own agent is scored on",
+  "description": "Each case is a question asked as a persona, the verified query of the metric context that answers it, and the expected result frozen as data: the columns and rows that query returned on the persona's database over the committed sample build when the case was written, or `abstains` when the right answer holds no figure. agent/evals/score.py compares the expected result with what the SQL an answer cites returns when the scorer runs it again; how it compares is stated there. `uncovered` names each headline metric with a verified query that no case covers, and why.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cases", "uncovered"],
+  "$defs": {
+    "slug": {"type": "string", "pattern": "^[a-z][a-z0-9-]*[a-z0-9]$"},
+    "text": {"type": "string", "pattern": "^\\S(?:[\\s\\S]*\\S)?$"},
+    "value": {
+      "description": "One value of a result row: a number (compared as a double), a text, or null.",
+      "type": ["number", "string", "null"]
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["columns", "rows"],
+      "properties": {
+        "columns": {
+          "description": "The result's column names, in the order the query returns them.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z_][a-z0-9_]*$"}
+        },
+        "rows": {
+          "description": "The result's rows, in any order; a row returned twice is listed twice.",
+          "type": "array",
+          "items": {"type": "array", "items": {"$ref": "#/$defs/value"}}
+        }
+      }
+    },
+    "abstains": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["abstains"],
+      "properties": {
+        "abstains": {
+          "description": "The right answer cites no query that ran: the asking persona may not run the query.",
+          "const": true
+        }
+      }
+    }
+  },
+  "properties": {
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "question", "persona", "query", "expected"],
+        "properties": {
+          "id": {"$ref": "#/$defs/slug"},
+          "question": {"$ref": "#/$defs/text"},
+          "persona": {"description": "A persona id of access/personas.yaml.", "$ref": "#/$defs/slug"},
+          "query": {"description": "A verified query id of semantics/context.json.", "$ref": "#/$defs/slug"},
+          "expected": {"oneOf": [{"$ref": "#/$defs/result"}, {"$ref": "#/$defs/abstains"}]}
+        }
+      }
+    },
+    "uncovered": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["metric", "reason"],
+        "properties": {
+          "metric": {"type": "string", "pattern": "^[a-z_][a-z0-9_]*$"},
+          "reason": {"$ref": "#/$defs/text"}
+        }
+      }
+    }
+  }
+}
