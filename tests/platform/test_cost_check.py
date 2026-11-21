@@ -407,7 +407,7 @@ def test_every_call_is_a_read_on_the_lab_project_only() -> None:
         else:
             assert re.search(rf"/{re.escape(ACCOUNT)}(?:[/:]|$)", url), command
             assert billed == [f"x-goog-user-project: {PROJECT}"], command
-        # The billing APIs, read with gcloud's login and no quota project, spend the quota of
+        # The billing APIs, read with gcloud's login and no quota project, may spend the quota of
         # gcloud's shared project: each billing read names the lab's.
         if re.match(r"https://(cloudbilling|billingbudgets)\.googleapis\.com/", url):
             assert billed == [f"x-goog-user-project: {PROJECT}"], command
@@ -1046,18 +1046,38 @@ def test_a_billing_read_rate_limited_on_every_attempt_fails_the_check() -> None:
     assert out.splitlines()[-1].startswith("cost-check: failed on billing link;"), out
 
 
-def test_a_status_only_rate_limit_is_retried_like_one_with_a_reason() -> None:
-    bare = {"error": {"code": 429, "message": "m"}}
-    gcp, paused = Limited("topic", 1, bare), []
+def info(reason: str) -> list[dict[str, str]]:
+    return [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": reason}]
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        {"error": {"code": 429, "message": "m"}},
+        {"error": {"code": 429, "message": "m", "status": "RESOURCE_EXHAUSTED"}},
+        {
+            "error": {
+                "code": 403,
+                "message": "m",
+                "status": "X",
+                "details": info("RATE_LIMIT_EXCEEDED"),
+            }
+        },
+    ],
+    ids=["only-the-code", "only-the-status", "only-the-reason"],
+)
+def test_each_sign_of_a_rate_limit_alone_is_retried(refusal: dict[str, Any]) -> None:
+    gcp, paused = Limited("topic", 1, refusal), []
     code, out = check(ENV, gcp, paused.append)
     assert code == 0, out
     assert gcp.tries == 2 and paused == [RATE_LIMIT_PAUSES[0]]
 
 
-def test_the_retries_are_bounded_and_short() -> None:
-    assert 1 <= len(RATE_LIMIT_PAUSES) <= 3
-    assert all(p > 0 for p in RATE_LIMIT_PAUSES)
-    assert sum(RATE_LIMIT_PAUSES) <= 30
+def test_the_retries_are_the_two_pauses_the_architecture_names() -> None:
+    assert RATE_LIMIT_PAUSES == (5.0, 15.0)
+    assert (
+        "sent twice more after pauses of 5 and 15 seconds" in (REPO / "ARCHITECTURE.md").read_text()
+    )
 
 
 def test_a_refusal_that_is_no_rate_limit_is_not_retried() -> None:
