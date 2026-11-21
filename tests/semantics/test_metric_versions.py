@@ -808,14 +808,30 @@ def meta_of(manifest_metrics: list[Block], name: str) -> Block:
 
 
 @pytest.fixture(scope="module")
-def committed(tmp_path_factory: pytest.TempPathFactory) -> Block:
-    """The semantic manifest dbt writes for the committed tree, parsed by the gate."""
+def committed_once(tmp_path_factory: pytest.TempPathFactory) -> Block:
+    """The semantic manifest dbt writes for the committed tree, parsed by the gate once per module
+    and worker."""
     work = tmp_path_factory.mktemp("committed")
     repo = git_repo(work, REAL)
     tree = work / "tree"
     tree.mkdir()
     versions.export_working(repo, tree)
     return versions.parse(tree, work, "working").manifest
+
+
+@pytest.fixture
+def committed(committed_once: Block) -> Block:
+    """A copy of the one parse of the committed tree for each case, so a case that changes it
+    leaves the next case, whatever the order or the worker, the parse dbt wrote."""
+    return copy.deepcopy(committed_once)
+
+
+def test_each_case_gets_its_own_copy_of_the_committed_parse(
+    committed: Block, committed_once: Block
+) -> None:
+    assert committed == committed_once and committed is not committed_once
+    committed["metrics"].clear()
+    assert committed_once["metrics"]
 
 
 CLOCK_STEP = Path(__file__).resolve().parents[1] / "models" / "clock_step.py"
