@@ -423,3 +423,17 @@ def test_kept_values_that_do_not_open_their_seals_are_refused(
     values[path] = [new_salt(), values[path][1]]
     with pytest.raises(ValueError, match="do(es)? not open"):
         logged(record, values)
+
+
+def test_a_schema_name_the_tool_does_not_quote_fails_the_re_run(
+    invented: tuple[Answer, tuple[Logged, ...], AsPersona], tmp_path: Path
+) -> None:
+    answer, runs, _ = invented
+    database = crafted(
+        tmp_path / "odd.duckdb",
+        'create schema "Odd\'Name"',
+        'create table "Odd\'Name".t as select * from range(4) r(x)',
+    )
+    report = reproduce(answer, runs, lambda _: duckdb.connect(str(database), read_only=True))
+    (failure,) = report.failures
+    assert failure.reason.startswith("the re-run failed: a schema name the tool does not quote")

@@ -10,8 +10,8 @@ verifier's to run; `ask` does not call it.
 The matching rule of `trace`:
 - a number is a maximal run of Unicode decimal digits, with a leading `-` when no letter, digit or
   `_` comes before it, thousands separated by `,` in groups of three, one decimal part and one
-  exponent (`e` or `E`); every digit of the text belongs to one such number, so no digit is left
-  unread, digits written inside a word (`42M`, `Q3`) among them;
+  exponent (`e` or `E`); every digit of the text that is not set aside (below) belongs to one such
+  number, so no other digit is left unread, digits written inside a word (`42M`, `Q3`) among them;
 - before numbers are read, each place where the `str` or the `repr` of a cited cell that is not a
   number (a text, a date, a time) is written, with no letter, digit or `_` on either side, is
   set aside: its digits are that cell's own text (`payments-over-25k`, a timestamp);
@@ -47,13 +47,15 @@ Stated limits:
   `ask`'s own message, which names the cap and is not traced;
 - `reproduce` re-runs on whatever connection `as_persona` returns, so it shows a change of the
   persona's database since the run, not which build that database came from; it does not re-ask
-  the model or open the record's answer seal (`tests/agent/test_audit.py` rebuilds those).
+  the model or open the record's answer seal (`tests/agent/test_audit.py` rebuilds those);
+- `reproduce` refuses, as a failed re-run, a database holding a schema name the tool does not
+  quote, and does not close the connections `as_persona` returns, which stay their maker's.
 """
 
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import duckdb
@@ -165,11 +167,7 @@ def trace(text: str, citations: Sequence[Citation]) -> Trace:
     failures: list[Failure] = []
     for start, end in numbers(aside):
         number = text[start:end]
-        try:
-            value = Decimal(number.replace(",", ""))
-        except InvalidOperation:
-            failures.append(Failure(number, None, "not read as a number"))
-            continue
+        value = Decimal(number.replace(",", ""))
         if VERSION.search(aside[:start]):
             versioned = [c for c in fresh if c.version == value]
             if versioned:
