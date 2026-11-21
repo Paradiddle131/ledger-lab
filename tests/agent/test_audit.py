@@ -1,0 +1,550 @@
+"""The own agent's audit records, written by `agent.ask.ask` to an `agent.audit.FileLog`.
+
+The first tests rebuild an answer from its record alone: they read the log file and the kept
+values from disk, verify the chain up to the record, check the build the record names against the
+checkout (its commit and the digests of the files it lists), build the warehouse again from the
+record's target and variables, re-run each query as the record's persona with its kept bound values
+and match the result to its seal, then ask the scripted model of the release again with the kept
+question and those results and match its reply to the answer's seal. Each wrong record, value or
+chain below must stop that rebuild.
+
+The others break the log sink, or hand it a record it must refuse, and expect no answer, the log
+as it was, and no value of the turn in the error; and they read every record a run writes for
+values held in clear.
+"""
+
+import hashlib
+import json
+from collections.abc import Callable, Mapping
+from pathlib import Path
+from typing import Any
+
+import duckdb
+import pytest
+from conftest import REPO, SAMPLED_SOURCES, git_out
+from jsonschema import Draft202012Validator
+
+from access.compile import open_persona
+from agent.ask import MAX_TOOL_CALLS, Audit, ask, load_context
+from agent.audit import (
+    GENESIS,
+    AuditWriteFailed,
+    ChainBroken,
+    FileLog,
+    bind,
+    cell_text,
+    new_salt,
+    read_log,
+    record_digest,
+    seal,
+    sealed_paths,
+    sealed_result,
+    verify_chain,
+)
+from agent.model import Citation, Reply, ToolCall, Turn, model_from_config
+
+AsPersona = Callable[[str], duckdb.DuckDBPyConnection]
+QUESTION = "What share of the City of Chicago's served payment rows repeat another served row?"
+UNANSWERED = "Which vendor was paid the most?"
+CHICAGO = "accountant-chicago"
+UK = "accountant-uk-transport"
+DENIED = "agent-operator"
+SCHEMA = Draft202012Validator(json.loads((REPO / "agent/audit.schema.json").read_text()))
+Warehouse = Callable[[Mapping[str, Any]], Path]
+
+
+class NotRebuilt(AssertionError):
+    """The record, its kept values or the build do not give back the answer."""
+
+
+def need(holds: bool, message: str) -> None:
+    if not holds:
+        raise NotRebuilt(message)
+
+
+def produce(as_persona: AsPersona, audit: Audit) -> None:
+    """Four turns written to `audit.log`: no persona, a question no query answers, then the
+    verified question asked by Chicago's accountant and by the UK accountant (records 2 and 3).
+    Nothing they return is kept: the rebuild reads only the files."""
+    with pytest.raises(ValueError, match="not a persona"):
+        ask("nobody-at-all", QUESTION, as_persona=as_persona, audit=audit)
+    ask(CHICAGO, UNANSWERED, as_persona=as_persona, audit=audit)
+    ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit)
+    ask(UK, QUESTION, as_persona=as_persona, audit=audit)
+
+
+def run_as(connection: duckdb.DuckDBPyConnection, text: str, values: Mapping[str, Any]) -> Any:
+    """The record's SQL on the persona's database, its unqualified names resolved in the schemas
+    that database holds, as the release's tool resolves them."""
+    cursor = connection.cursor()
+    held = cursor.execute(
+        "select distinct table_schema from information_schema.tables"
+        " where table_catalog = current_database()"
+    ).fetchall()
+    cursor.execute(f"set search_path = '{','.join(sorted(s for (s,) in held))}'")
+    result = cursor.execute(text, dict(values) or [])
+    columns = tuple(column[0] for column in result.description or ())
+    return columns, tuple(tuple(row) for row in result.fetchall())
+
+
+def rebuild(
+    log: Path,
+    kept: Path,
+    seq: int,
+    rebuilt: Warehouse,
+    catalogues: Mapping[str, Any],
+    directory: Path,
+) -> list[dict[str, Any]]:
+    """Rebuild record `seq` of the log at `log` from it alone, with the kept values under `kept`;
+    return each run's result as re-run. Raises `NotRebuilt` or `ChainBroken` when it fails."""
+    records = read_log(log.read_bytes())
+    need(seq < len(records), f"the log holds no record {seq}")
+    verify_chain(records[: seq + 1])
+    record = records[seq]
+    need(not list(SCHEMA.iter_errors(record)), "the record breaks the schema")
+    need(record["kind"] == "answer" and record["outcome"] == "answered", "not an answered turn")
+    opened = json.loads((kept / f"{seq}.json").read_text())
+    need(set(opened) == sealed_paths(record), "the kept values are not one per sealed field")
+    for path, (salt, value) in opened.items():
+        need(field(record, path) == seal(salt, value), f"the kept {path} does not open its seal")
+
+    # The build the record names, against the checkout: the same commit, no change to the dbt
+    # project since it, and each listed file's digest.
+    head = git_out("rev-parse", "HEAD")
+    build = record["data"]["build"]
+    need(record["release"]["commit"] == head, "the release is not the checkout's commit")
+    need(build["commit"] == head, "the build's commit is not the checkout's")
+    changed = git_out("status", "--porcelain", "--untracked-files=all", "--", "models")
+    need(changed == "", f"the dbt project differs from the build's commit: {changed}")
+    for source in record["data"]["sources"]:
+        digest = hashlib_of(REPO / SAMPLED_SOURCES[source["name"]])
+        need(digest == source["sha256"], f"{source['name']}: not the file the build read")
+    database = rebuilt(build)
+
+    rerun: list[dict[str, Any]] = []
+    for index, run in enumerate(record["runs"]):
+        values = opened.get(f"runs/{index}/query/parameters", ("", {}))[1]
+        (directory / f"run-{index}").mkdir(parents=True)
+        connection = open_persona(
+            catalogues["access"],
+            catalogues["columns"],
+            catalogues["aggregates"],
+            catalogues["purposes"],
+            run["as"],
+            database,
+            directory / f"run-{index}",
+        )
+        try:
+            columns, rows = run_as(connection, run["query"]["text"], values)
+        finally:
+            connection.close()
+        result = sealed_result(columns, ([cell_text(v) for v in row] for row in rows))
+        salt = opened[f"runs/{index}/result"][0]
+        need(seal(salt, result) == run["result"], f"run {index}: the result does not match")
+        rerun.append({"columns": columns, "rows": rows, "sealed": result})
+
+    # The answer: the release's scripted model asked the kept question again, shown the results
+    # just re-run in the order the record lists them.
+    question = opened["question"][1]
+    queries = load_context()
+    model = model_from_config({}, queries)
+    results: list[Citation] = []
+    while not isinstance(
+        step := model.step(Turn(question, tuple(queries.values()), tuple(results))), Reply
+    ):
+        assert isinstance(step, ToolCall)
+        index = len(results)
+        need(index < len(record["runs"]), "the model calls a query the record has no run of")
+        query = queries[step.query]
+        text, values = bind(query.sql, "duckdb")
+        run = record["runs"][index]
+        need(text == run["query"]["text"], f"run {index}: not the query the model calls")
+        kept_values = opened.get(f"runs/{index}/query/parameters", ("", {}))[1]
+        need(values == kept_values, f"run {index}: not the values the query binds")
+        found = rerun[index]
+        results.append(
+            Citation(query.id, query.metric, query.version, query.sql, *found_of(found), None)
+        )
+    need(len(results) == len(record["runs"]), "the record lists a run the model does not call")
+    metrics = list(dict.fromkeys((c.metric, c.version) for c in results))
+    need(record["metrics"] == [{"name": n, "version": v} for n, v in metrics], "other metrics")
+    need(seal(opened["answer"][0], step.text) == record["answer"], "the answer does not match")
+    return rerun
+
+
+def found_of(found: Mapping[str, Any]) -> tuple[tuple[str, ...], tuple[tuple[Any, ...], ...]]:
+    return found["columns"], found["rows"]
+
+
+def hashlib_of(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def field(record: Mapping[str, Any], path: str) -> Any:
+    value: Any = record
+    for step in path.split("/"):
+        value = value[int(step)] if isinstance(value, list) else value[step]
+    return value
+
+
+@pytest.fixture(scope="module")
+def rebuilt(tmp_path_factory: pytest.TempPathFactory) -> Warehouse:
+    """The warehouse built again, apart from the one the answers were made over, from a record's
+    build: its target and its dbt variables, once per such pair in this module."""
+    from tests.models.dbt_build import built
+
+    made: dict[str, Path] = {}
+
+    def make(build: Mapping[str, Any]) -> Path:
+        need(build["target"] == "local", "a build on a target this rebuild cannot run")
+        need(set(build["vars"]) == {"source_rows"}, "dbt variables this rebuild does not pass")
+        rows = build["vars"]["source_rows"]
+        if rows not in made:
+            made[rows] = built(tmp_path_factory.mktemp("rebuilt"), rows).database
+        return made[rows]
+
+    return make
+
+
+@pytest.fixture
+def catalogues(
+    access: dict[str, Any],
+    columns: dict[str, Any],
+    aggregates: dict[str, Any],
+    purposes: dict[str, Any],
+) -> dict[str, Any]:
+    return {"access": access, "columns": columns, "aggregates": aggregates, "purposes": purposes}
+
+
+@pytest.fixture
+def produced(as_persona: AsPersona, audit: Audit) -> FileLog:
+    produce(as_persona, audit)
+    assert isinstance(audit.log, FileLog)
+    return audit.log
+
+
+# Rebuilding an answer
+
+
+def test_answer_rebuilt_from_its_audit_record(
+    produced: FileLog, rebuilt: Warehouse, catalogues: dict[str, Any], tmp_path: Path
+) -> None:
+    """Records 2 and 3, Chicago's and the UK accountant's answers to one question, each rebuilt
+    from the files alone: Chicago's re-run gives one share in [0, 1], the UK's the empty sum's
+    null, each equal to the sealed result, and the model's reply equal to the sealed answer."""
+    log, kept = produced.path, produced.kept
+    (chicago,) = rebuild(log, kept, 2, rebuilt, catalogues, tmp_path / "chicago")
+    (uk,) = rebuild(log, kept, 3, rebuilt, catalogues, tmp_path / "uk")
+    ((share,),) = chicago["rows"]
+    assert isinstance(share, float) and 0 <= share <= 1
+    assert uk["rows"] == ((None,),)
+    assert chicago["sealed"] != uk["sealed"]
+    assert verify_chain(read_log(log.read_bytes())) == read_log(log.read_bytes())[-1]["digest"]
+
+
+def rewrite(log: Path, change: Callable[[list[dict[str, Any]]], None], rechain: bool) -> None:
+    """Change the log's records in place; with `rechain`, relink and re-digest them all, as a
+    writer rewriting the log would."""
+    records = read_log(log.read_bytes())
+    change(records)
+    if rechain:
+        prev = GENESIS
+        for record in records:
+            record["prev"] = prev
+            prev = record["digest"] = record_digest(record)
+    log.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
+
+
+def reseal(kept: Path, seq: int, path: str, value: Any) -> Callable[[list[dict[str, Any]]], None]:
+    """Replace a kept value and return the change that seals it into the record, as a writer
+    making up both would."""
+    opened = json.loads((kept / f"{seq}.json").read_text())
+    salt = new_salt()
+    opened[path] = [salt, value]
+    (kept / f"{seq}.json").write_text(json.dumps(opened))
+
+    def change(records: list[dict[str, Any]]) -> None:
+        put(records[seq], path, seal(salt, value))
+
+    return change
+
+
+def put(record: dict[str, Any], path: str, value: Any) -> None:
+    parent, _, last = path.rpartition("/")
+    target = field(record, parent) if parent else record
+    if isinstance(target, list):
+        target[int(last)] = value
+    else:
+        target[last] = value
+
+
+OTHER_QUERY = "duplicate-payment-amount-rate"
+
+
+def wrong(case: str, log: Path, kept: Path) -> None:
+    """Break record 2 or what is kept for it, one way per case."""
+    if case == "the result's seal":
+        rewrite(log, lambda r: put(r[2], "runs/0/result", seal(new_salt(), "x")), rechain=True)
+    elif case == "the result with its seal":
+        made_up = {"columns": ["duplicate_payment_rate"], "rows": [["0.5"]]}
+        rewrite(log, reseal(kept, 2, "runs/0/result", made_up), rechain=True)
+    elif case == "the query":
+        text, _ = bind(load_context()[OTHER_QUERY].sql, "duckdb")
+        rewrite(log, lambda r: put(r[2], "runs/0/query/text", text), rechain=True)
+    elif case == "the persona it ran as":
+        rewrite(log, lambda r: put(r[2], "runs/0/as", UK), rechain=True)
+    elif case == "an earlier record":
+        rewrite(log, lambda r: put(r[1], "outcome", "refused"), rechain=False)
+    elif case == "the record itself":
+        rewrite(log, lambda r: put(r[2], "metrics/0/version", 2), rechain=False)
+    elif case == "the kept result":
+        opened = json.loads((kept / "2.json").read_text())
+        opened["runs/0/result"][1]["rows"] = [["0.5"]]
+        (kept / "2.json").write_text(json.dumps(opened))
+    elif case == "a kept value with its seal":
+        change = reseal(kept, 2, "runs/0/query/parameters", {"v1": "uk"})
+        rewrite(log, change, rechain=True)
+    elif case == "the answer with its seal":
+        rewrite(log, reseal(kept, 2, "answer", "Every payment repeats."), rechain=True)
+    elif case == "the question with its seal":
+        rewrite(log, reseal(kept, 2, "question", UNANSWERED), rechain=True)
+    elif case == "the build's commit":
+        rewrite(log, lambda r: put(r[2], "data/build/commit", "c" * 40), rechain=True)
+    elif case == "a listed file's digest":
+        rewrite(log, lambda r: put(r[2], "data/sources/0/sha256", "a" * 64), rechain=True)
+    else:
+        raise AssertionError(case)
+
+
+@pytest.mark.parametrize(
+    ("case", "error", "message"),
+    [
+        ("the result's seal", NotRebuilt, "kept runs/0/result does not open"),
+        ("the result with its seal", NotRebuilt, "result does not match"),
+        ("the query", NotRebuilt, "result does not match"),
+        ("the persona it ran as", NotRebuilt, "result does not match"),
+        ("an earlier record", ChainBroken, "record 1: the body"),
+        ("the record itself", ChainBroken, "record 2: the body"),
+        ("the kept result", NotRebuilt, "kept runs/0/result does not open"),
+        ("a kept value with its seal", NotRebuilt, "result does not match"),
+        ("the answer with its seal", NotRebuilt, "answer does not match"),
+        ("the question with its seal", NotRebuilt, "the record lists a run the model does not"),
+        ("the build's commit", NotRebuilt, "build's commit"),
+        ("a listed file's digest", NotRebuilt, "not the file the build read"),
+    ],
+)
+def test_a_wrong_record_kept_value_or_chain_is_not_rebuilt(
+    case: str,
+    error: type[Exception],
+    message: str,
+    produced: FileLog,
+    rebuilt: Warehouse,
+    catalogues: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    rebuild(produced.path, produced.kept, 2, rebuilt, catalogues, tmp_path / "before")
+    wrong(case, produced.path, produced.kept)
+    with pytest.raises(error, match=message):
+        rebuild(produced.path, produced.kept, 2, rebuilt, catalogues, tmp_path / "after")
+
+
+# One record per turn, and what it holds in clear
+
+
+class Looping:
+    def step(self, turn: Turn) -> ToolCall | Reply:
+        return ToolCall("duplicate-payment-rate")
+
+
+def test_each_turn_writes_one_record_with_its_outcome(as_persona: AsPersona, audit: Audit) -> None:
+    with pytest.raises(ValueError, match="persona"):
+        ask(None, QUESTION, as_persona=as_persona, audit=audit)
+    answers = [
+        ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit),
+        ask(CHICAGO, UNANSWERED, as_persona=as_persona, audit=audit),
+        ask(DENIED, QUESTION, as_persona=as_persona, audit=audit),
+        ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=Looping()),
+    ]
+    assert isinstance(audit.log, FileLog)
+    records = read_log(audit.log.path.read_bytes())
+    verify_chain(records)
+    assert [(r["outcome"], r.get("reason"), len(r["runs"])) for r in records] == [
+        ("refused", "no-identity", 0),
+        ("answered", None, 1),
+        ("abstained", None, 0),
+        ("refused", "policy", 0),
+        ("stopped", "model-call-cap", MAX_TOOL_CALLS),
+    ]
+    for record in records:
+        assert list(SCHEMA.iter_errors(record)) == [], record["seq"]
+        opened = json.loads((audit.log.kept / f"{record['seq']}.json").read_text())
+        assert set(opened) == sealed_paths(record)
+        for path, (salt, value) in opened.items():
+            assert field(record, path) == seal(salt, value)
+    for answer, record in zip(answers, records[1:], strict=True):
+        opened = json.loads((audit.log.kept / f"{record['seq']}.json").read_text())
+        assert opened["question"][1] == answer.question
+        assert opened["answer"][1] == answer.text
+    assert records[1]["metrics"] == [{"name": "duplicate_payment_rate", "version": 1}]
+    assert records[1]["asker"]["persona"] == CHICAGO and records[1]["runs"][0]["as"] == CHICAGO
+
+
+def leaves(value: Any) -> list[Any]:
+    if isinstance(value, Mapping):
+        return [leaf for item in value.values() for leaf in leaves(item)]
+    if isinstance(value, list | tuple):
+        return [leaf for item in value for leaf in leaves(item)]
+    return [value]
+
+
+def test_the_log_holds_no_sealed_value_in_clear(produced: FileLog) -> None:
+    """The question, the answer's text and every result cell appear nowhere in the log's bytes,
+    and no bound value appears there as a JSON string; each is in the kept values instead."""
+    text = produced.path.read_text()
+    for record in read_log(produced.path.read_bytes()):
+        opened = json.loads((produced.kept / f"{record['seq']}.json").read_text())
+        for path, (_, value) in opened.items():
+            # A result's column names are the SQL's own, which the record holds in clear.
+            for leaf in leaves(value["rows"] if path.endswith("/result") else value):
+                if leaf is None:
+                    continue
+                if path.endswith("/parameters"):
+                    assert json.dumps(leaf) not in text, path
+                else:
+                    assert str(leaf) not in text, path
+
+
+# Fail closed
+
+
+class Broken:
+    """A sink that fails with a message carrying the turn's values, as a real one might."""
+
+    def __init__(self) -> None:
+        self.seen: list[Mapping[str, Any]] = []
+
+    def append(self, body: Mapping[str, Any], kept: Mapping[str, tuple[str, Any]]) -> Any:
+        self.seen.append(kept)
+        raise OSError(f"no space left writing {json.dumps({p: v for p, (_, v) in kept.items()})}")
+
+
+@pytest.mark.parametrize(
+    ("who", "question", "model"),
+    [
+        (CHICAGO, QUESTION, None),
+        (CHICAGO, UNANSWERED, None),
+        (DENIED, QUESTION, None),
+        (CHICAGO, QUESTION, Looping()),
+        ("nobody-at-all", QUESTION, None),
+    ],
+    ids=["answered", "abstained", "policy", "stopped", "no-identity"],
+)
+def test_a_broken_log_sink_returns_no_answer(
+    who: str, question: str, model: Any, as_persona: AsPersona, audit: Audit
+) -> None:
+    sink = Broken()
+    broken = Audit(sink, audit.release, audit.data)
+    with pytest.raises(AuditWriteFailed) as raised:
+        ask(who, question, as_persona=as_persona, audit=broken, model=model)
+    (kept,) = sink.seen
+    said = str(raised.value)
+    assert "OSError" in said
+    assert question not in said and str(kept["answer"][1]) not in said
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
+
+
+def test_a_line_write_that_fails_part_way_leaves_the_log_as_it_was(
+    as_persona: AsPersona, audit: Audit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Half the record's line reaches the file, then the write raises: the log is truncated back,
+    its chain verifies, and the next turn takes the position the failed one would have."""
+    import agent.audit
+
+    assert isinstance(audit.log, FileLog)
+    ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit)
+    before = audit.log.path.read_bytes()
+    real = agent.audit._write_all
+
+    def torn(fd: int, data: bytes) -> None:
+        real(fd, data[: len(data) // 2])
+        raise OSError("the disk went away")
+
+    monkeypatch.setattr(agent.audit, "_write_all", torn)
+    with pytest.raises(AuditWriteFailed):
+        ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit)
+    assert audit.log.path.read_bytes() == before
+    monkeypatch.setattr(agent.audit, "_write_all", real)
+    ask(UK, QUESTION, as_persona=as_persona, audit=audit)
+    records = read_log(audit.log.path.read_bytes())
+    verify_chain(records)
+    assert [r["asker"]["persona"] for r in records] == [CHICAGO, UK]
+    opened = json.loads((audit.log.kept / "1.json").read_text())
+    assert all(field(records[1], p) == seal(s, v) for p, (s, v) in opened.items())
+
+
+def test_a_torn_log_is_refused(as_persona: AsPersona, audit: Audit) -> None:
+    assert isinstance(audit.log, FileLog)
+    ask(CHICAGO, UNANSWERED, as_persona=as_persona, audit=audit)
+    with audit.log.path.open("ab") as log:
+        log.write(b'{"seq":1')
+    before = audit.log.path.read_bytes()
+    with pytest.raises(AuditWriteFailed, match="ChainBroken"):
+        ask(CHICAGO, UNANSWERED, as_persona=as_persona, audit=audit)
+    assert audit.log.path.read_bytes() == before
+
+
+def test_a_log_edited_in_place_is_refused(as_persona: AsPersona, audit: Audit) -> None:
+    assert isinstance(audit.log, FileLog)
+    ask(CHICAGO, UNANSWERED, as_persona=as_persona, audit=audit)
+    rewrite(audit.log.path, lambda r: put(r[0], "outcome", "refused"), rechain=False)
+    with pytest.raises(AuditWriteFailed, match="ChainBroken"):
+        ask(CHICAGO, UNANSWERED, as_persona=as_persona, audit=audit)
+
+
+def test_kept_values_that_cannot_be_written_leave_no_record(
+    as_persona: AsPersona, audit: Audit
+) -> None:
+    assert isinstance(audit.log, FileLog)
+    audit.log.kept.write_text("a file where the folder of kept values goes")
+    with pytest.raises(AuditWriteFailed):
+        ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit)
+    assert audit.log.path.read_bytes() == b""
+
+
+@pytest.mark.parametrize(
+    ("release", "data"),
+    [
+        ("not a commit", None),
+        (None, {"build": {}, "sources": []}),
+        (None, {"note": "Chicago paid 1234.50"}),
+    ],
+    ids=["release", "build", "free-text"],
+)
+def test_a_record_the_schema_refuses_is_not_written_and_its_answer_not_given(
+    release: str | None, data: Any, as_persona: AsPersona, audit: Audit
+) -> None:
+    assert isinstance(audit.log, FileLog)
+    wrong_audit = Audit(audit.log, release or audit.release, data or audit.data)
+    with pytest.raises(AuditWriteFailed, match="RecordRefused") as raised:
+        ask(CHICAGO, QUESTION, as_persona=as_persona, audit=wrong_audit)
+    assert "1234" not in str(raised.value)
+    assert audit.log.path.read_bytes() == b""
+    assert not audit.log.kept.exists()
+
+
+def test_a_log_that_cannot_be_opened_returns_no_answer(as_persona: AsPersona, audit: Audit) -> None:
+    assert isinstance(audit.log, FileLog)
+    unopenable = Audit(FileLog(audit.log.path.parent, audit.log.kept), audit.release, audit.data)
+    with pytest.raises(AuditWriteFailed, match="IsADirectoryError"):
+        ask(CHICAGO, QUESTION, as_persona=as_persona, audit=unopenable)
+
+
+def test_every_verified_query_bound_gives_the_rows_of_its_text(warehouse: Path) -> None:
+    """The tool sends each verified query with its values lifted to parameters; on the sample
+    warehouse each gives the rows its committed text gives, compared in any order."""
+    with duckdb.connect(str(warehouse), read_only=True) as db:
+        for query in load_context().values():
+            text, values = bind(query.sql, "duckdb")
+            assert sorted(map(repr, db.execute(text, values or []).fetchall())) == sorted(
+                map(repr, db.execute(query.sql).fetchall())
+            ), query.id

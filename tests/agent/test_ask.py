@@ -15,7 +15,8 @@ from typing import Any
 import duckdb
 import pytest
 
-from agent.ask import Answer, NoPersonaError, ask, load_context, run_metric_query
+from agent.ask import Answer, Audit, NoPersonaError, ask, load_context, run_metric_query
+from agent.audit import FileLog, read_log
 from agent.model import (
     MODEL_VARIABLE,
     Model,
@@ -45,11 +46,12 @@ LIMIT = 3
 
 
 class Recorder:
-    """`as_persona` and a model, each recording its calls."""
+    """`as_persona` and a model, each recording its calls, and the audit log the asks write to."""
 
-    def __init__(self, as_persona: AsPersona, model: Any) -> None:
+    def __init__(self, as_persona: AsPersona, model: Any, audit: Audit) -> None:
         self.opened: list[str] = []
         self.turns: list[Turn] = []
+        self.audit = audit
         self._as_persona = as_persona
         self._model = model
 
@@ -80,7 +82,7 @@ def scripted() -> Model:
 
 
 def asked(recorder: Recorder, persona: Any, question: str = QUESTION) -> Answer:
-    return ask(persona, question, as_persona=recorder.connect, model=recorder)
+    return ask(persona, question, as_persona=recorder.connect, audit=recorder.audit, model=recorder)
 
 
 def values(answer: Answer) -> list[tuple[Any, ...]]:
@@ -89,12 +91,12 @@ def values(answer: Answer) -> list[tuple[Any, ...]]:
 
 
 def test_two_personas_asking_the_same_question_get_different_rows(
-    engine: AsPersona, scripted: Model
+    engine: AsPersona, scripted: Model, request: pytest.FixtureRequest
 ) -> None:
     """The local engine's proof that a query runs as the asker: Chicago's accountant gets a share
     of Chicago's rows, the UK accountant, whose database holds no Chicago row, the null of an empty
     sum; each connection was opened for the persona asking, and for no other."""
-    recorder = Recorder(engine, scripted)
+    recorder = Recorder(engine, scripted, request.getfixturevalue("audit"))
     chicago = asked(recorder, CHICAGO)
     uk = asked(recorder, UK)
     assert recorder.opened == [CHICAGO, UK]
@@ -110,21 +112,31 @@ def test_two_personas_asking_the_same_question_get_different_rows(
 MISSING: list[Any] = [None, "", "   ", 7, "nobody", f"{CHICAGO} ", "\u200b"]
 
 
-def test_a_question_without_a_persona_gets_no_answer(engine: AsPersona, scripted: Model) -> None:
-    """No persona raises before the model is asked or a connection is opened."""
+def test_a_question_without_a_persona_gets_no_answer(
+    engine: AsPersona, scripted: Model, request: pytest.FixtureRequest
+) -> None:
+    """No persona raises before the model is asked or a connection is opened, and leaves a record
+    refused for no identity, naming no persona and no run."""
+    audit: Audit = request.getfixturevalue("audit")
     for missing in MISSING:
-        recorder = Recorder(engine, scripted)
+        recorder = Recorder(engine, scripted, audit)
         with pytest.raises(NoPersonaError):
             asked(recorder, missing)
         assert (missing, recorder.opened, recorder.turns) == (missing, [], [])
+    assert isinstance(audit.log, FileLog)
+    records = read_log(audit.log.path.read_bytes())
+    assert [(r["outcome"], r["reason"], r["runs"]) for r in records] == [
+        ("refused", "no-identity", [])
+    ] * len(MISSING)
+    assert all("persona" not in r["asker"] for r in records)
 
 
 def test_a_temporary_table_on_the_persona_connection_does_not_shadow_its_rows(
-    as_persona: AsPersona, scripted: Model
+    as_persona: AsPersona, scripted: Model, audit: Audit
 ) -> None:
     """A temporary `payments` on the connection `as_persona` returns would win an unqualified name
     there; the tool runs on a cursor of its own, which does not see it."""
-    plain = values(asked(Recorder(as_persona, scripted), CHICAGO))
+    plain = values(asked(Recorder(as_persona, scripted, audit), CHICAGO))
 
     def shadowed(persona: str) -> duckdb.DuckDBPyConnection:
         connection = as_persona(persona)
@@ -134,12 +146,12 @@ def test_a_temporary_table_on_the_persona_connection_does_not_shadow_its_rows(
         )
         return connection
 
-    answer = ask(CHICAGO, QUESTION, as_persona=shadowed, model=scripted)
+    answer = ask(CHICAGO, QUESTION, as_persona=shadowed, audit=audit, model=scripted)
     assert values(answer) == plain != [(1.0,)]
 
 
 def test_an_answer_cites_the_metric_its_version_the_sql_and_the_freshness(
-    as_persona: AsPersona, scripted: Model
+    as_persona: AsPersona, scripted: Model, audit: Audit
 ) -> None:
     def dated(persona: str) -> duckdb.DuckDBPyConnection:
         connection = as_persona(persona)
@@ -150,7 +162,7 @@ def test_an_answer_cites_the_metric_its_version_the_sql_and_the_freshness(
         os.utime(row[0], (WRITTEN.timestamp(), WRITTEN.timestamp()))
         return connection
 
-    answer = ask(CHICAGO, QUESTION, as_persona=dated, model=scripted)
+    answer = ask(CHICAGO, QUESTION, as_persona=dated, audit=audit, model=scripted)
     (citation,) = answer.citations
     metric = load_context()[QUERY]
     assert (citation.query, citation.metric, citation.version) == (
@@ -167,9 +179,9 @@ def test_an_answer_cites_the_metric_its_version_the_sql_and_the_freshness(
 
 
 def test_a_persona_the_policy_denies_opens_no_connection(
-    as_persona: AsPersona, scripted: Model
+    as_persona: AsPersona, scripted: Model, audit: Audit
 ) -> None:
-    recorder = Recorder(as_persona, scripted)
+    recorder = Recorder(as_persona, scripted, audit)
     answer = asked(recorder, DENIED)
     assert recorder.opened == []
     assert answer.citations == ()
@@ -179,17 +191,17 @@ def test_a_persona_the_policy_denies_opens_no_connection(
 
 
 def test_a_question_no_verified_query_answers_runs_no_tool(
-    as_persona: AsPersona, scripted: Model
+    as_persona: AsPersona, scripted: Model, audit: Audit
 ) -> None:
-    recorder = Recorder(as_persona, scripted)
+    recorder = Recorder(as_persona, scripted, audit)
     answer = asked(recorder, CHICAGO, "Which vendor was paid the most?")
     assert recorder.opened == []
     assert answer.citations == () and answer.refusals == ()
     assert len(recorder.turns) == 1
 
 
-def test_a_query_the_context_does_not_hold_is_refused(as_persona: AsPersona) -> None:
-    recorder = Recorder(as_persona, ScriptedModel({QUESTION: "drop-everything"}))
+def test_a_query_the_context_does_not_hold_is_refused(as_persona: AsPersona, audit: Audit) -> None:
+    recorder = Recorder(as_persona, ScriptedModel({QUESTION: "drop-everything"}), audit)
     answer = asked(recorder, CHICAGO)
     assert recorder.opened == []
     assert answer.citations == ()
@@ -197,11 +209,13 @@ def test_a_query_the_context_does_not_hold_is_refused(as_persona: AsPersona) -> 
     assert refusal.query == "drop-everything" and "metric context" in refusal.reason
 
 
-def test_a_table_the_persona_lacks_is_refused_not_read_elsewhere(as_persona: AsPersona) -> None:
+def test_a_table_the_persona_lacks_is_refused_not_read_elsewhere(
+    as_persona: AsPersona, audit: Audit
+) -> None:
     """The contract reconciliation is in the warehouse but in no persona's database, so a query
     over it fails on the persona's connection and the answer carries the error, no rows."""
     question = "What share of the City of Chicago's fixed contract awards has been paid?"
-    recorder = Recorder(as_persona, model_from_config({}, load_context()))
+    recorder = Recorder(as_persona, model_from_config({}, load_context()), audit)
     answer = asked(recorder, CHICAGO, question)
     assert recorder.opened == [CHICAGO]
     assert answer.citations == ()
@@ -210,12 +224,12 @@ def test_a_table_the_persona_lacks_is_refused_not_read_elsewhere(as_persona: AsP
     assert "chicago_contract_reconciliation" in refusal.reason
 
 
-def test_a_model_that_keeps_calling_tools_is_stopped(as_persona: AsPersona) -> None:
+def test_a_model_that_keeps_calling_tools_is_stopped(as_persona: AsPersona, audit: Audit) -> None:
     class Looping:
         def step(self, turn: Turn) -> ToolCall | Reply:
             return ToolCall(QUERY)
 
-    recorder = Recorder(as_persona, Looping())
+    recorder = Recorder(as_persona, Looping(), audit)
     answer = asked(recorder, CHICAGO)
     assert len(answer.citations) == LIMIT
     assert len(recorder.turns) == LIMIT + 1
@@ -223,7 +237,9 @@ def test_a_model_that_keeps_calling_tools_is_stopped(as_persona: AsPersona) -> N
     assert refusal.reason.startswith("the model made no reply")
 
 
-def test_one_ask_opens_one_connection_for_two_tool_calls(as_persona: AsPersona) -> None:
+def test_one_ask_opens_one_connection_for_two_tool_calls(
+    as_persona: AsPersona, audit: Audit
+) -> None:
     class Twice:
         def step(self, turn: Turn) -> ToolCall | Reply:
             calls = [QUERY, "duplicate-payment-amount-rate"]
@@ -231,7 +247,7 @@ def test_one_ask_opens_one_connection_for_two_tool_calls(as_persona: AsPersona) 
                 return ToolCall(calls[len(turn.results)])
             return Reply("done")
 
-    recorder = Recorder(as_persona, Twice())
+    recorder = Recorder(as_persona, Twice(), audit)
     answer = asked(recorder, CHICAGO)
     assert [c.query for c in answer.citations] == [QUERY, "duplicate-payment-amount-rate"]
     assert recorder.opened == [CHICAGO]

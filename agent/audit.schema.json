@@ -164,7 +164,7 @@
         "job": {"description": "The warehouse's reference to the job: a BigQuery job's project, location and id, or the local engine's run id.", "$ref": "#/$defs/token"},
         "at": {"description": "When the job started.", "$ref": "#/$defs/time"},
         "result": {
-          "description": "The seal of agent/audit.py's sealed_result: the columns, and the rows sorted by their canonical form, each cell the text the engine casts it to, or null; a rebuild matches it on the same engine.",
+          "description": "The seal of agent/audit.py's sealed_result: the columns, and the rows sorted by their canonical form, each cell as agent/audit.py's cell_text writes it, null or the text of the value the engine's driver returned; a rebuild matches it on the same engine and driver.",
           "$ref": "#/$defs/sealed"
         }
       }

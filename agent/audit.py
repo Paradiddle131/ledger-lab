@@ -1,4 +1,4 @@
-"""The audit log's checks: canonical form, digests, seals, the chain, the links and bound SQL.
+"""The audit log: canonical form, digests, seals, the chain, the links, bound SQL and the writer.
 
 A record (`agent/audit.schema.json`) is hashed over its canonical form, the JSON Canonicalization
 Scheme of RFC 8785 (keys sorted by their UTF-16 code units, no whitespace, strings in UTF-8 with
@@ -18,20 +18,45 @@ proposal's draft salt so the two seals are equal exactly when the approver saw t
 purge deletes that salt under both positions. Without the salt a seal confirms no guess at the
 value; with it, the value, or a result produced again by re-running a query on the same engine, is
 checked against the seal.
+
+The writer, `FileLog`, keeps the log as a file of one canonical record per line and the salt and
+value of each seal in a separate folder, one file per record position. What `FileLog.append` does,
+in this order, holding an exclusive `flock` on the log file:
+- reads the log, refusing one whose last line is torn or whose records do not verify
+  (`verify_chain`), and takes the next position and the last digest from it;
+- adds `seq`, `prev` and `digest` to the record and checks it (`check_record`): it validates against
+  `agent/audit.schema.json`, every time is a real instant, every run's SQL passes `check_bound`, the
+  kept values are exactly one per sealed field of its kind and each opens its field's seal;
+- writes the kept values to `<folder>/<seq>.json` through a temporary file, `fsync` and a rename,
+  replacing a file left at that position by an append that failed after it;
+- appends the record's line with one `O_APPEND` file descriptor and `fsync`s it; when the write or
+  the `fsync` raises, it truncates the log back to its length before the append and raises.
+
+Stated limits of the writer: the lock is advisory, so it keeps one writer at a time only among
+writers that take it; when the truncation fails too, the line can stay, whole or torn: a whole
+one is the record of a turn that showed no answer, and a torn one makes every later append refuse
+the log until it is repaired by hand; the log is read whole on each append; the folder of kept
+values is a plain folder, created with owner-only permissions, and nothing here encrypts it.
 """
 
+import fcntl
+import functools
 import hashlib
 import json
+import os
 import re
 import secrets
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from pathlib import Path
+from typing import Any, Protocol
 
 import rfc8785
 import sqlglot
+from jsonschema import Draft202012Validator
 from sqlglot import exp
 from sqlglot.errors import ParseError
+from sqlglot.expressions.core import Expression
 
 # The `prev` of the first record of the log.
 GENESIS = "0" * 64
@@ -201,3 +226,196 @@ def check_bound(sql: str, engine: str) -> None:
         for literal in tree.find_all(exp.Literal):
             if literal.is_string or literal.this not in ALLOWED_NUMBERS:
                 raise UnboundValue(f"a value in clear: {literal.sql()}")
+
+
+def bind(sql: str, engine: str) -> tuple[str, dict[str, Any]]:
+    """One SQL statement rewritten so every value it carries is a named parameter: each string
+    literal and each integer but 0 and 1 becomes `$v<n>`, a value met twice the same parameter (so a
+    grouped expression stays equal to its selected one), and the text is sqlglot's in the engine's
+    dialect. Refuses a text that is not one statement or carries a number that is not an integer,
+    and passes its result through `check_bound`."""
+    try:
+        trees = [tree for tree in sqlglot.parse(sql, read=DIALECTS[engine]) if tree is not None]
+    except ParseError as error:
+        raise UnboundValue(f"the SQL does not parse: {error}") from error
+    if len(trees) != 1:
+        raise UnboundValue(f"not one statement but {len(trees)}")
+    names: dict[tuple[type, Any], str] = {}
+
+    def lift(node: Expression) -> Expression:
+        if not isinstance(node, exp.Literal):
+            return node
+        if node.is_string:
+            value: Any = node.this
+        elif node.this in ALLOWED_NUMBERS:
+            return node
+        elif re.fullmatch(r"[0-9]+", node.this):
+            value = int(node.this)
+        else:
+            raise UnboundValue(f"a number the tool does not bind: {node.sql()}")
+        name = names.setdefault((type(value), value), f"v{len(names) + 1}")
+        return exp.Placeholder(this=name)
+
+    text = trees[0].transform(lift).sql(dialect=DIALECTS[engine])
+    check_bound(text, engine)
+    return text, {name: value for (_, value), name in names.items()}
+
+
+def cell_text(value: Any) -> str | None:
+    """A result cell as it is sealed: null for null, else Python's `str` of the value the engine's
+    driver returned, so a re-run through the same driver gives the same text."""
+    return None if value is None else str(value)
+
+
+def sealed_paths(record: Mapping[str, Any]) -> set[str]:
+    """The paths of a record's sealed fields, as its kept values are keyed."""
+    kind = record.get("kind")
+    if kind == "answer":
+        paths = {"question", "answer"}
+        for index, run in enumerate(record.get("runs", [])):
+            paths.add(f"runs/{index}/result")
+            if "parameters" in run.get("query", {}):
+                paths.add(f"runs/{index}/query/parameters")
+        return paths
+    if kind == "proposal":
+        return {"request", "inputs", "draft"}
+    if kind == "approval":
+        return {"seen"}
+    raise ValueError("a record of no known kind")
+
+
+def _at(record: Mapping[str, Any], path: str) -> Any:
+    value: Any = record
+    for step in path.split("/"):
+        value = value[int(step)] if isinstance(value, list) else value[step]
+    return value
+
+
+@functools.cache
+def _validator() -> Draft202012Validator:
+    schema = json.loads(Path(__file__).with_name("audit.schema.json").read_text(encoding="utf-8"))
+    return Draft202012Validator(schema)
+
+
+class RecordRefused(ValueError):
+    """A record the writer will not write; its message names fields, never their values."""
+
+
+def check_record(record: Mapping[str, Any], kept: Mapping[str, tuple[str, Any]]) -> None:
+    """Refuse a record that breaks the schema, holds a time that is no real instant or SQL that
+    fails `check_bound`, or whose kept values are not exactly one per sealed field, each opening
+    its field's seal. The messages name the failing fields only, never a value."""
+    failed = sorted("/".join(map(str, e.absolute_path)) for e in _validator().iter_errors(record))
+    if failed:
+        raise RecordRefused(f"the record breaks the schema at {failed}")
+    try:
+        check_times(record)
+    except ChainBroken:
+        raise RecordRefused("the record holds a time that is no real instant") from None
+    for index, run in enumerate(record.get("runs", [])):
+        try:
+            check_bound(run["query"]["text"], run["engine"])
+        except UnboundValue:
+            raise RecordRefused(f"run {index}: its SQL carries a value in clear") from None
+    paths = sealed_paths(record)
+    if set(kept) != paths:
+        raise RecordRefused(f"kept values for {sorted(kept)}, sealed fields {sorted(paths)}")
+    for path in sorted(paths):
+        salt, value = kept[path]
+        if _at(record, path) != seal(salt, value):
+            raise RecordRefused(f"the kept value of {path} does not open its seal")
+
+
+class AuditLog(Protocol):
+    def append(
+        self, body: Mapping[str, Any], kept: Mapping[str, tuple[str, Any]]
+    ) -> dict[str, Any]:
+        """Write one record of `body`'s fields, adding `seq`, `prev` and `digest`, with `kept`, the
+        salt and value of each of its seals by field path; return the record, or raise."""
+        ...
+
+
+def _read_all(fd: int, size: int) -> bytes:
+    chunks, offset = [], 0
+    while offset < size:
+        chunk = os.pread(fd, size - offset, offset)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        offset += len(chunk)
+    return b"".join(chunks)
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        view = view[written:]
+
+
+def read_log(data: bytes) -> list[dict[str, Any]]:
+    """The records of a log file's bytes, refusing a torn last line; the chain is not checked."""
+    if not data:
+        return []
+    if not data.endswith(b"\n"):
+        raise ChainBroken("the log ends in a torn line")
+    return [load_record(line) for line in data.decode("utf-8").split("\n")[:-1]]
+
+
+class FileLog:
+    """The log as a file of canonical lines at `path`, and the salt and value of each seal in
+    `kept`, one file per record position; see the module's docstring for the order of an append."""
+
+    def __init__(self, path: Path, kept: Path) -> None:
+        self.path = path
+        self.kept = kept
+
+    def append(
+        self, body: Mapping[str, Any], kept: Mapping[str, tuple[str, Any]]
+    ) -> dict[str, Any]:
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            size = os.fstat(fd).st_size
+            records = read_log(_read_all(fd, size))
+            prev = verify_chain(records)
+            record = {key: value for key, value in body.items() if key not in ("seq", "prev")}
+            record |= {"seq": len(records), "prev": prev}
+            record.pop("digest", None)
+            record["digest"] = record_digest(record)
+            check_record(record, kept)
+            self._keep(record["seq"], kept)
+            line = canonical(record) + b"\n"
+            try:
+                _write_all(fd, line)
+                os.fsync(fd)
+            except BaseException:
+                os.ftruncate(fd, size)
+                os.fsync(fd)
+                raise
+            return record
+        finally:
+            os.close(fd)
+
+    def _keep(self, seq: int, kept: Mapping[str, tuple[str, Any]]) -> None:
+        self.kept.mkdir(mode=0o700, parents=True, exist_ok=True)
+        final = self.kept / f"{seq}.json"
+        temporary = self.kept / f".{seq}.json.tmp"
+        data = canonical({path: [salt, value] for path, (salt, value) in kept.items()})
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            _write_all(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(temporary, final)
+        folder = os.open(self.kept, os.O_RDONLY)
+        try:
+            os.fsync(folder)
+        finally:
+            os.close(folder)
+
+
+class AuditWriteFailed(RuntimeError):
+    """A turn's audit record could not be written, so the turn shows no answer. Its message names
+    the kind of failure only, and it carries no cause, so no value of the turn travels with it."""
