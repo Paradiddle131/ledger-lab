@@ -10,9 +10,11 @@ policies, then replaces its rows from the mart in one transaction, so the table,
 policies, is never replaced, and rows never sit in it without them.
 
 One policy per product table and entity, `entity_id = '<entity>'`, granted to the personas with a
-`read` or `edit` grant on that entity's product (`access/identities.py`); an aggregate grant gets
-none. One more, `TRUE`, is granted to the agent account that publishes, which reads every row of
-the mart to copy it. BigQuery shows a user the union of the policies granting it and no row of a
+`read` or `edit` grant on that entity's product (`access/identities.py`) that read every tagged
+column of the table in clear (`access/columns.yaml`); an aggregate grant gets none, and a tag's
+masked readers get no rows of the clear table, where a policy tag is only a second lock. One more,
+`TRUE`, is granted to the agent account that publishes, which reads every row of the mart to
+copy it. BigQuery shows a user the union of the policies granting it and no row of a
 table with policies none of which does.
 
 The project comes from `LEDGER_LAB_GCP_PROJECT` and the location from `LEDGER_LAB_BQ_LOCATION`;
@@ -37,6 +39,7 @@ from access.identities import identity
 
 HERE = Path(__file__).resolve().parent
 PERSONAS = HERE / "personas.yaml"
+COLUMNS = HERE / "columns.yaml"
 SOURCE_DATASET = "intermediate"
 ENTITY = "entity_id"
 AGENT_POLICY = "agent_publishes_all_rows"
@@ -95,9 +98,30 @@ def entity_tables(catalogue: Mapping[str, Any]) -> list[tuple[str, str]]:
     ]
 
 
-def policies(catalogue: Mapping[str, Any]) -> list[Policy]:
+def clear_readers(columns: Mapping[str, Any], product: str, table: str) -> frozenset[str] | None:
+    """The personas that read every tagged column of a product table in clear
+    (`access/columns.yaml`), or None for a table with no tagged column, which every reader reads as
+    it is. A tag's other readers read it masked, so they get no rows of the clear table: a policy
+    tag on its column is a second lock, not the only one."""
+    tagged = {
+        tag
+        for column, tag in (
+            columns.get("products", {}).get(product, {}).get("columns", {}) or {}
+        ).items()
+        if column.split(".", 1)[0] == table
+    }
+    if not tagged:
+        return None
+    readers = [set(t["clear"]) for t in columns["tags"] if t["id"] in tagged]
+    if len(readers) != len(tagged):
+        raise RowPolicyError(f"{product}.{table} carries a tag columns.yaml does not define")
+    return frozenset(set.intersection(*readers))
+
+
+def policies(catalogue: Mapping[str, Any], columns: Mapping[str, Any]) -> list[Policy]:
     """The row access policies of every entity-scoped product table: per entity with a reader,
-    one granting its rows to those readers, then the agent's over all rows."""
+    one granting its rows to those readers that read the table's tagged columns in clear, then the
+    agent's over all rows."""
     personas = [p["id"] for p in catalogue["personas"]]
     entities = [e["id"] for e in catalogue["entities"]]
     for name in (*personas, *entities):
@@ -109,8 +133,14 @@ def policies(catalogue: Mapping[str, Any]) -> list[Policy]:
         product = next(
             p["id"] for p in catalogue["data_products"] if p["id"].replace("-", "_") == dataset
         )
+        clear = clear_readers(columns, product, table)
         for entity in entities:
-            readers = tuple(p for p in personas if entity in (reads[p].get(product) or frozenset()))
+            readers = tuple(
+                p
+                for p in personas
+                if entity in (reads[p].get(product) or frozenset())
+                and (clear is None or p in clear)
+            )
             if readers:
                 found.append(
                     Policy(
@@ -244,9 +274,15 @@ def create(catalogue: Mapping[str, Any], project: str, where: str, run: Run = ru
         run(query(project, where, create_sql(project, dataset, table)))
 
 
-def publish(catalogue: Mapping[str, Any], project: str, where: str, run: Run = run_tool) -> None:
+def publish(
+    catalogue: Mapping[str, Any],
+    columns: Mapping[str, Any],
+    project: str,
+    where: str,
+    run: Run = run_tool,
+) -> None:
     """Each governed copy's rows from its mart, once its policies and columns check out."""
-    generated = policies(catalogue)
+    generated = policies(catalogue, columns)
     for dataset, table in entity_tables(catalogue):
         expected = [p for p in generated if (p.dataset, p.table) == (dataset, table)]
         found = rows(run(query(project, where, policies_sql(project, dataset, table))))
@@ -257,9 +293,11 @@ def publish(catalogue: Mapping[str, Any], project: str, where: str, run: Run = r
         run(query(project, where, publish_sql(project, dataset, table)))
 
 
-def plan(catalogue: Mapping[str, Any], project: str, agent: str) -> list[str]:
+def plan(
+    catalogue: Mapping[str, Any], columns: Mapping[str, Any], project: str, agent: str
+) -> list[str]:
     """The statements the owner runs: every generated policy, created or replaced."""
-    return [p.create(project, agent) for p in policies(catalogue)]
+    return [p.create(project, agent) for p in policies(catalogue, columns)]
 
 
 def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
@@ -270,10 +308,11 @@ def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
         print("usage: python -m access.row_policies plan|apply|create|publish", file=sys.stderr)
         return 2
     catalogue = load()
+    columns = load(COLUMNS)
     try:
         project, where = lab(env)
         if command in ("plan", "apply"):
-            statements = plan(catalogue, project, agent_account(env))
+            statements = plan(catalogue, columns, project, agent_account(env))
             if command == "plan":
                 print("\n".join(statements))
             for statement in statements if command == "apply" else []:
@@ -281,7 +320,7 @@ def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
         elif command == "create":
             create(catalogue, project, where)
         else:
-            publish(catalogue, project, where)
+            publish(catalogue, columns, project, where)
     except (RowPolicyError, LoadError) as error:
         print(f"row-policies: {error}", file=sys.stderr)
         return 1

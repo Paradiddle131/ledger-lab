@@ -29,6 +29,7 @@ from access.row_policies import (
     policies,
     publish,
 )
+from tests.conftest import load_columns
 
 PROJECT = "the-lab"
 WHERE = "us-central1"
@@ -44,13 +45,20 @@ def readers(access: dict[str, Any], product: str, entity: str) -> set[str]:
     }
 
 
+def clear(columns: dict[str, Any], product: str) -> set[str]:
+    """Who reads every tag on the product's columns in clear."""
+    tags = set(columns["products"][product]["columns"].values())
+    return set.intersection(*(set(t["clear"]) for t in columns["tags"] if t["id"] in tags))
+
+
 def test_each_entity_policy_grants_its_rows_to_the_personas_that_read_them(
     access: dict[str, Any],
+    columns: dict[str, Any],
 ) -> None:
-    found = policies(access)
+    found = policies(access, columns)
     by_name = {p.name: p for p in found}
     for entity in (e["id"] for e in access["entities"]):
-        want = readers(access, "payments", entity)
+        want = readers(access, "payments", entity) & clear(columns, "payments")
         name = f"{entity.replace('-', '_')}_rows"
         if not want:
             assert name not in by_name
@@ -65,40 +73,55 @@ def test_each_entity_policy_grants_its_rows_to_the_personas_that_read_them(
     assert [p.name for p in found][-1] == AGENT_POLICY
 
 
-def test_an_aggregate_grant_gets_no_policy(access: dict[str, Any]) -> None:
+def test_an_aggregate_grant_gets_no_policy(access: dict[str, Any], columns: dict[str, Any]) -> None:
     aggregate = {g["persona"] for g in access["grants"] if g["product"] == "payments"} - {
         p for e in access["entities"] for p in readers(access, "payments", e["id"])
     }
     assert aggregate, "the catalogue has an aggregate-only reader of payments to hold"
-    assert not aggregate & {p for policy in policies(access) for p in policy.personas}
+    assert not aggregate & {p for policy in policies(access, columns) for p in policy.personas}
 
 
-def test_a_new_grant_moves_the_policies(access: dict[str, Any]) -> None:
+def test_a_new_grant_moves_the_policies(access: dict[str, Any], columns: dict[str, Any]) -> None:
     changed = copy.deepcopy(access)
     changed["grants"].append(
         {
-            "persona": "accountant-chicago",
+            "persona": "payables-clerk",
             "entity": "nl-government",
             "product": "payments",
             "access": "read",
         }
     )
-    nl = next(p for p in policies(changed) if p.name == "nl_government_rows")
-    assert "accountant-chicago" in nl.personas
-    before = next(p for p in policies(access) if p.name == "nl_government_rows")
-    assert "accountant-chicago" not in before.personas
+    nl = next(p for p in policies(changed, columns) if p.name == "nl_government_rows")
+    assert "payables-clerk" in nl.personas
+    before = next(p for p in policies(access, columns) if p.name == "nl_government_rows")
+    assert "payables-clerk" not in before.personas
 
 
-def test_the_owner_statements_grant_each_policy_to_its_accounts(access: dict[str, Any]) -> None:
-    statements = plan(access, PROJECT, AGENT)
-    assert len(statements) == len(policies(access))
+def test_a_masked_reader_gets_no_rows_of_the_clear_table_until_it_reads_every_tag_clear(
+    access: dict[str, Any], columns: dict[str, Any]
+) -> None:
+    chicago = next(p for p in policies(access, columns) if p.name == "chicago_rows")
+    assert "accountant-chicago" not in chicago.personas
+    changed = copy.deepcopy(columns)
+    for tag in changed["tags"]:
+        tag["clear"].append("accountant-chicago")
+        tag["masked"].remove("accountant-chicago")
+    chicago = next(p for p in policies(access, changed) if p.name == "chicago_rows")
+    assert "accountant-chicago" in chicago.personas
+
+
+def test_the_owner_statements_grant_each_policy_to_its_accounts(
+    access: dict[str, Any], columns: dict[str, Any]
+) -> None:
+    statements = plan(access, columns, PROJECT, AGENT)
+    assert len(statements) == len(policies(access, columns))
     chicago = next(s for s in statements if "`chicago_rows`" in s)
     assert chicago.startswith(
         f"CREATE OR REPLACE ROW ACCESS POLICY `chicago_rows` ON `{PROJECT}.payments.payments`"
         " GRANT TO ("
     )
     assert chicago.endswith(" FILTER USING (entity_id = 'chicago');")
-    for persona in readers(access, "payments", "chicago"):
+    for persona in readers(access, "payments", "chicago") & clear(columns, "payments"):
         assert f'"serviceAccount:{persona}@{PROJECT}.iam.gserviceaccount.com"' in chicago
     agent = next(s for s in statements if f"`{AGENT_POLICY}`" in s)
     assert f'"serviceAccount:{AGENT}@{PROJECT}.iam.gserviceaccount.com"' in agent
@@ -160,9 +183,10 @@ COLUMNS = [
 
 def test_a_publish_checks_then_replaces_the_rows_in_one_transaction(
     access: dict[str, Any],
+    columns: dict[str, Any],
 ) -> None:
-    warehouse = Warehouse(reported(policies(access)), COLUMNS)
-    publish(access, PROJECT, WHERE, warehouse)
+    warehouse = Warehouse(reported(policies(access, columns)), COLUMNS)
+    publish(access, columns, PROJECT, WHERE, warehouse)
     *checks, write = warehouse.statements
     assert all(s.startswith("SELECT ") for s in checks)
     assert write == (
@@ -193,18 +217,20 @@ EDITS: dict[str, Callable[[list[dict[str, str]]], list[dict[str, str]]]] = {
 
 @pytest.mark.parametrize("name", list(EDITS))
 def test_a_copy_without_exactly_its_policies_gets_no_rows(
-    access: dict[str, Any], name: str
+    access: dict[str, Any], columns: dict[str, Any], name: str
 ) -> None:
-    warehouse = Warehouse(EDITS[name](reported(policies(access))), COLUMNS)
+    warehouse = Warehouse(EDITS[name](reported(policies(access, columns))), COLUMNS)
     with pytest.raises(RowPolicyError, match="no rows are published"):
-        publish(access, PROJECT, WHERE, warehouse)
+        publish(access, columns, PROJECT, WHERE, warehouse)
     assert not any("INSERT" in s or "DELETE" in s for s in warehouse.statements)
 
 
-def test_a_copy_whose_columns_differ_from_the_mart_gets_no_rows(access: dict[str, Any]) -> None:
-    warehouse = Warehouse(reported(policies(access)), COLUMNS, COLUMNS[:1])
+def test_a_copy_whose_columns_differ_from_the_mart_gets_no_rows(
+    access: dict[str, Any], columns: dict[str, Any]
+) -> None:
+    warehouse = Warehouse(reported(policies(access, columns)), COLUMNS, COLUMNS[:1])
     with pytest.raises(RowPolicyError, match="columns differ"):
-        publish(access, PROJECT, WHERE, warehouse)
+        publish(access, columns, PROJECT, WHERE, warehouse)
     assert not any("INSERT" in s or "DELETE" in s for s in warehouse.statements)
 
 
@@ -251,6 +277,7 @@ def test_each_human_persona_reads_only_its_entities_rows_of_payments(
     from gcp_project import lab_project
 
     granted = identity(access, human).reads.get("payments")
+    in_clear = human in clear(load_columns(), "payments")
     sql = f"SELECT DISTINCT entity_id FROM `{lab_project()}.payments.payments`"  # noqa: S608
     session = as_persona_on_bigquery(human)
     if granted is None:
@@ -260,5 +287,5 @@ def test_each_human_persona_reads_only_its_entities_rows_of_payments(
             pytest.fail("a persona with no row grant on payments was not refused")
         return
     seen = {row[0] for row in session.query(sql).rows}
-    if seen != set(granted):
+    if seen != (set(granted) if in_clear else set()):
         pytest.fail("the persona read other entities' rows than its grants give")
