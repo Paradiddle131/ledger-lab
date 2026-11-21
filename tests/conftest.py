@@ -18,6 +18,9 @@ from jsonschema import Draft202012Validator
 from access.bigquery import PersonaQueryError, PersonaSession, chain, mint
 from access.compile import open_persona
 from access.identities import identity
+from agent.ask import Audit
+from agent.audit import FileLog
+from tests.models.dbt_build import SAMPLED_SOURCES, git_out
 
 if TYPE_CHECKING:
     from tests.models.dbt_build import Build
@@ -152,6 +155,25 @@ def as_persona(
         db.close()
     for directory in directories:
         shutil.rmtree(directory)
+
+
+def sample_build_data(build: "Build") -> dict[str, Any]:
+    """An audit record's `data` for the session's sample build (`tests/models/dbt_build.py`)."""
+    from tests.models.dbt_build import build_data
+
+    return build_data(build.cwd)
+
+
+@pytest.fixture
+def audit(build: "Build", tmp_path: Path) -> Audit:
+    """Where an `ask` in a test writes its record: a `FileLog` under the test's own folder, with
+    the checkout's HEAD as the release and the session's sample build as the data."""
+    log = FileLog(tmp_path / "audit" / "log.jsonl", tmp_path / "audit" / "kept")
+    log.path.parent.mkdir()
+    return Audit(log, git_out("rev-parse", "HEAD"), sample_build_data(build))
+
+
+__all__ = ["SAMPLED_SOURCES", "git_out"]
 
 
 @pytest.fixture

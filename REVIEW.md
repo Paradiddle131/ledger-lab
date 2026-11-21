@@ -17,9 +17,10 @@ Each item is backticked globs and its lenses only, a form every version of `tier
 - `platform/gcp/**`; lenses: guardrail-reviewer, control-prober
 - `platform/cost_check.py`, `platform/fences.py`, `platform/gcp_project.py`, `models/profiles.yml`, `tests/platform/test_cost_check.py`, `tests/platform/test_fences.py`, `tests/platform/test_gcp_project.py`; lenses: guardrail-reviewer, control-prober
 - `platform/fresh_clone.py`, `tests/test_fresh_clone.py`, `tests/test_secrets.py`, `.gitignore`, `.process-ids`, `Makefile`, `pyproject.toml`, `models/contracts/gate.py`, `models/contracts/engine.py`, `semantics/offline/**`; lenses: guardrail-reviewer, control-prober
-- `agent/evals/**`, `tests/agent/test_adversarial_cases.py`; lenses: control-prober
+- `agent/evals/**`, `tests/agent/test_adversarial_cases.py`, `tests/agent/test_evaluation.py`; lenses: control-prober
 - `agent/audit.py`, `agent/audit.schema.json`, `tests/agent/test_audit_schema.py`, `tests/agent/audit_examples.yaml`; lenses: leak-hunter, control-prober
 - `docs/agents/**`, `platform/next_item.py`, `tests/platform/test_next_item.py`; lenses: guardrail-reviewer, control-prober
+- `agent/policy/**`, `tests/agent/test_tool_policy.py`, `semantics/verified_queries.yaml`, `semantics/verified_queries.schema.json`, `semantics/context.json`, `semantics/export.py`, `tests/semantics/test_verified_queries.py`, `tests/semantics/test_metric_context.py`; lenses: guardrail-reviewer, control-prober, claims-auditor
 
 ## What each item guards
 
@@ -34,6 +35,7 @@ Each item is backticked globs and its lenses only, a form every version of `tier
 9. The lab project's definitions: its grants, budget, quotas and kill switch.
 10. Cost and fence checks: the month-to-date cost, the spend fences read offline, the module that names the lab's own project, and the dbt profile that reads the same variable and caps every BigQuery job's billed bytes.
 11. The guards of a public repo and its gates: the fresh-clone and secret scans, the ignore rules that keep data out of git, the process-id exemptions, the `make check` targets and their configuration (pytest's markers and deselection, ruff's rules, pyright's scope), the contract gate, and the refusal of network calls around the metric tools.
-12. The agent's frozen adversarial cases and the test that scores them.
+12. The agent's frozen adversarial cases and golden set, the scorer, and the tests that check them.
 13. The audit record: sealed, hash-chained records that hold values their readers may not see, its schema, examples and tests.
 14. The unattended runs' profile (standing permission, merge policy, queue, gates), the file that declines the session's GCP project, and the picker that runs the profile's queue rule with its tests; the profile is on the floor already, listed for its lenses.
+15. The agent's tool-call policy, which denies by default, and the verified answers and metric context the agent reads as truth, with their tests.

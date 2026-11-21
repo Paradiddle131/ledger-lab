@@ -20,8 +20,13 @@ controls:
     layer: Identity and delegation
     owner: agent-operator
     asserts: Every agent query runs on the asking persona's identity; two personas asking the same question get different rows, and a question without a user identity gets no answer.
-    proven_by: [tests/agent/test_identity.py::test_two_personas_same_question_different_rows]
+    proven_by:
+      - tests/agent/test_ask.py::test_two_personas_asking_the_same_question_get_different_rows
+      - tests/agent/test_ask.py::test_a_question_without_a_persona_gets_no_answer
     status: not-implemented
+    awaits:
+      parameter: bigquery
+      until_then: "The tests pass on the local engine only: the agent's tool runs on the DuckDB database compiled for the asking persona (access/compile.py), where the Chicago accountant and the UK transport accountant asking the duplicate-payment-rate question get different rows, and a question asked with a value that is not a string, or with a string that is not exactly a persona id of access/personas.yaml (an empty, blank, unknown or space-padded id among those tested), raises before the model is asked or a connection is opened. BigQuery, where the persona's own warehouse grants would decide, is skipped: the agent has no BigQuery mode yet."
   - id: no-persona-holds-conflicting-duties
     layer: Identity and delegation
     owner: group-controller
@@ -66,9 +71,12 @@ controls:
   - id: untrusted-content-cannot-instruct
     layer: Injection and tool authorisation
     owner: agent-operator
-    asserts: An instruction planted in a cell, a column description or a glossary entry changes no tool call; tools are read-only and denied by default.
-    proven_by: [tests/agent/test_injection.py::test_planted_instructions_are_ignored]
-    status: not-implemented
+    asserts: The own agent's model plans its tool calls on a turn holding the question and the verified queries only, and a call it then makes that is not in the plan is refused and not put to the tool policy; an instruction planted in a cell of the persona's database, a column description or a glossary entry passed to the agent, read by a test model that obeys it, to call a tool the policy does not declare, the write tool, a query the metric context lacks, a verified query the asking persona may run, or the question's own query once more, comes back refused as unplanned, and the queries run, with the metric, version, SQL, columns and rows each cites (the planted cell put back), and the turn's audit record equal those of the same question asked with nothing planted; so do three planted calls in one glossary entry, and twenty across a glossary entry, a column description and a cell or all in a cell, where after five refused calls the agent asks the model no more and runs the planned query itself; the text of the reply is not checked.
+    proven_by:
+      - tests/agent/test_injection.py::test_planted_instructions_are_ignored
+      - tests/agent/test_injection.py::test_three_planted_calls_leave_the_questions_query_to_run
+      - tests/agent/test_injection.py::test_more_planted_calls_than_the_refusal_limit_leave_the_questions_query_to_run
+    status: implemented
   - id: no-outbound-channel-carries-data
     layer: Injection and tool authorisation
     owner: agent-operator
@@ -84,9 +92,11 @@ controls:
   - id: scored-by-execution
     layer: Evaluation and monitoring
     owner: metric-owner
-    asserts: Answers are scored by executing their queries against a golden set, and a metric change that moves the score is reported.
-    proven_by: [tests/agent/test_evaluation.py::test_metric_change_shows_as_drift]
-    status: not-implemented
+    asserts: The scorer (agent/evals/score.py) scores each answer to the golden set (agent/evals/golden.yaml) by running the SQL its citations name again on the asking persona's connection and comparing what it returns with the result frozen there, so an answer whose text and reported rows hold the expected figure while its cited SQL returns another scores wrong; on the sample build the committed metric context scores every case right, and two metric definitions changed in a copy of the context (the duplicate amount rate taken by rows, constant-currency spend kept across bases) score exactly the cases they change wrong-and-sure, which its report names with exit status 1.
+    proven_by:
+      - tests/agent/test_evaluation.py::test_metric_change_shows_as_drift
+      - tests/agent/test_evaluation.py::test_the_score_comes_from_running_the_cited_sql
+    status: implemented
   - id: landed-file-breaks-fail-its-quality-suite
     layer: Evaluation and monitoring
     owner: group-controller
@@ -173,9 +183,9 @@ controls:
   - id: answer-rebuilt-from-audit
     layer: Accountability
     owner: group-controller
-    asserts: One answer can be rebuilt end to end from its audit record alone (agent/audit.schema.json), by someone who did not produce it, re-running the record's query as its persona over the build it names (its commit, variables and target over the landed files it lists by digest) and matching the result, the question and the answer to the record's seals, with the record's chain verified up to it.
+    asserts: "One answer the own agent gave can be rebuilt from its audit record (agent/audit.schema.json) and the salts and values the log keeps apart from it, read from disk with none of the state of the run that wrote them: the chain verifies up to the record, the record validates and each kept value opens its seal; the build it names is checked against the checkout (its release and build commit are HEAD, the dbt project holds no change since, each file it lists has the SHA-256 it lists); the warehouse is built again from the record's target and dbt variables; each run's SQL, re-run with its kept bound values as the persona the run names, gives the result its seal holds; and the release's scripted model, asked the kept question and shown those results, calls the record's queries in its order and replies with the text the answer's seal holds. A changed result, query, persona, bound value, question, answer, build commit, file digest or earlier record, each tested, stops the rebuild. As limits, it is proven on the local engine over the committed samples, whose record lists the two Chicago samples by digest and no other seed; the code is named by its commit only, so changes to the working tree outside the dbt project are not seen; the build's run id is not matched, since a new build takes a new one; and the log's head digest is not yet kept outside the writer's reach, so whoever can write the log and the kept values can replace its records from any position on with others that rebuild."
     proven_by: [tests/agent/test_audit.py::test_answer_rebuilt_from_its_audit_record]
-    status: not-implemented
+    status: implemented
   - id: spend-is-capped
     layer: Cost and abuse
     owner: agent-operator
