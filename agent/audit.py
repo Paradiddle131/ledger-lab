@@ -65,7 +65,8 @@ import os
 import re
 import secrets
 import stat
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -370,6 +371,15 @@ class AuditLog(Protocol):
         salt and value of each of its seals by field path; return the record, or raise."""
         ...
 
+    def records(self) -> list[dict[str, Any]]:
+        """The log's records in order, its chain verified; raise when it cannot be read."""
+        ...
+
+    def turn(self, persona: str) -> AbstractContextManager[None]:
+        """Held for the whole of one of `persona`'s turns, so the persona's turns run one at a
+        time and each counts the records of those before it; raise when it cannot be held."""
+        ...
+
 
 def _read_all(fd: int, size: int) -> bytes:
     chunks, offset = [], 0
@@ -434,6 +444,36 @@ class FileLog:
                     self._forget(record["seq"])
                 raise
             return record
+        finally:
+            os.close(fd)
+
+    def records(self) -> list[dict[str, Any]]:
+        """The log's records under a shared `flock`, refusing a torn last line or a chain that does
+        not verify; a log not yet written holds none."""
+        try:
+            fd = os.open(self.path, os.O_RDONLY)
+        except FileNotFoundError:
+            return []
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            records = read_log(_read_all(fd, os.fstat(fd).st_size))
+            verify_chain(records)
+            return records
+        finally:
+            os.close(fd)
+
+    @contextlib.contextmanager
+    def turn(self, persona: str) -> Iterator[None]:
+        """An exclusive `flock` on the persona's lock file, held while the block runs: one file per
+        persona, named by the SHA-256 of its id, in an owner-only folder beside the log."""
+        folder = self.path.with_name(f"{self.path.name}.turns")
+        with contextlib.suppress(FileExistsError):
+            folder.mkdir(mode=0o700)
+        name = hashlib.sha256(persona.encode("utf-8")).hexdigest()
+        fd = os.open(folder / name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
         finally:
             os.close(fd)
 
