@@ -4,7 +4,7 @@
 LOADOUT ?= $(or $(shell sed -n 's/^The collection .* is cloned at `\([^`]*\)`.*/\1/p' $(HOME)/.claude/CLAUDE.md 2>/dev/null),../loadout)
 GUARDS := $(LOADOUT)/cloud/githooks
 
-.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test warehouse-parity bigquery-personas stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
+.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test warehouse-parity bigquery-personas bigquery-row-policies stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
 
 check: lint typecheck test ids portable scan contract metric-versions
 	@echo "make check: all passed"
@@ -101,6 +101,11 @@ warehouse-parity: sync
 # stubs, under the report options that add most, to hold that a failure names the persona alone.
 bigquery-personas: sync
 	uv run pytest -m bigquery_persona tests/access/test_bigquery_personas.py
+
+# Each human persona's read of the payments product's governed copy on BigQuery, as the persona:
+# exactly its granted entities' rows, or a refusal without a row grant (access/row_policies.py).
+bigquery-row-policies: sync
+	uv run pytest -m bigquery_persona tests/access/test_row_policies.py
 
 # The container stack: the shared database always, one more service per PROFILE=<name>.
 # Each checkout is its own Compose project (containers, network, volume) and the database takes a
