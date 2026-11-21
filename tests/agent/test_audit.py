@@ -581,7 +581,7 @@ def opened_path(fd: int) -> str:
     return os.readlink(f"/proc/self/fd/{fd}")
 
 
-def failing(case: str, log: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def failing(case: str, log: FileLog, monkeypatch: pytest.MonkeyPatch) -> None:
     """Make one step of the next append raise."""
     write, fsync = agent.audit._write_all, os.fsync
 
@@ -594,8 +594,10 @@ def failing(case: str, log: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     def fsync_failing(fd: int) -> None:
         path = opened_path(fd)
-        if (case == "the line's fsync" and path == str(log)) or (
-            case == "the temporary file's fsync" and path.endswith(".tmp")
+        if (
+            (case == "the line's fsync" and path == str(log.path))
+            or (case == "the temporary file's fsync" and path.endswith(".tmp"))
+            or (case == "the folder's fsync" and path == str(log.kept))
         ):
             raise OSError("fsync failed")
         fsync(fd)
@@ -619,6 +621,7 @@ def failing(case: str, log: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         "the temporary file's write",
         "the temporary file's fsync",
         "the rename",
+        "the folder's fsync",
     ],
 )
 def test_a_failed_append_leaves_no_value_of_its_turn_on_disk(
@@ -630,7 +633,7 @@ def test_a_failed_append_leaves_no_value_of_its_turn_on_disk(
     ask(CHICAGO, UNANSWERED, as_persona=as_persona, audit=audit)
     before = audit.log.path.read_bytes()
     with monkeypatch.context() as patch:
-        failing(case, audit.log.path, patch)
+        failing(case, audit.log, patch)
         with pytest.raises(AuditWriteFailed):
             ask(CHICAGO, f"{QUESTION} {MARKER}", as_persona=as_persona, audit=audit)
     assert audit.log.path.read_bytes() == before
@@ -743,6 +746,31 @@ def test_a_leftover_temporary_file_is_replaced_not_followed(
     kept = audit.log.kept / "0.json"
     assert not kept.is_symlink() and stat.S_IMODE(kept.stat().st_mode) == 0o600
     assert sorted(f.name for f in audit.log.kept.iterdir()) == ["0.json"]
+
+
+def test_a_temporary_link_that_survives_to_the_open_is_refused_not_followed(
+    as_persona: AsPersona, audit: Audit, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the removal of a leftover temporary file made to do nothing, the planted link reaches
+    the open, which refuses it (`O_EXCL`, `O_NOFOLLOW`): no answer, nothing written through it."""
+    assert isinstance(audit.log, FileLog)
+    audit.log.kept.mkdir(mode=0o700)
+    target = tmp_path / "planted"
+    target.write_text("planted")
+    link = audit.log.kept / ".0.json.tmp"
+    link.symlink_to(target)
+    unlink = Path.unlink
+
+    def kept_links(self: Path, missing_ok: bool = False) -> None:
+        if self != link:
+            unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", kept_links)
+    with pytest.raises(AuditWriteFailed, match="FileExistsError"):
+        ask(CHICAGO, f"{QUESTION} {MARKER}", as_persona=as_persona, audit=audit)
+    assert target.read_text() == "planted"
+    assert audit.log.path.read_bytes() == b""
+    assert not (audit.log.kept / "0.json").exists()
 
 
 # Strings in other quoting forms

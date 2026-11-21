@@ -59,7 +59,8 @@ Stated limits:
   and data are the caller's word, not checked here against the code or the connection;
 - only `Exception` is caught for a `failed` record: a `KeyboardInterrupt`, `SystemExit` or other
   `BaseException` during the turn writes no record (and returns no answer); so does an exception
-  loading the metric context or building the model, before the turn starts;
+  reading a malformed personas catalogue, loading the metric context or building the model, before
+  the turn starts;
 - a run the engine refused is not among the record's runs, and a turn with only such runs is
   recorded as `abstained`;
 - the log's head digest is not yet anchored outside the writer's reach, so whoever can write the

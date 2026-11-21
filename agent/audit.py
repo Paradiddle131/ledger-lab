@@ -31,20 +31,22 @@ in this order, holding an exclusive `flock` on the log file:
   group or others, or that is a link, and creates a missing one with owner-only permissions;
 - writes the kept values to `<folder>/<seq>.json` through a temporary file: it removes a temporary
   file left at that name, creates it anew (`O_EXCL`, `O_NOFOLLOW`, mode 0600), writes, `fsync`s and
-  renames it over the position's file, replacing one left by an append that failed after it; when
-  the write, the `fsync` or the rename raises, it removes the temporary file and raises;
+  renames it over the position's file, replacing one left by an append that failed after it, and
+  `fsync`s the folder; when the write, the `fsync`, the rename or the folder's `fsync` raises, it
+  removes the temporary file and the position's file, tries to `fsync` the folder and raises;
 - appends the record's line with one `O_APPEND` file descriptor and `fsync`s it; when the write or
   the `fsync` raises, it truncates the log back to its length before the append, removes the
-  position's file of kept values, `fsync`s the folder and raises.
+  position's file of kept values, tries to `fsync` the folder and raises.
 
 Stated limits of the writer: the lock is advisory, so it keeps one writer at a time only among
-writers that take it; when a clean-up step itself raises (the truncation, a removal or an `fsync`
-of it), its error is raised in place of the first and what it was cleaning can stay: a whole line
-is then the record of a turn that showed no answer, a torn one makes every later append refuse the
-log until it is repaired by hand, and a temporary or position's file of kept values holds that
-turn's values in clear with no record naming it; a crash of the process between a write and its
-clean-up leaves the same; the log is read whole on each append; the folder's mode is checked, its
-parents' are not, and nothing here encrypts the kept values.
+writers that take it; the folder's `fsync` after a removal is tried and its failure not raised, so
+the removal may not survive a crash; when a clean-up step itself raises (the truncation, its
+`fsync` or a removal), its error is raised in place of the first and what it was cleaning can stay:
+a whole line is then the record of a turn that showed no answer, a torn one makes every later
+append refuse the log until it is repaired by hand, and a temporary or position's file of kept
+values holds that turn's values in clear with no record naming it; a crash of the process between a
+write and its clean-up leaves the same; the log is read whole on each append; the folder's mode is
+checked, its parents' are not, and nothing here encrypts the kept values.
 """
 
 import contextlib
@@ -223,15 +225,13 @@ def verify_links(records: Sequence[Mapping[str, Any]]) -> None:
         decided.add(named)
 
 
-# String forms other than a plain quoted literal, as sqlglot parses them: N'...', e'...', $$...$$,
-# hexadecimal, bit and Unicode strings.
+# String forms other than a plain quoted literal, as sqlglot parses them, each with a test: on
+# duckdb N'...', e'...' and $$...$$; on bigquery 0x..., b'...' and r'...'.
 OTHER_STRINGS = (
     exp.National,
     exp.ByteString,
     exp.RawString,
     exp.HexString,
-    exp.BitString,
-    exp.UnicodeString,
 )
 
 
@@ -414,9 +414,10 @@ class FileLog:
             record["digest"] = record_digest(record)
             check_record(record, kept)
             self._keep(record["seq"], kept)
-            line = canonical(record) + b"\n"
+            # From here the position's kept values are on disk: any step that raises before the
+            # line is durable truncates the log back and removes them.
             try:
-                _write_all(fd, line)
+                _write_all(fd, canonical(record) + b"\n")
                 os.fsync(fd)
             except BaseException:
                 try:
@@ -460,15 +461,20 @@ class FileLog:
             finally:
                 os.close(fd)
             os.replace(temporary, final)
+            self._sync_folder()
         except BaseException:
-            temporary.unlink(missing_ok=True)
+            try:
+                temporary.unlink(missing_ok=True)
+            finally:
+                self._forget(seq)
             raise
-        self._sync_folder()
 
     def _forget(self, seq: int) -> None:
-        """Remove the kept values of a position whose record was not written."""
+        """Remove the kept values of a position whose record was not written, then try to `fsync`
+        the folder; a failure of that `fsync` is not raised, so the first error is."""
         (self.kept / f"{seq}.json").unlink(missing_ok=True)
-        self._sync_folder()
+        with contextlib.suppress(OSError):
+            self._sync_folder()
 
 
 class KeptFolderRefused(PermissionError):

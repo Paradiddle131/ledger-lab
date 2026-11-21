@@ -575,6 +575,9 @@ def test_an_approval_that_does_not_hold_against_its_proposal_is_refused(
         ("select count(*) from payments where entity_id = N'chicago'", "duckdb"),
         ("select count(*) from payments where entity_id = e'chicago'", "duckdb"),
         ("select count(*) from payments where entity_id = $$chicago$$", "duckdb"),
+        ("select count(*) from payments where entity_id = 0x4142", "bigquery"),
+        ("select count(*) from payments where entity_id = b'chicago'", "bigquery"),
+        ("select count(*) from payments where entity_id = r'chicago'", "bigquery"),
     ],
 )
 def test_sql_carrying_a_value_in_clear_is_refused(sql: str, engine: str) -> None:
