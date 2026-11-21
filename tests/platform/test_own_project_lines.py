@@ -17,6 +17,10 @@ Checked, by those cases only:
   cases that are not the own environment;
 - the Never line starts with NEVER_BEFORE and ends with NEVER_INSTRUCTION, and the condition right
   after NEVER_BEFORE, up to NEVER_AFTER, read the same way, is true exactly on those cases;
+- WORDS reads each word as it says, for either variable: `unset` missing, `set` present (an
+  empty value included), `empty` present and exactly empty, `non-empty` present and not empty (a
+  space included), `blank` present and empty or only whitespace (as `str.strip` sees it); the
+  earlier wording, EARLIER_WORDING, read with them, differs from the oracle on some case;
 - the reader refuses the clauses in REFUSED_CLAUSES, and SHELL_CHECK refuses the checks in
   REFUSED_CHECKS; the run helper refuses one of them before bash starts, leaving no file behind;
 - `AGENTS.md` has, under `## Guardrails`, a line starting `- **Own project only:**` holding each
@@ -25,7 +29,8 @@ Checked, by those cases only:
 Not checked:
 - the wording on those lines outside the pinned phrases and the extracted condition, and the rest
   of the guardrail line's prose;
-- WORDS reads `empty` as empty or whitespace only, which is wider than the word;
+- the profile's paragraph that defines the lab's own environment, and the one that gives a
+  `needs-gcp` item back;
 - whitespace beyond the ASCII cases above, where Python's `str.strip` and bash's `[[:space:]]`
   may differ;
 - that the shell check is run, or run as the line says, by an agent or hook.
@@ -75,20 +80,22 @@ REFUSED_CHECKS = {
 }
 
 Env = Mapping[str, str]
-WORDS: dict[tuple[str, str], Callable[[Env], bool]] = {
-    (VARIABLE, "unset"): lambda env: VARIABLE not in env,
-    (VARIABLE, "empty"): lambda env: VARIABLE in env and not env[VARIABLE].strip(),
-    (VARIABLE, "set"): lambda env: bool(env.get(VARIABLE, "").strip()),
-    (FOREIGN, "set"): lambda env: bool(env.get(FOREIGN, "")),
-    (FOREIGN, "unset"): lambda env: not env.get(FOREIGN, ""),
-    (FOREIGN, "empty"): lambda env: env.get(FOREIGN) == "",
+WORDS: dict[str, Callable[[Env, str], bool]] = {
+    "unset": lambda env, name: name not in env,
+    "set": lambda env, name: name in env,
+    "empty": lambda env, name: env.get(name) == "",
+    "non-empty": lambda env, name: bool(env.get(name, "")),
+    "blank": lambda env, name: name in env and not env[name].strip(),
 }
-_CLAUSE = re.compile(rf"(?:(?:a )?`({VARIABLE}|{FOREIGN})` is )?(unset|empty|set)")
+_CLAUSE = re.compile(rf"(?:(?:a )?`({VARIABLE}|{FOREIGN})` is )?({'|'.join(WORDS)})")
 REFUSED_CLAUSES = {
     "not set": f"`{VARIABLE}` is not set",
+    "whitespace": f"`{VARIABLE}` is whitespace",
     "and": f"`{VARIABLE}` is unset and a `{FOREIGN}` is set",
     "mode": "the Digest says `Mode: offline`",
 }
+
+EARLIER_WORDING = f"`{VARIABLE}` is unset or empty or a `{FOREIGN}` is set"
 
 LAB_VALUES: tuple[str | None, ...] = (None, "", " ", "\t", "\n", "the-lab")
 FOREIGN_VALUES: tuple[str | None, ...] = (None, "", " ", "another-lab")
@@ -171,7 +178,8 @@ def read_condition(text: str, where: str) -> Callable[[Env], bool]:
         assert read, f"clause {clause!r} is outside the vocabulary, on: {where}"
         subject = read.group(1) or subject
         assert subject, f"clause {clause!r} names no variable, on: {where}"
-        predicates.append(WORDS[(subject, read.group(2))])
+        word, name = WORDS[read.group(2)], subject
+        predicates.append(lambda env, word=word, name=name: word(env, name))
     return lambda env: any(predicate(env) for predicate in predicates)
 
 
@@ -238,3 +246,10 @@ def test_the_guardrail_names_the_own_environment() -> None:
     )
     missing = [phrase for phrase in GUARDRAIL_PHRASES if phrase not in guardrail]
     assert missing == [], f"the own-project guardrail lacks {missing}"
+
+
+def test_the_words_tell_the_earlier_wording_apart() -> None:
+    """The earlier lines called a blank lab variable `empty` and an empty `GCP_PROJECT` `set`;
+    read word for word, that wording misjudges some case, so the reader cannot pass it."""
+    earlier = read_condition(EARLIER_WORDING, "the earlier wording")
+    assert any(earlier(env) != (not own(env)) for env in CASES)

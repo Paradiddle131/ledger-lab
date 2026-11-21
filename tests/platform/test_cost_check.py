@@ -277,8 +277,8 @@ def test_without_a_lab_project_it_reports_zero_and_calls_no_gcp_tool(tmp_path: P
 def test_in_another_labs_session_it_fails_unchecked_and_calls_no_gcp_tool(
     tmp_path: Path, lab: dict[str, str]
 ) -> None:
-    """The session's credential is the other lab's, so nothing is read, and nothing read shows the
-    lab's cost is $0.00."""
+    """The session's credential may be the other lab's, so nothing is read, and nothing read
+    shows the lab's cost is $0.00."""
     code, out, calls = cost_check(tmp_path, GCP_PROJECT="another-lab", **lab)
     assert code != 0, out
     assert out.startswith("cost-check: NOT CHECKED GCP_PROJECT is set"), out

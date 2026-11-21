@@ -829,7 +829,7 @@ def check(
     """The exit code and the lines to print."""
     if foreign_session(env):
         return 1, (
-            f"cost-check: NOT CHECKED {FOREIGN} is set, so this session's GCP credential is "
+            f"cost-check: NOT CHECKED {FOREIGN} is set, so this session's GCP credential may be "
             "another lab's: no GCP call is made and the lab's cost is unread; run it in the lab's "
             "own environment"
         )
