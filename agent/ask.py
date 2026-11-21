@@ -15,6 +15,11 @@ What `ask` checks, in this order:
   context is loaded, the model is asked or a connection is opened; a `NoPersonaError` that
   `as_persona` raises later is a turn that raises, below, recorded as `failed` with
   `connection-error`;
+- the persona's turns in the 24 hours before this one are counted in the audit log
+  (`AuditLog.records`, `agent.limits.turns_today`); at the `turns_per_person_per_day` of the cost
+  ceilings (`agent/limits.py`), the turn is recorded `stopped` with `turn-cap` and answered with
+  the fixed text `TURN_CAPPED`, before the metric context is loaded, the model is asked or a
+  connection is opened; a log that cannot be read raises `AuditWriteFailed` there, with no record;
 - plan, then execute: the model first plans its tool calls (`Model.plan`) on a turn holding the
   question and the verified queries only, with no glossary, no column description and no result;
   the turns after it show those as well;
@@ -35,7 +40,11 @@ What `ask` checks, in this order:
   - a call the policy allows to any tool but `run_metric_query` is a `Refusal`, since `ask` runs
     no other tool;
   - only then is a connection opened, by calling `as_persona(persona)`, at most once per `ask`,
-    and the query run;
+    and the query run under the turn's caps (`agent/limits.py`): a query whose plan is estimated
+    to read more rows than are left of `product_passes_per_turn` times the rows of the persona's
+    tables is not run, and one still running at `seconds_per_query` is interrupted; either is a
+    `Refusal` that ends the turn, asking the model no more, with the fixed text `QUERY_CAPPED`
+    naming the cap;
   - a call refused before the tool, unplanned or by one of the checks above, counts toward
     `MAX_REFUSALS`; at that many, the model is asked for no more steps: the planned calls it has
     not made are put through the same checks, the tool-call limit among them, in the plan's order,
@@ -58,11 +67,13 @@ that returned the SQL as sent, the persona, `duckdb`, a run id and its start tim
 question, the answer's text, each run's result (`agent.audit.sealed_result` of its columns and its
 cells as `cell_text`) and its bound values, a seal, each under its own salt, the salt and value
 kept by the log apart from the record.
-Its outcome is `refused` with `no-identity` for no persona, `failed` when a step raised (above),
-`stopped` with `model-call-cap` at the tool-call limit, else `answered` when a query returned,
-`stopped` with `model-refusal-cap` when none did and the refusal limit was reached, `refused` with
-`policy` when none did and the tool policy denied one, `refused` with `unplanned` when none did,
-the policy denied none and a call was refused as unplanned, and `abstained` otherwise. A refusal
+Its outcome is `refused` with `no-identity` for no persona, `stopped` with `turn-cap` past the
+person's turns, `failed` when a step raised (above), `stopped` with `query-bytes-cap` or
+`query-time-cap` at a query's cap, or `model-call-cap` at the tool-call limit, else `answered`
+when a query returned, `stopped` with `model-refusal-cap` when none did and the refusal limit was
+reached, `refused` with `policy` when none did and the tool policy denied one, `refused` with
+`unplanned` when none did, the policy denied none and a call was refused as unplanned, and
+`abstained` otherwise. A refusal
 for any other reason (a value that is not a string, a query the context lacks, a tool `ask` does
 not run) is not named in the record.
 
@@ -131,6 +142,17 @@ from agent.audit import (
     seal,
     sealed_result,
 )
+from agent.limits import (
+    BYTES_CAP,
+    TURN_CAP,
+    CapReached,
+    Limits,
+    estimated_rows,
+    load_limits,
+    rows_held,
+    run_capped,
+    turns_today,
+)
 from agent.model import (
     READ_ONLY_TOOL,
     Citation,
@@ -166,6 +188,10 @@ MAX_STEPS = MAX_TOOL_CALLS + MAX_REFUSALS + 1
 CAPPED = (
     f"The model's further tool calls were refused after {MAX_REFUSALS} refused calls; the calls it"
     " planned were run without it."
+)
+QUERY_CAPPED = "A query reached a spending cap, so the turn was stopped: {reason}."
+TURN_CAPPED = (
+    "This persona has asked as many questions as a person may in 24 hours; no query was run."
 )
 UNPLANNED = (
     "the call is not one the model planned before it was shown anything but the question and"
@@ -273,12 +299,14 @@ def ask(
     catalogue: Mapping[str, Any] | None = None,
     glossary: Sequence[GlossaryTerm] | None = None,
     columns: Sequence[ColumnDescription] = (),
+    limits: Limits | None = None,
 ) -> Answer:
     """Answer `question` for `persona`, running tools only on `as_persona(persona)`'s connection.
 
     `model` defaults to `model_from_config(os.environ, queries)`, `queries` to the committed
-    metric context, `catalogue` to `access/personas.yaml`; see the module's docstring for what is
-    checked and what the record written to `audit.log` holds.
+    metric context, `catalogue` to `access/personas.yaml`, `limits` to the cost ceilings
+    (`agent/limits.py`); see the module's docstring for what is checked and what the record
+    written to `audit.log` holds.
     """
     session = uuid.uuid4().hex
     refusal: NoPersonaError | None = None
@@ -293,6 +321,11 @@ def ask(
     if refusal is not None:
         record(audit, None, session, question, ("refused", "no-identity"), [], [], str(refusal))
         raise refusal
+    limits = load_limits() if limits is None else limits
+    asked = datetime.now(UTC)
+    if turns_today(_records(audit), persona, asked) >= limits.turns_per_person_per_day:
+        record(audit, persona, session, question, ("stopped", TURN_CAP), [], [], TURN_CAPPED)
+        return Answer(persona, question, TURN_CAPPED, (), ())
     queries = load_context() if queries is None else queries
     shown = (tuple(load_glossary() if glossary is None else glossary), tuple(columns))
     model = model_from_config(os.environ, queries) if model is None else model
@@ -302,6 +335,8 @@ def ask(
     denied = unplanned = capped = False
     stopped: str | None = None
     calls = refused = 0
+    # The rows the turn's queries were estimated to read, against the turn's row cap.
+    spent = 0
     # The reason a `failed` record gives when the step under way raises.
     stage = MODEL_ERROR
     raised: Exception | None = None
@@ -310,7 +345,7 @@ def ask(
     def execute(call: ToolCall) -> bool:
         """Put one planned call through the checks and run it; whether it was refused before the
         tool."""
-        nonlocal connection, denied, calls, stage
+        nonlocal connection, denied, calls, stage, spent, stopped, text
         if not (isinstance(call.query, str) and isinstance(call.tool, str)):
             reason = "the tool or the query is not a string"
             results.append(Refusal(_text(call.query), reason, _text(call.tool)))
@@ -335,10 +370,14 @@ def ask(
             connection = as_persona(persona)
         stage = TOOL_ERROR
         calls += 1
-        result, run = _run(connection, query, persona)
+        result, run, read, cap = _run(connection, query, persona, limits, spent)
+        spent += read
         results.append(result)
         if run is not None:
             runs.append(run)
+        if cap is not None and stopped is None:
+            stopped = cap.reason
+            text = QUERY_CAPPED.format(reason=cap)
         return False
 
     def past_the_cap(call: ToolCall) -> str:
@@ -361,6 +400,8 @@ def ask(
             if step in planned:
                 planned.remove(step)
                 refused += execute(step)
+                if stopped is not None:
+                    break
             else:
                 results.append(Refusal(_text(step.query), UNPLANNED, _text(step.tool)))
                 unplanned = True
@@ -374,6 +415,8 @@ def ask(
                         stopped = CAP
                         break
                     execute(call)
+                    if stopped is not None:
+                        break
                 break
     except Exception as error:
         raised = error
@@ -402,6 +445,20 @@ def ask(
         text,
         tuple(r for r in results if isinstance(r, Citation)),
         tuple(r for r in results if isinstance(r, Refusal)),
+    )
+
+
+def _records(audit: Audit) -> list[dict[str, Any]]:
+    """The log's records, to count the persona's turns; any `Exception` reading them raises
+    `AuditWriteFailed` naming only its type, since a log that cannot be read takes no record."""
+    failed = ""
+    try:
+        return audit.log.records()
+    except Exception as error:
+        failed = type(error).__name__
+    raise AuditWriteFailed(
+        f"the audit log could not be read ({failed}), so the turn is not taken and no answer is"
+        " given"
     )
 
 
@@ -477,21 +534,30 @@ def record(
 
 
 def run_metric_query(
-    connection: duckdb.DuckDBPyConnection, query: VerifiedQuery
+    connection: duckdb.DuckDBPyConnection, query: VerifiedQuery, limits: Limits | None = None
 ) -> Citation | Refusal:
     """Run a verified query on a cursor of `connection`, its tables resolved in the connection's
-    own database and its values bound (`agent.audit.bind`); a text `bind` refuses, an engine error
-    or an ambiguous name is a `Refusal`."""
-    return _run(connection, query, "")[0]
+    own database and its values bound (`agent.audit.bind`), under one turn's row and time caps
+    (`limits`, by default the cost ceilings); a text `bind` refuses, an engine error, an ambiguous
+    name or a cap reached is a `Refusal`."""
+    return _run(connection, query, "", load_limits() if limits is None else limits, 0)[0]
 
 
 def _run(
-    connection: duckdb.DuckDBPyConnection, query: VerifiedQuery, persona: str
-) -> tuple[Citation | Refusal, Run | None]:
+    connection: duckdb.DuckDBPyConnection,
+    query: VerifiedQuery,
+    persona: str,
+    limits: Limits,
+    spent: int,
+) -> tuple[Citation | Refusal, Run | None, int, CapReached | None]:
+    """Run one verified query; also the rows its plan was estimated to read (0 when it was not
+    planned) and the cap it reached, if any. `spent` is what the turn's earlier queries were
+    estimated to read."""
     try:
         text, parameters = bind(query.sql, ENGINE)
     except UnboundValue as error:
-        return Refusal(query.id, f"the query's values could not be bound: {error}"), None
+        return Refusal(query.id, f"the query's values could not be bound: {error}"), None, 0, None
+    read = 0
     cursor = connection.cursor()
     try:
         held = cursor.execute(
@@ -501,20 +567,33 @@ def _run(
         schemas = sorted({schema for schema, _ in held})
         names = [table for _, table in held]
         if twice := sorted({t for t in names if names.count(t) > 1}):
-            return Refusal(query.id, f"tables held in two schemas: {', '.join(twice)}"), None
+            refusal = Refusal(query.id, f"tables held in two schemas: {', '.join(twice)}")
+            return refusal, None, 0, None
         if not all(SCHEMA.fullmatch(schema) for schema in schemas):
-            return Refusal(query.id, f"a schema name the tool does not quote: {schemas}"), None
+            refusal = Refusal(query.id, f"a schema name the tool does not quote: {schemas}")
+            return refusal, None, 0, None
         cursor.execute(f"set search_path = '{','.join(schemas)}'")
+        cap = limits.product_passes_per_turn * rows_held(cursor)
+        read = estimated_rows(cursor, text, parameters)
+        if spent + read > cap:
+            reached = CapReached(
+                BYTES_CAP,
+                f"its plan is estimated to read {read} rows, past the {cap - spent} rows left of"
+                f" the turn's {cap}",
+            )
+            return Refusal(query.id, str(reached)), None, 0, reached
         started = now()
-        result = cursor.execute(text, parameters or [])
-        columns = tuple(column[0] for column in result.description or ())
-        rows = tuple(tuple(row) for row in result.fetchall())
+        try:
+            columns, rows = run_capped(cursor, text, parameters, limits.seconds_per_query)
+        except CapReached as reached:
+            return Refusal(query.id, str(reached)), None, read, reached
         (path,) = cursor.execute(
             "select path from duckdb_databases()"
             " where database_name = system.main.current_database()"
         ).fetchone() or (None,)
     except duckdb.Error as error:
-        return Refusal(query.id, f"the query failed on the persona's database: {error}"), None
+        refusal = Refusal(query.id, f"the query failed on the persona's database: {error}")
+        return refusal, None, read, None
     finally:
         cursor.close()
     written = None
@@ -525,4 +604,4 @@ def _run(
             written = None
     citation = Citation(query.id, query.metric, query.version, query.sql, columns, rows, written)
     job = f"{ENGINE}-{uuid.uuid4().hex}"
-    return citation, Run(text, parameters, persona, job, started, columns, rows)
+    return citation, Run(text, parameters, persona, job, started, columns, rows), read, None

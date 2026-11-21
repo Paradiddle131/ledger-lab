@@ -25,13 +25,15 @@ text_run: 12
 # where no bytes are billed: an answer reads each product a few times, a join of a product with
 # itself reads it once per row. An answer cites one query per
 # figure, and twenty figures is more than any question here needs; ten model calls cover a plan,
-# tool rounds and the answer. tests/agent holds bytes times turns to the declared cap.
+# tool rounds and the answer. tests/agent holds bytes times turns to the declared cap. Ten seconds
+# of run time stops, on the local engine, a query whose rows its plan estimated too low.
 cost_ceilings:
   bytes_billed_per_turn: 1073741824
   product_passes_per_turn: 10
   queries_per_turn: 20
   model_calls_per_turn: 10
   turns_per_person_per_day: 30
+  seconds_per_query: 10
 
 cases:
   # A span where the UK department's payments are fewer than the minimum group and Chicago's are

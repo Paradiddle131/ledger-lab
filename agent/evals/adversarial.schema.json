@@ -293,13 +293,14 @@
     "cost_ceilings": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["bytes_billed_per_turn", "product_passes_per_turn", "queries_per_turn", "model_calls_per_turn", "turns_per_person_per_day"],
+      "required": ["bytes_billed_per_turn", "product_passes_per_turn", "queries_per_turn", "model_calls_per_turn", "turns_per_person_per_day", "seconds_per_query"],
       "properties": {
         "bytes_billed_per_turn": {"description": "On BigQuery: bytes billed by a turn's queries.", "type": "integer", "minimum": 1},
         "product_passes_per_turn": {"description": "On the local engine: rows a turn's queries read, as a multiple of the rows of the products in the arranged warehouse.", "type": "integer", "minimum": 1},
         "queries_per_turn": {"type": "integer", "minimum": 1},
         "model_calls_per_turn": {"type": "integer", "minimum": 1},
-        "turns_per_person_per_day": {"type": "integer", "minimum": 1}
+        "turns_per_person_per_day": {"type": "integer", "minimum": 1},
+        "seconds_per_query": {"description": "On the local engine: a query's run time, in seconds.", "type": "number", "exclusiveMinimum": 0}
       }
     },
     "cases": {
