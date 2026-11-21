@@ -50,7 +50,8 @@ them does not excuse them:
   dot); two schema entries whose names are equal ignoring case; two properties of one schema whose
   names are equal ignoring case, or over one column; a property holding `properties` or `items`,
   since the gate reads one level; two quality rules of one schema entry, or of one property, with
-  one text `id` (compared exactly), since the gate compares rules by id;
+  one text `id` (compared exactly), or a schema entry named `<schema>.<property>` whose rules
+  share an id with that property's, since the gate compares rules by place and id;
 - two schema entries over one table, in one contract or across the working tree;
 - a property over a column `origin/main` classifies `personal` whose `classification` is not
   `personal`;
@@ -343,7 +344,6 @@ def normalised(contract: Contract, strict: bool) -> tuple[list[Described], list[
         if sname.lower() in names:
             wrong.append(f"two schema entries are named {sname}, {NEVER}")
         names.add(sname.lower())
-        wrong += repeated_rule_ids(f"schema {sname}", schema)
         props: set[str] = set()
         columns: set[str] = set()
         for prop in schema.get("properties") or []:
@@ -363,27 +363,43 @@ def normalised(contract: Contract, strict: bool) -> tuple[list[Described], list[
                 wrong.append(f"schema {sname} has two properties named {pname}, {NEVER}")
             if column in columns:
                 wrong.append(f"schema {sname} has two properties over column {column}, {NEVER}")
-            wrong += repeated_rule_ids(f"{sname}.{pname}", prop)
             props.add(pname.lower())
             columns.add(column)
             found.append(Described(cid, sname, pname, table, column, prop.get("classification")))
+    wrong += repeated_rule_keys(contract)
     return found, wrong if strict else []
 
 
-def repeated_rule_ids(place: str, owner: dict[str, Any]) -> list[str]:
-    """A line for each quality rule id that `owner` (a schema entry or a property) holds more
-    than once: `rules()` keys rules by id, so of two rules sharing one only the last is compared."""
-    seen: set[object] = set()
-    twice: list[object] = []
-    quality = owner.get("quality")
-    for rule in quality if isinstance(quality, list) else []:
-        rid = rule.get("id") if isinstance(rule, dict) else None
-        if not rid or not isinstance(rid, str):
+def repeated_rule_keys(contract: Contract) -> list[str]:
+    """A line for each key `rules()` gives to more than one quality rule of the contract with a
+    text id: of two rules under one key only the last is compared. Two rules of one schema entry
+    or one property with one id share a key, and so do a schema entry named `<s>.<p>` and
+    property `<p>` of schema entry `<s>` holding rules with one id."""
+    seen: set[str] = set()
+    twice: list[str] = []
+    for schema in contract.get("schema") or []:
+        if not isinstance(schema, dict) or not isinstance(schema.get("name"), str):
             continue
-        if rid in seen and rid not in twice:
-            twice.append(rid)
-        seen.add(rid)
-    return [f"{place} has two quality rules with id {rid}, {NEVER}" for rid in twice]
+        places = [(schema["name"], schema)] + [
+            (f"{schema['name']}.{p['name']}", p)
+            for p in schema.get("properties") or []
+            if isinstance(p, dict) and isinstance(p.get("name"), str)
+        ]
+        for place, owner in places:
+            quality = owner.get("quality")
+            for rule in quality if isinstance(quality, list) else []:
+                rid = rule.get("id") if isinstance(rule, dict) else None
+                if not rid or not isinstance(rid, str):
+                    continue
+                key = f"{place}/{rid}"
+                if key in seen and key not in twice:
+                    twice.append(key)
+                seen.add(key)
+    return [
+        f"two quality rules are both read as {key}, {NEVER}: the gate compares rules by place"
+        " and id"
+        for key in twice
+    ]
 
 
 def refusals(before: dict[str, Contract], after: dict[str, Contract]) -> dict[str, list[str]]:
