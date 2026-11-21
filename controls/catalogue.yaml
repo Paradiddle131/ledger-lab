@@ -65,12 +65,16 @@ controls:
   - id: one-person-one-session
     layer: The conversation
     owner: agent-operator
-    asserts: "The own agent asked in a session shows its model, on every step but the planning one, the earlier exchanges of that session only, read by session and persona together, and a persona naming a session that is not theirs reads none of it: the turn is recorded refused for foreign-session, before any model step or connection. The purge command removes every transcript exchange that ended, and every session with none left that started, more than 30 days before it ran, keeps younger ones, and removes the audit log's kept values and salts of the records older than that, with those of an approval whose proposal's go, while every record line stays and the chain verifies. A personal value planted in a question, or given as the persona, is in neither the audit log's lines nor any Python log record of the turn."
+    asserts: "The own agent asked in a session shows its model, on every step but the planning one, the earlier exchanges of that session only, read by session and persona together, and a persona naming a session that is not theirs, or an id no session can have, reads none of it: the turn is recorded refused for foreign-session (under an id the agent makes for the latter), before any model step or connection. The retention is 30 days. The purge command refuses a log that does not exist, a log whose chain does not verify and a missing folder of kept values, before it removes anything; otherwise it removes every transcript exchange that ended, and every session with none left that started, more than 30 days before it ran, keeps younger ones, and removes the audit log's kept values and salts of the records older than that, with those of an approval whose proposal's go, while every record line stays and the chain verifies. A personal value planted in a question, asked with or without a session, given as the persona, or given as the session id, is in neither the audit log's lines nor any Python log record, nor the process's standard output or error in a session."
     proven_by:
       - tests/agent/test_sessions.py::test_no_cross_session_recall
       - tests/agent/test_sessions.py::test_the_purge_command_removes_expired_transcripts_and_keeps_young_ones
       - tests/agent/test_sessions.py::test_a_purge_removes_an_approvals_kept_draft_with_its_proposal
       - tests/agent/test_sessions.py::test_a_planted_personal_value_never_reaches_the_logs
+      - tests/agent/test_sessions.py::test_a_planted_personal_value_asked_in_a_session_never_reaches_the_logs
+      - tests/agent/test_sessions.py::test_the_retention_is_thirty_days
+      - tests/agent/test_sessions.py::test_a_purge_refused_by_the_log_leaves_the_transcripts
+      - tests/agent/test_sessions.py::test_the_log_purge_refuses_a_missing_log_a_missing_folder_and_a_broken_chain
     status: implemented
   - id: untrusted-content-cannot-instruct
     layer: Injection and tool authorisation
