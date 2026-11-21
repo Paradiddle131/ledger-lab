@@ -358,12 +358,56 @@ def test_a_wrong_record_kept_value_or_chain_is_not_rebuilt(
 
 
 class Looping:
+    def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+        return (ToolCall("duplicate-payment-rate"),) * (MAX_TOOL_CALLS + 1)
+
     def step(self, turn: Turn) -> ToolCall | Reply:
         return ToolCall("duplicate-payment-rate")
 
 
+class Unplanned:
+    """Plans nothing, makes one call, then replies: the call is refused as unplanned."""
+
+    def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+        return ()
+
+    def step(self, turn: Turn) -> ToolCall | Reply:
+        return Reply("none ran") if turn.results else ToolCall("duplicate-payment-rate")
+
+
+class Wandering:
+    """Plans nothing and keeps making calls, until the refusal limit stops it; past a hundred
+    steps it raises, so a turn the limit fails to end fails the test instead of running on."""
+
+    def __init__(self) -> None:
+        self.steps = 0
+
+    def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+        return ()
+
+    def step(self, turn: Turn) -> ToolCall | Reply:
+        self.steps += 1
+        assert self.steps <= 100, "the turn did not end"
+        return ToolCall("duplicate-payment-rate")
+
+
+class DeniedThenUnplanned:
+    """Plans the write the policy denies, makes it, then an unplanned call, then replies: nothing
+    runs, and the policy's refusal names the turn's reason."""
+
+    def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+        return (ToolCall("chicago", "propose_entry"),)
+
+    def step(self, turn: Turn) -> ToolCall | Reply:
+        calls = [ToolCall("chicago", "propose_entry"), ToolCall("duplicate-payment-rate")]
+        return calls[len(turn.results)] if len(turn.results) < len(calls) else Reply("none ran")
+
+
 class ShownThenFails:
     """Calls the verified query, then raises once it has seen the rows."""
+
+    def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+        return (ToolCall("duplicate-payment-rate"),)
 
     def step(self, turn: Turn) -> ToolCall | Reply:
         if not turn.results:
@@ -379,6 +423,9 @@ def test_each_turn_writes_one_record_with_its_outcome(as_persona: AsPersona, aud
         ask(CHICAGO, UNANSWERED, as_persona=as_persona, audit=audit),
         ask(DENIED, QUESTION, as_persona=as_persona, audit=audit),
         ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=Looping()),
+        ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=Unplanned()),
+        ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=Wandering()),
+        ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=DeniedThenUnplanned()),
     ]
     with pytest.raises(TimeoutError):
         ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=ShownThenFails())
@@ -391,6 +438,9 @@ def test_each_turn_writes_one_record_with_its_outcome(as_persona: AsPersona, aud
         ("abstained", None, 0),
         ("refused", "policy", 0),
         ("stopped", "model-call-cap", MAX_TOOL_CALLS),
+        ("refused", "unplanned", 0),
+        ("stopped", "model-refusal-cap", 0),
+        ("refused", "policy", 0),
         ("failed", "model-error", 1),
     ]
     for record in records:
@@ -453,10 +503,21 @@ class Broken:
         (CHICAGO, UNANSWERED, None),
         (DENIED, QUESTION, None),
         (CHICAGO, QUESTION, Looping()),
+        (CHICAGO, QUESTION, Unplanned()),
+        (CHICAGO, QUESTION, Wandering()),
         ("nobody-at-all", QUESTION, None),
         (CHICAGO, QUESTION, ShownThenFails()),
     ],
-    ids=["answered", "abstained", "policy", "stopped", "no-identity", "failed"],
+    ids=[
+        "answered",
+        "abstained",
+        "policy",
+        "stopped",
+        "unplanned",
+        "refusal-cap",
+        "no-identity",
+        "failed",
+    ],
 )
 def test_a_broken_log_sink_returns_no_answer(
     who: str, question: str, model: Any, as_persona: AsPersona, audit: Audit

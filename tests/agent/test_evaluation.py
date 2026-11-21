@@ -263,6 +263,9 @@ class Boasting:
     def step(self, turn: Turn) -> ToolCall | Reply:
         return Reply(self._text) if turn.results else ToolCall(self._query)
 
+    def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+        return (ToolCall(self._query),)
+
 
 def test_a_reply_claiming_the_expected_figure_scores_wrong_when_its_query_returns_another(
     as_persona: AsPersona, audit: Audit

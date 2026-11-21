@@ -1,18 +1,30 @@
 """The model behind the own agent: one protocol, one factory, one scripted implementation.
 
-The agent (`agent/ask.py`) shows the model a `Turn`: the question, the verified queries it may
-name, and the results of the tool calls made so far. The model answers each turn with one step: a
-`ToolCall` naming a verified query by its id, or a `Reply` that ends the turn. A model names a
-query only by id; the SQL the tool runs is the text of the verified queries `ask` is given (by
-default the metric context's), with no value bound from the question or the model.
+The agent (`agent/ask.py`) first asks the model to plan: `plan(turn)` gets a `Turn` holding the
+question and the verified queries only, and returns the tool calls the model will make. Then it
+shows the model a `Turn` at each step: the question, the verified queries it may name, the
+glossary's terms, the column descriptions `ask` is given, and the results of the tool calls made
+so far. The model answers each such turn with one step: a `ToolCall` naming a tool (by
+default the one read-only tool, `run_metric_query`) and what it acts on (for that tool a verified
+query by its id), or a `Reply` that ends the turn. A model names a query only by id; the SQL the
+tool runs is the text of the verified queries `ask` is given (by default the metric context's),
+with no value bound from the question or the model.
+
+The glossary's definitions, the column descriptions and the cells of a result are text the model
+reads and the lab does not vouch for: a model may take an instruction it finds there as its own.
+So `ask` refuses a call that is not in the plan, made before that text was shown, and asks the
+tool policy before it runs any call; the call past the tool-call limit is refused without
+asking it.
 
 `model_from_config(environ, context)` is the one place a model is chosen, by the variable
 `LEDGER_LAB_AGENT_MODEL`: unset, empty or `scripted` gives the `ScriptedModel`; any other value
 raises `ModelNotConfigured`. A free hosted model, or an adapter over a LangGraph graph or an MCP
-client, would be another value here and another class with the same `step`.
+client, would be another value here and another class with the same `plan` and `step`.
 
 Stated limits: the scripted model makes no network call and reads no model SDK; it matches a
-question to a verified query by exact text only, so a paraphrase gets no tool call.
+question to a verified query by exact text only, so a paraphrase gets no tool call; it reads
+neither the glossary nor the column descriptions, so a test of what a planted instruction can do
+needs a model that obeys what it reads (`tests/agent/test_injection.py` holds one).
 """
 
 from collections.abc import Mapping
@@ -22,6 +34,8 @@ from typing import Any, Protocol
 
 MODEL_VARIABLE = "LEDGER_LAB_AGENT_MODEL"
 SCRIPTED = "scripted"
+# The one tool `ask` runs: a verified query of the metric context, read-only.
+READ_ONLY_TOOL = "run_metric_query"
 
 
 @dataclass(frozen=True)
@@ -33,6 +47,24 @@ class VerifiedQuery:
     metric: str
     version: int
     sql: str
+
+
+@dataclass(frozen=True)
+class GlossaryTerm:
+    """One term of the glossary the metric context carries: its id, its name and its definition."""
+
+    id: str
+    term: str
+    definition: str
+
+
+@dataclass(frozen=True)
+class ColumnDescription:
+    """What a column of a table is said to hold, as its documentation words it."""
+
+    table: str
+    column: str
+    description: str
 
 
 @dataclass(frozen=True)
@@ -56,20 +88,21 @@ class Citation:
 
 @dataclass(frozen=True)
 class Refusal:
-    """A tool call that was not run or failed, and why: the context holds no such query, the tool
-    policy denied it, the persona's database holds a table name in two schemas or a schema name
-    the tool does not quote, the engine raised an error, or the model went past the tool-call
-    limit."""
+    """A tool call that was not run or failed, and why (`agent/ask.py` lists each check).
+    `query` and `tool` are the call's, or the `repr` of either that is not a string."""
 
     query: str
     reason: str
+    tool: str = READ_ONLY_TOOL
 
 
 @dataclass(frozen=True)
 class ToolCall:
-    """Run the verified query of this id as the asking persona."""
+    """Call `tool` on `query` as the asking persona: for `run_metric_query`, the default, `query`
+    is a verified query's id; for any other tool it is the id of what the tool would act on."""
 
     query: str
+    tool: str = READ_ONLY_TOOL
 
 
 @dataclass(frozen=True)
@@ -81,15 +114,22 @@ class Reply:
 
 @dataclass(frozen=True)
 class Turn:
-    """What the model sees at one step: the question, the verified queries and the results so far;
-    it holds no persona id and no connection."""
+    """What the model sees at one step: the question, the verified queries, the results so far,
+    the glossary's terms and the column descriptions; it holds no persona id and no connection."""
 
     question: str
     queries: tuple[VerifiedQuery, ...]
     results: tuple[Citation | Refusal, ...]
+    glossary: tuple[GlossaryTerm, ...] = ()
+    columns: tuple[ColumnDescription, ...] = ()
 
 
 class Model(Protocol):
+    def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+        """The tool calls the model will make for the turn's question, chosen on a turn that holds
+        the question and the verified queries only."""
+        ...
+
     def step(self, turn: Turn) -> ToolCall | Reply: ...
 
 
@@ -98,12 +138,16 @@ class ModelNotConfigured(ValueError):
 
 
 class ScriptedModel:
-    """Replays a fixed script: on the first step, the query the script maps the question to, or a
-    reply that no verified query answers it; once a tool has answered, a reply built from the
-    results."""
+    """Replays a fixed script: it plans the query the script maps the question to, if any; on the
+    first step, that query, or a reply that no verified query answers it; once a tool has
+    answered, a reply built from the results."""
 
     def __init__(self, script: Mapping[str, str]) -> None:
         self._script = dict(script)
+
+    def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
+        query = self._script.get(turn.question)
+        return () if query is None else (ToolCall(query),)
 
     def step(self, turn: Turn) -> ToolCall | Reply:
         if not turn.results:

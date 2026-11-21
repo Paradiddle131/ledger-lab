@@ -1,9 +1,11 @@
 """The own agent's one question-to-answer interface: `ask(persona, question, ...)`.
 
-`ask` shows the model (`agent/model.py`) the question and the verified queries of the metric
-context (`semantics/context.json`), runs each verified query the model names with the one
-read-only tool, `run_metric_query`, writes the turn's audit record (`agent/audit.schema.json`) to
-`audit.log`, and only then returns an `Answer` citing what each run returned.
+`ask` shows the model (`agent/model.py`) the question, the verified queries and the glossary of
+the metric context (`semantics/context.json`, or what the caller passes), and the column
+descriptions the caller passes, runs each verified query the model planned and then names with
+the one read-only tool, `run_metric_query`, writes the turn's audit record
+(`agent/audit.schema.json`) to `audit.log`, and only then returns an `Answer` citing what each run
+returned.
 
 What `ask` checks, in this order:
 - the persona must be a string equal to a persona id of the personas catalogue (by default
@@ -13,15 +15,38 @@ What `ask` checks, in this order:
   context is loaded, the model is asked or a connection is opened; a `NoPersonaError` that
   `as_persona` raises later is a turn that raises, below, recorded as `failed` with
   `connection-error`;
-- for each tool call: the query id names a verified query of the context; the tool policy
-  (`agent/policy/tools.py`) allows the persona to run `run_metric_query` on the query's metric;
-  only then is a connection opened, by calling `as_persona(persona)`, at most once per `ask`;
-- the model gets at most `MAX_TOOL_CALLS` tool calls; one more is refused and ends the turn;
+- plan, then execute: the model first plans its tool calls (`Model.plan`) on a turn holding the
+  question and the verified queries only, with no glossary, no column description and no result;
+  the turns after it show those as well;
+- for each tool call the model then makes, in this order:
+  - once `MAX_TOOL_CALLS` calls have been handed to the tool, the call is refused, not put to the
+    policy, and ends the turn, its refusal holding the `repr` of a tool or query that is not a
+    string; each call handed to the tool counts, whether it returns rows or the tool refuses it;
+    a call refused before the tool does not;
+  - the call must equal (tool and query) a planned call not yet made, each planned call counted
+    as often as the plan holds it; any other call is a `Refusal` and is not put to the policy;
+  - its tool and its query must each be a string, or the call is a `Refusal` holding the `repr`
+    of each that is not;
+  - a call to `run_metric_query` must name a verified query of the context;
+  - the call is put to the tool policy (`agent/policy/tools.py`) with the tool the model named,
+    the persona, and as resource the query's metric for `run_metric_query`, the `Ledger` of the
+    call's id for `propose_entry`, and a `Metric` of the call's id for any other tool; a denial
+    is a `Refusal` naming the policy's reasons;
+  - a call the policy allows to any tool but `run_metric_query` is a `Refusal`, since `ask` runs
+    no other tool;
+  - only then is a connection opened, by calling `as_persona(persona)`, at most once per `ask`,
+    and the query run;
+  - a call refused before the tool, unplanned or by one of the checks above, counts toward
+    `MAX_REFUSALS`; at that many, the model is asked for no more steps: the planned calls it has
+    not made are put through the same checks, the tool-call limit among them, in the plan's order,
+    without the model, and `ask` replies with its fixed text `CAPPED`;
+- so a turn takes at most `MAX_STEPS` model steps (`MAX_TOOL_CALLS` + `MAX_REFUSALS` + 1): each
+  step runs a query, is refused, or ends the turn;
 - once the turn has ended, its record is written (`AuditLog.append`, by default
   `agent.audit.FileLog`, which checks it against the schema and its seals before writing); when
   that raises, for any `Exception`, `ask` raises `AuditWriteFailed` and returns no `Answer`;
-- when an `Exception` is raised by the model's step, the tool policy, `as_persona` or the tool
-  (`run_metric_query`), the turn's record is written as `failed`, with `model-error`,
+- when an `Exception` is raised by the model's plan or step, the tool policy, `as_persona` or the
+  tool (`run_metric_query`), the turn's record is written as `failed`, with `model-error`,
   `policy-error`, `connection-error` or `tool-error` for that step, holding the runs that returned
   before it and no answer seal; then that same exception is raised again, or `AuditWriteFailed` in
   its place when the record is not written.
@@ -35,7 +60,11 @@ cells as `cell_text`) and its bound values, a seal, each under its own salt, the
 kept by the log apart from the record.
 Its outcome is `refused` with `no-identity` for no persona, `failed` when a step raised (above),
 `stopped` with `model-call-cap` at the tool-call limit, else `answered` when a query returned,
-`refused` with `policy` when none did and the tool policy denied one, and `abstained` otherwise.
+`stopped` with `model-refusal-cap` when none did and the refusal limit was reached, `refused` with
+`policy` when none did and the tool policy denied one, `refused` with `unplanned` when none did,
+the policy denied none and a call was refused as unplanned, and `abstained` otherwise. A refusal
+for any other reason (a value that is not a string, a query the context lacks, a tool `ask` does
+not run) is not named in the record.
 
 How the tool runs a query: on a new cursor of the persona's connection (in DuckDB a cursor is a
 connection of its own to the same database, so it sees none of the parent's temporary objects),
@@ -64,14 +93,25 @@ Stated limits:
 - a run the engine refused is not among the record's runs, and a turn with only such runs is
   recorded as `abstained`;
 - the log's head digest is not yet anchored outside the writer's reach, so whoever can write the
-  log can still rewrite it from any record on, add to its end or cut its tail, and it verifies.
+  log can still rewrite it from any record on, add to its end or cut its tail, and it verifies;
+- the glossary, the column descriptions and a result's cells reach the model as they are, on
+  every turn but the planning one: an instruction there cannot add a tool call to the plan, but it
+  can shape the reply's text, make the model reply before it makes a planned call, and, through
+  refused calls, bring the turn to the refusal limit, after which the reply is `CAPPED`;
+- the planning turn shows the question and each verified query's question and SQL, and the
+  verified queries are trusted as the metric context's: an instruction in the asked question or
+  in a verified query is planned on like any other;
+- a turn that refused an unplanned or denied call but ran a query is recorded `answered` like a
+  turn that refused nothing: the record keeps no trace of the refused call;
+- no column description is given to the model unless the caller passes it: the metric context
+  holds none.
 """
 
 import json
 import os
 import re
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -92,10 +132,14 @@ from agent.audit import (
     sealed_result,
 )
 from agent.model import (
+    READ_ONLY_TOOL,
     Citation,
+    ColumnDescription,
+    GlossaryTerm,
     Model,
     Refusal,
     Reply,
+    ToolCall,
     Turn,
     VerifiedQuery,
     model_from_config,
@@ -105,16 +149,40 @@ from agent.policy.tools import Entity, authorize
 REPO = Path(__file__).resolve().parents[1]
 CONTEXT = REPO / "semantics" / "context.json"
 PERSONAS = REPO / "access" / "personas.yaml"
-TOOL = "run_metric_query"
+TOOL = READ_ONLY_TOOL
+# The resource type a tool call is put to the policy with, by tool, as the policy's schema
+# (`agent/policy/tools.cedarschema`) declares it; a tool it does not declare is asked about a
+# `Metric`, and the schema refuses the request for its action.
+RESOURCE = {TOOL: "Metric", "propose_entry": "Ledger"}
 MAX_TOOL_CALLS = 3
+# The refused tool calls the model may make in one `ask`, unplanned ones and ones a check refused
+# before the tool; at the last, `ask` asks the model for no more steps, runs the calls it planned
+# and has not made, through the same checks, and replies `CAPPED`. So no count of refused calls
+# keeps a planned call from its checks, and a turn takes at most `MAX_STEPS` model steps: each step
+# either runs a query (at most `MAX_TOOL_CALLS`), is refused (at most `MAX_REFUSALS`), or ends the
+# turn.
+MAX_REFUSALS = 5
+MAX_STEPS = MAX_TOOL_CALLS + MAX_REFUSALS + 1
+CAPPED = (
+    f"The model's further tool calls were refused after {MAX_REFUSALS} refused calls; the calls it"
+    " planned were run without it."
+)
+UNPLANNED = (
+    "the call is not one the model planned before it was shown anything but the question and"
+    " the verified queries, or it was planned fewer times"
+)
 # A schema of the persona's database as `access/compile.py` names it: a purpose's id with `_` for
 # `-`, or `main`.
 SCHEMA = re.compile(r"[a-z_][a-z0-9_]*")
 
 ENGINE = "duckdb"
 AGENT = "own-agent"
-# The stop reason of a turn that reached MAX_TOOL_CALLS, from the schema's fixed list.
+# The stop reasons of a turn that reached MAX_TOOL_CALLS, or MAX_REFUSALS with no query run, and
+# the refusal reason of one whose only refusals of note were unplanned calls, from the schema's
+# fixed lists.
 CAP = "model-call-cap"
+REFUSAL_CAP = "model-refusal-cap"
+UNPLANNED_REASON = "unplanned"
 # The reasons of a `failed` record, by the step that raised.
 MODEL_ERROR, POLICY_ERROR, CONNECTION_ERROR, TOOL_ERROR = (
     "model-error",
@@ -185,6 +253,15 @@ def load_context(path: Path = CONTEXT) -> dict[str, VerifiedQuery]:
     }
 
 
+def load_glossary(path: Path = CONTEXT) -> tuple[GlossaryTerm, ...]:
+    """The glossary of the metric context, its terms in the file's order."""
+    context = json.loads(path.read_text(encoding="utf-8"))
+    return tuple(
+        GlossaryTerm(term_id, term["term"], term["definition"])
+        for term_id, term in context["glossary"].items()
+    )
+
+
 def ask(
     persona: Any,
     question: str,
@@ -194,6 +271,8 @@ def ask(
     model: Model | None = None,
     queries: Mapping[str, VerifiedQuery] | None = None,
     catalogue: Mapping[str, Any] | None = None,
+    glossary: Sequence[GlossaryTerm] | None = None,
+    columns: Sequence[ColumnDescription] = (),
 ) -> Answer:
     """Answer `question` for `persona`, running tools only on `as_persona(persona)`'s connection.
 
@@ -215,55 +294,87 @@ def ask(
         record(audit, None, session, question, ("refused", "no-identity"), [], [], str(refusal))
         raise refusal
     queries = load_context() if queries is None else queries
+    shown = (tuple(load_glossary() if glossary is None else glossary), tuple(columns))
     model = model_from_config(os.environ, queries) if model is None else model
     connection: duckdb.DuckDBPyConnection | None = None
     results: list[Citation | Refusal] = []
     runs: list[Run] = []
-    denied = stopped = False
-    calls = 0
+    denied = unplanned = capped = False
+    stopped: str | None = None
+    calls = refused = 0
     # The reason a `failed` record gives when the step under way raises.
     stage = MODEL_ERROR
     raised: Exception | None = None
     text = ""
+
+    def execute(call: ToolCall) -> bool:
+        """Put one planned call through the checks and run it; whether it was refused before the
+        tool."""
+        nonlocal connection, denied, calls, stage
+        if not (isinstance(call.query, str) and isinstance(call.tool, str)):
+            reason = "the tool or the query is not a string"
+            results.append(Refusal(_text(call.query), reason, _text(call.tool)))
+            return True
+        query = queries.get(call.query) if call.tool == TOOL else None
+        if call.tool == TOOL and query is None:
+            results.append(Refusal(call.query, "the metric context holds no such verified query"))
+            return True
+        stage = POLICY_ERROR
+        resource = Entity(RESOURCE.get(call.tool, "Metric"), query.metric if query else call.query)
+        decision = authorize(Entity("Persona", persona), call.tool, resource, {"session": session})
+        if not decision:
+            reasons = "; ".join(decision.reasons)
+            results.append(Refusal(call.query, f"the tool policy denied it: {reasons}", call.tool))
+            denied = True
+            return True
+        if query is None:
+            results.append(Refusal(call.query, f"ask runs no tool named {call.tool}", call.tool))
+            return True
+        if connection is None:
+            stage = CONNECTION_ERROR
+            connection = as_persona(persona)
+        stage = TOOL_ERROR
+        calls += 1
+        result, run = _run(connection, query, persona)
+        results.append(result)
+        if run is not None:
+            runs.append(run)
+        return False
+
+    def past_the_cap(call: ToolCall) -> str:
+        reason = f"the model made no reply within {MAX_TOOL_CALLS} tool calls"
+        results.append(Refusal(_text(call.query), reason, _text(call.tool)))
+        return reason
+
     try:
+        stage = MODEL_ERROR
+        planned = list(model.plan(Turn(question, tuple(queries.values()), ())))
         while True:
             stage = MODEL_ERROR
-            step = model.step(Turn(question, tuple(queries.values()), tuple(results)))
+            step = model.step(Turn(question, tuple(queries.values()), tuple(results), *shown))
             if isinstance(step, Reply):
                 text = step.text
                 break
             if calls == MAX_TOOL_CALLS:
-                reason = f"the model made no reply within {MAX_TOOL_CALLS} tool calls"
-                results.append(Refusal(step.query, reason))
-                text, stopped = reason, True
+                text, stopped = past_the_cap(step), CAP
                 break
-            calls += 1
-            query = queries.get(step.query)
-            if query is None:
-                results.append(
-                    Refusal(step.query, "the metric context holds no such verified query")
-                )
-                continue
-            stage = POLICY_ERROR
-            decision = authorize(
-                Entity("Persona", persona),
-                TOOL,
-                Entity("Metric", query.metric),
-                {"session": session},
-            )
-            if not decision:
-                reasons = "; ".join(decision.reasons)
-                results.append(Refusal(query.id, f"the tool policy denied it: {reasons}"))
-                denied = True
-                continue
-            if connection is None:
-                stage = CONNECTION_ERROR
-                connection = as_persona(persona)
-            stage = TOOL_ERROR
-            result, run = _run(connection, query, persona)
-            results.append(result)
-            if run is not None:
-                runs.append(run)
+            if step in planned:
+                planned.remove(step)
+                refused += execute(step)
+            else:
+                results.append(Refusal(_text(step.query), UNPLANNED, _text(step.tool)))
+                unplanned = True
+                refused += 1
+            if refused == MAX_REFUSALS:
+                # The model is asked no more: the calls it planned and has not made run without it.
+                capped, text = True, CAPPED
+                for call in planned:
+                    if calls == MAX_TOOL_CALLS:
+                        past_the_cap(call)
+                        stopped = CAP
+                        break
+                    execute(call)
+                break
     except Exception as error:
         raised = error
     citations = [r for r in results if isinstance(r, Citation)]
@@ -272,12 +383,16 @@ def ask(
         # Written outside the `except`, so an `AuditWriteFailed` carries no context.
         record(audit, persona, session, question, ("failed", stage), metrics, runs, None)
         raise raised
-    if stopped:
-        outcome: tuple[str, str | None] = ("stopped", CAP)
+    if stopped is not None:
+        outcome: tuple[str, str | None] = ("stopped", stopped)
     elif citations:
         outcome = ("answered", None)
+    elif capped:
+        outcome = ("stopped", REFUSAL_CAP)
     elif denied:
         outcome = ("refused", "policy")
+    elif unplanned:
+        outcome = ("refused", UNPLANNED_REASON)
     else:
         outcome = ("abstained", None)
     record(audit, persona, session, question, outcome, metrics, runs, text)
@@ -288,6 +403,11 @@ def ask(
         tuple(r for r in results if isinstance(r, Citation)),
         tuple(r for r in results if isinstance(r, Refusal)),
     )
+
+
+def _text(value: object) -> str:
+    """A model's value as a refusal holds it: a string as it is, anything else as its `repr`."""
+    return value if isinstance(value, str) else repr(value)
 
 
 def now() -> str:

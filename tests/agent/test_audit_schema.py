@@ -312,8 +312,16 @@ def test_a_refused_or_stopped_turn_states_its_reason_and_only_no_identity_leaves
     assert errors(validator, record) == []
     record.update(outcome="refused", reason="policy")
     assert errors(validator, record) == []
+    record.update(outcome="refused", reason="unplanned")
+    assert errors(validator, record) == []
+    record.update(outcome="refused", reason="model-refusal-cap")
+    assert errors(validator, record) != [], "the refusal cap stops a turn and refuses none"
     record.update(outcome="stopped", reason="model-call-cap")
     assert errors(validator, record) == []
+    record.update(outcome="stopped", reason="model-refusal-cap")
+    assert errors(validator, record) == []
+    record.update(outcome="stopped", reason="unplanned")
+    assert errors(validator, record) != [], "an unplanned call refuses, it stops no turn"
     record.update(outcome="stopped", reason="policy")
     assert errors(validator, record) != []
     del record["reason"]
@@ -341,7 +349,7 @@ def test_a_failed_turn_states_its_reason_keeps_its_runs_and_has_no_answer_seal(
     assert errors(validator, record) == [], "a failed turn keeps the runs that returned"
     record.update(runs=[], metrics=[])
     assert errors(validator, record) == []
-    for wrong in ("policy", "model-call-cap", "a sentence about the error"):
+    for wrong in ("policy", "unplanned", "model-call-cap", "model-refusal-cap", "a sentence"):
         record["reason"] = wrong
         assert errors(validator, record) != [], wrong
     del record["reason"]
