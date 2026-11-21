@@ -1,17 +1,22 @@
 """The own agent's one question-to-answer interface: `ask(persona, question, as_persona=...)`.
 
-`ask` shows the model (`agent/model.py`) the question and the verified queries of the metric
-context (`semantics/context.json`), runs each verified query the model names with the one
-read-only tool, `run_metric_query`, and returns an `Answer` citing what each run returned.
+`ask` shows the model (`agent/model.py`) the question, the verified queries and the glossary of
+the metric context (`semantics/context.json`, or what the caller passes), and the column
+descriptions the caller passes, runs each verified query the model names with the one read-only
+tool, `run_metric_query`, and returns an `Answer` citing what each run returned.
 
 What `ask` checks, in this order:
 - the persona must be a string equal to a persona id of the personas catalogue (by default
   `access/personas.yaml`), compared exactly, with no stripping or case folding; anything else
   raises `NoPersonaError`, before the metric context is loaded, the model is asked or a
   connection is opened;
-- for each tool call: the query id names a verified query of the context; the tool policy
-  (`agent/policy/tools.py`) allows the persona to run `run_metric_query` on the query's metric;
-  only then is a connection opened, by calling `as_persona(persona)`, at most once per `ask`;
+- for each tool call, in this order: a call to `run_metric_query` must name a verified query of
+  the context; the call is put to the tool policy (`agent/policy/tools.py`) with the tool the
+  model named, the persona, and as resource the query's metric for `run_metric_query`, the
+  `Ledger` of the call's id for `propose_entry`, and a `Metric` of the call's id for any other
+  tool; a denial is a `Refusal` naming the policy's reasons; a call the policy allows to any tool
+  but `run_metric_query` is a `Refusal` too, since `ask` runs no other tool; only then is a
+  connection opened, by calling `as_persona(persona)`, at most once per `ask`;
 - the model gets at most `MAX_TOOL_CALLS` tool calls; one more is refused and ends the turn.
 
 How the tool runs a query: on a new cursor of the persona's connection (in DuckDB a cursor is a
@@ -32,14 +37,20 @@ Stated limits:
   its product is not entity-scoped, and that error is a `NoPersonaError` too;
 - the query is not checked to be a single read: the persona's connection on the local engine is
   read-only, which is what stops a write;
-- no audit record is written.
+- no audit record is written;
+- the glossary, the column descriptions and a result's cells reach the model as they are: the
+  policy decides which tool runs and for which persona, not which verified query the persona's
+  model may ask for, so an instruction in that text naming a verified query the persona may run
+  gets it run (`tests/agent/test_injection.py` pins this);
+- no column description is given to the model unless the caller passes it: the metric context
+  holds none.
 """
 
 import json
 import os
 import re
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,7 +61,10 @@ import yaml
 
 from access.identities import UnknownPersonaError, identity
 from agent.model import (
+    READ_ONLY_TOOL,
     Citation,
+    ColumnDescription,
+    GlossaryTerm,
     Model,
     Refusal,
     Reply,
@@ -63,7 +77,11 @@ from agent.policy.tools import Entity, authorize
 REPO = Path(__file__).resolve().parents[1]
 CONTEXT = REPO / "semantics" / "context.json"
 PERSONAS = REPO / "access" / "personas.yaml"
-TOOL = "run_metric_query"
+TOOL = READ_ONLY_TOOL
+# The resource type a tool call is put to the policy with, by tool, as the policy's schema
+# (`agent/policy/tools.cedarschema`) declares it; a tool it does not declare is asked about a
+# `Metric`, and the schema refuses the request for its action.
+RESOURCE = {TOOL: "Metric", "propose_entry": "Ledger"}
 MAX_TOOL_CALLS = 3
 # A schema of the persona's database as `access/compile.py` names it: a purpose's id with `_` for
 # `-`, or `main`.
@@ -106,6 +124,15 @@ def load_context(path: Path = CONTEXT) -> dict[str, VerifiedQuery]:
     }
 
 
+def load_glossary(path: Path = CONTEXT) -> tuple[GlossaryTerm, ...]:
+    """The glossary of the metric context, its terms in the file's order."""
+    context = json.loads(path.read_text(encoding="utf-8"))
+    return tuple(
+        GlossaryTerm(term_id, term["term"], term["definition"])
+        for term_id, term in context["glossary"].items()
+    )
+
+
 def ask(
     persona: Any,
     question: str,
@@ -114,6 +141,8 @@ def ask(
     model: Model | None = None,
     queries: Mapping[str, VerifiedQuery] | None = None,
     catalogue: Mapping[str, Any] | None = None,
+    glossary: Sequence[GlossaryTerm] | None = None,
+    columns: Sequence[ColumnDescription] = (),
 ) -> Answer:
     """Answer `question` for `persona`, running tools only on `as_persona(persona)`'s connection.
 
@@ -128,32 +157,35 @@ def ask(
     except (UnknownPersonaError, ValueError) as error:
         raise NoPersonaError(f"{persona!r} is not a persona of the catalogue") from error
     queries = load_context() if queries is None else queries
+    shown = (tuple(load_glossary() if glossary is None else glossary), tuple(columns))
     model = model_from_config(os.environ, queries) if model is None else model
     session = uuid.uuid4().hex
     connection: duckdb.DuckDBPyConnection | None = None
     results: list[Citation | Refusal] = []
     calls = 0
     while True:
-        step = model.step(Turn(question, tuple(queries.values()), tuple(results)))
+        step = model.step(Turn(question, tuple(queries.values()), tuple(results), *shown))
         if isinstance(step, Reply):
             text = step.text
             break
         if calls == MAX_TOOL_CALLS:
             reason = f"the model made no reply within {MAX_TOOL_CALLS} tool calls"
-            results.append(Refusal(step.query, reason))
+            results.append(Refusal(step.query, reason, step.tool))
             text = reason
             break
         calls += 1
-        query = queries.get(step.query)
-        if query is None:
+        query = queries.get(step.query) if step.tool == TOOL else None
+        if step.tool == TOOL and query is None:
             results.append(Refusal(step.query, "the metric context holds no such verified query"))
             continue
-        decision = authorize(
-            Entity("Persona", persona), TOOL, Entity("Metric", query.metric), {"session": session}
-        )
+        resource = Entity(RESOURCE.get(step.tool, "Metric"), query.metric if query else step.query)
+        decision = authorize(Entity("Persona", persona), step.tool, resource, {"session": session})
         if not decision:
             reasons = "; ".join(decision.reasons)
-            results.append(Refusal(query.id, f"the tool policy denied it: {reasons}"))
+            results.append(Refusal(step.query, f"the tool policy denied it: {reasons}", step.tool))
+            continue
+        if query is None:
+            results.append(Refusal(step.query, f"ask runs no tool named {step.tool}", step.tool))
             continue
         if connection is None:
             connection = as_persona(persona)

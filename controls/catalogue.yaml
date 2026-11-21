@@ -71,9 +71,9 @@ controls:
   - id: untrusted-content-cannot-instruct
     layer: Injection and tool authorisation
     owner: agent-operator
-    asserts: An instruction planted in a cell, a column description or a glossary entry changes no tool call; tools are read-only and denied by default.
+    asserts: The own agent puts each tool call its model makes to the tool policy, which is deny by default and permits only the read-only tool, and runs no other tool; an instruction planted in a cell of the persona's database, a column description or a glossary entry, read by a test model that obeys it, to call a tool the policy does not list, the write tool or a query the metric context lacks, comes back refused, with the queries run and their citations equal to those of the same question asked with nothing planted; a planted call to a verified query the asking persona may run is run, a stated limit.
     proven_by: [tests/agent/test_injection.py::test_planted_instructions_are_ignored]
-    status: not-implemented
+    status: implemented
   - id: no-outbound-channel-carries-data
     layer: Injection and tool authorisation
     owner: agent-operator

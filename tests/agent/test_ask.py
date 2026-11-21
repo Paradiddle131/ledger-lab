@@ -15,7 +15,8 @@ from typing import Any
 import duckdb
 import pytest
 
-from agent.ask import Answer, NoPersonaError, ask, load_context, run_metric_query
+from agent import ask as ask_module
+from agent.ask import Answer, NoPersonaError, ask, load_context, load_glossary, run_metric_query
 from agent.model import (
     MODEL_VARIABLE,
     Model,
@@ -28,6 +29,7 @@ from agent.model import (
     VerifiedQuery,
     model_from_config,
 )
+from agent.policy.tools import Decision, Entity
 
 AsPersona = Callable[[str], duckdb.DuckDBPyConnection]
 # A verified question over the payments of one entity, Chicago: a persona reading Chicago's rows
@@ -280,3 +282,94 @@ def test_the_model_comes_from_configuration() -> None:
     assert isinstance(model_from_config({MODEL_VARIABLE: "scripted"}, context), ScriptedModel)
     with pytest.raises(ModelNotConfigured):
         model_from_config({MODEL_VARIABLE: "some-hosted-model"}, context)
+
+
+class Calls:
+    """A model that makes the given tool calls in order, then replies."""
+
+    def __init__(self, *calls: ToolCall) -> None:
+        self._calls = calls
+
+    def step(self, turn: Turn) -> ToolCall | Reply:
+        if len(turn.results) < len(self._calls):
+            return self._calls[len(turn.results)]
+        return Reply("done")
+
+
+# Tools the tool policy's schema does not declare (`agent/policy/tools.cedarschema`), and the
+# write it declares and no policy permits.
+UNLISTED = [ToolCall("example.invalid", "fetch_url"), ToolCall("select 1", "run_sql")]
+WRITE = ToolCall("chicago", "propose_entry")
+
+
+@pytest.mark.parametrize("call", [*UNLISTED, WRITE], ids=lambda call: call.tool)
+def test_an_unlisted_or_write_tool_is_denied_through_ask(
+    as_persona: AsPersona, call: ToolCall
+) -> None:
+    """A tool call the model makes for any tool but the read-only one comes back a refusal from
+    the tool policy, with no connection opened and nothing run."""
+    recorder = Recorder(as_persona, Calls(call))
+    answer = asked(recorder, CHICAGO)
+    assert recorder.opened == []
+    assert answer.citations == ()
+    (refusal,) = answer.refusals
+    assert (refusal.tool, refusal.query) == (call.tool, call.query)
+    assert refusal.reason.startswith("the tool policy denied it: ")
+    if call is WRITE:
+        assert "no policy permits propose_entry" in refusal.reason
+    else:
+        assert "does not exist in the supplied schema" in refusal.reason
+
+
+def test_each_tool_call_naming_a_tool_or_a_verified_query_is_put_to_the_policy(
+    as_persona: AsPersona, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ask` asks `authorize` once per such call, naming the tool the model asked for; the request
+    for the write tool names the ledger it would act on."""
+    asked_for: list[tuple[str, Entity]] = []
+    authorize = ask_module.authorize
+
+    def recording(
+        principal: Entity, action: str, resource: Entity, context: dict[str, object]
+    ) -> Decision:
+        asked_for.append((action, resource))
+        return authorize(principal, action, resource, context)
+
+    monkeypatch.setattr(ask_module, "authorize", recording)
+    recorder = Recorder(as_persona, Calls(UNLISTED[0], WRITE, ToolCall(QUERY)))
+    answer = asked(recorder, CHICAGO)
+    assert asked_for == [
+        ("fetch_url", Entity("Metric", "example.invalid")),
+        ("propose_entry", Entity("Ledger", "chicago")),
+        ("run_metric_query", Entity("Metric", "duplicate_payment_rate")),
+    ]
+    assert [c.query for c in answer.citations] == [QUERY]
+    assert recorder.opened == [CHICAGO]
+
+
+def test_a_tool_the_policy_allows_but_ask_does_not_run_is_refused(
+    as_persona: AsPersona, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Were a policy to permit the write tool, `ask` would still run nothing: it runs only
+    `run_metric_query`."""
+    monkeypatch.setattr(
+        ask_module, "authorize", lambda *_: Decision(allowed=True, policies=("planted",))
+    )
+    recorder = Recorder(as_persona, Calls(WRITE))
+    answer = asked(recorder, CHICAGO)
+    assert recorder.opened == []
+    assert answer.citations == ()
+    assert answer.refusals == (
+        Refusal("chicago", "ask runs no tool named propose_entry", WRITE.tool),
+    )
+
+
+def test_the_model_is_shown_the_glossary_of_the_metric_context(
+    as_persona: AsPersona, scripted: Model
+) -> None:
+    recorder = Recorder(as_persona, scripted)
+    asked(recorder, CHICAGO)
+    glossary = load_glossary()
+    assert {term.id for term in glossary} >= {"duplicate-payment-rate", "constant-currency"}
+    assert all(turn.glossary == glossary for turn in recorder.turns)
+    assert all(turn.columns == () for turn in recorder.turns)
