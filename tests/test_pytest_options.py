@@ -39,5 +39,5 @@ def test_a_plain_run_leaves_out_exactly_the_declared_markers() -> None:
     assert not any("collect_ignore" in text for text in conftests)
 
 
-def test_an_empty_parametrize_fails_collection() -> None:
+def test_empty_parameter_set_mark_is_fail_at_collect() -> None:
     assert OPTIONS["empty_parameter_set_mark"] == "fail_at_collect"

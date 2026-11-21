@@ -845,6 +845,7 @@ def test_each_case_gets_its_own_copy_of_the_committed_parse(
     committed: Block, committed_once: Block
 ) -> None:
     assert committed == committed_once and committed is not committed_once
+    assert all(committed[key] is not committed_once[key] for key in committed_once)
     kept = copy.deepcopy(committed_once)
     committed["metrics"][0]["config"]["meta"].clear()
     committed["semantic_models"][0]["measures"].clear()
