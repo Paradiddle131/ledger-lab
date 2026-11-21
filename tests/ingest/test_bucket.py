@@ -216,7 +216,7 @@ def test_the_lab_landing_bucket_is_accepted() -> None:
         ("gs://another-bucket", LAB, "the lab's landing bucket"),
         ("gs://the-lab-project-landing/raw", LAB, "never a folder"),
         ("gs://the-lab-project-landing", {}, "unset"),
-        ("gs://another-lab-landing", {"GCP_PROJECT": "another-lab"}, "belongs to another lab"),
+        ("gs://another-lab-landing", {"GCP_PROJECT": "another-lab"}, "may belong to another lab"),
         ("gs://the-lab-project-landing", LAB | {"GCP_PROJECT": "another-lab"}, "another lab"),
     ],
 )
