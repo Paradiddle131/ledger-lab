@@ -1,0 +1,92 @@
+# The golden set: finance questions the own agent (agent/ask.py) is scored on, each asked as a
+# persona of access/personas.yaml and answered by a verified query of semantics/context.json. The
+# expected results are frozen as data: the columns and rows each verified query returned on the
+# asking persona's database over the committed sample build when the case was written; they hold
+# rates, totals and the grain values (bases, entity ids) of aggregate results, no row of a payment
+# and no payee. A case expecting `abstains` is one whose persona the tool policy
+# (agent/policy/tools.cedar) refuses the query, so the right answer cites no figure.
+# agent/evals/score.py scores an answer by running the SQL it cites again and comparing the result
+# with the expected one; tests/agent/test_evaluation.py checks this file and the scoring.
+# Shape: agent/evals/golden.schema.json.
+
+cases:
+  - id: duplicate-rows-as-the-payables-clerk
+    question: What share of the City of Chicago's served payment rows repeat another served row?
+    persona: payables-clerk
+    query: duplicate-payment-rate
+    expected:
+      columns: [duplicate_payment_rate]
+      rows: [[0.04054054054054054]]
+
+  # The UK accountant's database holds no Chicago payment, so the share is the null of an empty sum.
+  - id: duplicate-rows-as-the-uk-accountant
+    question: What share of the City of Chicago's served payment rows repeat another served row?
+    persona: accountant-uk-transport
+    query: duplicate-payment-rate
+    expected:
+      columns: [duplicate_payment_rate]
+      rows: [[null]]
+
+  - id: duplicate-dollars-as-the-payables-clerk
+    question: >-
+      What share of the dollars of the City of Chicago's served payment rows sits on rows that
+      repeat another served row?
+    persona: payables-clerk
+    query: duplicate-payment-amount-rate
+    expected:
+      columns: [duplicate_payment_amount_rate]
+      rows: [[0.07903536558234014]]
+
+  - id: constant-currency-by-basis-as-the-group-controller
+    question: What was spent on each basis, in euros at constant rates?
+    persona: group-controller
+    query: constant-currency-spend-by-basis
+    expected:
+      columns: [group_total__basis, constant_currency_spend]
+      rows:
+        - [contract-payments, 285520.36]
+        - [direct-vouchers, 17947.69]
+        - [payments-over-25k, 12372875.2]
+
+  # Chicago's figures sit on two bases, so its constant-currency spend is null.
+  - id: constant-currency-by-entity-as-the-group-controller
+    question: >-
+      What did each entity spend, in euros at constant rates, where all its figures share one
+      basis?
+    persona: group-controller
+    query: constant-currency-spend-by-entity
+    expected:
+      columns: [group_total__entity_id, constant_currency_spend]
+      rows:
+        - [chicago, null]
+        - [uk-transport, 12372875.2]
+
+  - id: constant-currency-by-basis-and-year-as-the-auditor
+    question: What was spent on each basis in each fiscal year, in euros at constant rates?
+    persona: auditor
+    query: constant-currency-spend-by-basis-and-fiscal-year
+    expected:
+      columns: [group_total__basis, group_total__fiscal_year, constant_currency_spend]
+      rows:
+        - [contract-payments, 2026, 285520.36]
+        - [direct-vouchers, 2026, 17947.69]
+        - [payments-over-25k, 2025, 12372875.2]
+
+  # The agent operator reads the log, never data: the tool policy denies it every metric's query.
+  - id: duplicate-rows-as-the-agent-operator
+    question: What share of the City of Chicago's served payment rows repeat another served row?
+    persona: agent-operator
+    query: duplicate-payment-rate
+    expected:
+      abstains: true
+
+# Headline metrics with a verified query that no case covers: tests/agent/test_evaluation.py holds
+# that each of their verified queries fails on every persona's database the tool policy lets run
+# it, so a metric that becomes answerable fails that test until a case covers it.
+uncovered:
+  - metric: spend_against_award
+    reason: No persona's database holds the contract reconciliation its verified queries read.
+  - metric: remaining_commitment
+    reason: No persona's database holds the contract reconciliation its verified queries read.
+  - metric: paid_over_award
+    reason: No persona's database holds the contract reconciliation its verified queries read.
