@@ -392,7 +392,20 @@ def test_every_call_is_a_read_on_the_lab_project_only() -> None:
     assert code == 0, out
     assert gcp.calls, "the check made no call to judge"
     assert all(f"--project_id={PROJECT}" in c for c in gcp.calls if c[0] == "bq"), gcp.calls
-    assert all(PROJECT in " ".join(c) for c in gcp.calls if c[0] == "curl"), gcp.calls
+    for command in (c for c in gcp.calls if c[0] == "curl"):
+        url = command[-1]
+        billed = [v for f, v in zip(command, command[1:], strict=False) if f == "-H"]
+        billed = [v for v in billed if v.lower().startswith("x-goog-user-project:")]
+        # A project's resource names the lab project as its whole path segment, and is billed to
+        # the lab's project or to none; any other read is on the lab's billing account and is
+        # billed to the lab's project alone.
+        on_project = re.search(r"/projects/([^/:]+)(?:[/:]|$)", url)
+        if on_project:
+            assert on_project.group(1) == PROJECT, command
+            assert billed in ([], [f"x-goog-user-project: {PROJECT}"]), command
+        else:
+            assert re.search(rf"/{re.escape(ACCOUNT)}(?:[/:]|$)", url), command
+            assert billed == [f"x-goog-user-project: {PROJECT}"], command
     for command in gcp.calls:
         if command[0] == "curl":
             method = command[command.index("-X") + 1] if "-X" in command else "GET"
