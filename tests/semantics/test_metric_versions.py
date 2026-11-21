@@ -350,6 +350,19 @@ def test_git_attributes_cannot_hide_a_change_on_main(
     assert lines(report) == still("fixed_award", "spend_against_award"), report
 
 
+def test_a_case_that_empties_the_gates_cache_puts_it_back(tmp_path: Path) -> None:
+    """The cases above parse `origin/main` afresh, and the cache other cases read survives them."""
+    planted = {"a-tree-id": {}}
+    with pytest.MonkeyPatch.context() as outer:
+        outer.setattr(versions, "_PUBLISHED", planted)
+        with pytest.MonkeyPatch.context() as inner:
+            test_git_attributes_cannot_hide_a_change_on_main(
+                tmp_path, next(iter(HIDDEN_BY_ATTRIBUTES)), inner
+            )
+        assert versions._PUBLISHED is planted  # pyright: ignore[reportPrivateUsage]
+        assert planted == {"a-tree-id": {}}
+
+
 VAR_EDITS: dict[str, Edit] = {
     "the constant-rates day": replaced(
         PROJECT_FILE, 'constant_rates_on: "2023-12-29"', 'constant_rates_on: "2025-06-30"'
