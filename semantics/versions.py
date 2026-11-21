@@ -76,12 +76,15 @@ nodes are held to. The placement configs (`PLACEMENT`) are `schema`, `alias`, `e
   disables is refused (a disabled metric or semantic model is read as gone, as before).
 - On either tree, Jinja in any file of the project dbt parses (not `models/profiles.yml`, whose
   settings the probes take only as literals) that names what dbt knows of its own invocation
-  (`INVOCATION`: `flags`, `invocation_args_dict`, `invocation_id`, and dbt's macros
+  (`INVOCATION`: `context`, `flags`, `invocation_args_dict`, `invocation_id`, and dbt's macros
   `should_full_refresh` and `should_store_failures`, which read a flag while the project is
   parsed) is refused: both parses run `dbt parse`, so a placement turning on the command or its
-  flags would be read as a parse gives it, not as a real build's. The names are dbt's own Jinja
-  lexer's name tokens, so a tag end inside a quoted string or a tag over several lines is read as
-  dbt reads it, and a file the lexer cannot read is refused.
+  flags would be read as a parse gives it, not as a real build's; so is `context`, dbt's whole
+  context, which reaches each of them by a key. A read is a name token of dbt's own Jinja lexer or
+  a word of a string token's decoded value (`context['flags']`, `dbt.get('should_full_refresh')`),
+  in the file's text and, for a schema file, in each string of its decoded YAML, which is what dbt
+  renders (so a YAML comment or escape hides none); a tag end inside a quoted string or a tag over
+  several lines is read as dbt reads it, and a text the lexer cannot read is refused.
 - On the working tree: a model, seed or snapshot's `schema` is the dataset `ROUTES` gives its
   folder, and none outside those folders; a routed folder's relation names (an alias, else the
   node's name) are its route's tables, each built once.
@@ -113,7 +116,8 @@ adapter's `_ALIASES`), though the outcome check still sees where it places a nod
 turns on the environment, the clock or command-line `--vars` is read as the gate's fixed
 environment gives it, not as a real build's, and the BigQuery output's settings the environment
 renders (its method and token) as the probes set them (`PROBED`), not as a real build's; one that
-reads the invocation by another name than `INVOCATION`'s is read as a parse gives it; one that
+reads the invocation by another name than `INVOCATION`'s (a key built from parts, such as
+`context['fl' ~ 'ags']`) is read as a parse gives it; one that
 turns on the project or region being one
 named value (the real project's id, which no file may hold, or a third region) is read as the two
 probes give it; SQL a node's Jinja runs through `run_query` or a `statement` block when dbt
@@ -310,15 +314,20 @@ JINJA = ("{{", "{%", "{#")
 # What Jinja can read of the dbt invocation itself, which differs between the gate's `dbt parse`
 # and a real build (`flags.WHICH`, `--full-refresh`, `--store-failures` and the rest): dbt's
 # `flags`, `invocation_args_dict` and `invocation_id`, and dbt's own macros that read a flag while a
-# project is parsed. A placement turning on any of them is not the build's, so the gate refuses each
-# read by name, as a name token of dbt's own Jinja lexer, in every file of the project dbt parses.
+# project is parsed, and `context`, dbt's whole context, which reaches each of them by a key. A
+# placement turning on any of them is not the build's, so the gate refuses each read by name, in
+# every file of the project dbt parses: a name token of dbt's own Jinja lexer, or a word of a string
+# token's value (`context['flags']`, `dbt.get('should_full_refresh')`), and in a schema file also in
+# each string of the YAML as decoded, which is what dbt renders.
 INVOCATION = (
+    "context",
     "flags",
     "invocation_args_dict",
     "invocation_id",
     "should_full_refresh",
     "should_store_failures",
 )
+INVOCATION_WORD = re.compile(r"\b(?:" + "|".join(INVOCATION) + r")\b")
 # Git's modes for a file and an executable file; anything else (a link, a submodule) is refused.
 FILE_MODES = ("100644", "100755")
 DUCKDB_FILE = "ledger_lab.duckdb"
@@ -660,26 +669,54 @@ def jinja_at(
                 yield ".".join(str(p) for p in path)
 
 
-def invocation_reads(path: str, text: str) -> list[str]:
-    """What the gate refuses of a file's Jinja reading the dbt invocation (`INVOCATION`): each name
-    token of `INVOCATION` that dbt's own Jinja lexer finds in the file, so a delimiter inside a
-    string literal, a tag over several lines and whitespace control read as dbt reads them, while
-    a comment, a `raw` block and the text between tags hold no name token. A file the lexer
-    cannot read is refused, since what it would run is unknown."""
+def yaml_strings(value: object) -> Iterator[str]:
+    """Every string of a decoded YAML document, keys included: what dbt renders, after YAML's own
+    comments, escapes and folding are gone."""
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            yield item
+        elif isinstance(item, dict):
+            pending += [*item.keys(), *item.values()]
+        elif isinstance(item, list):
+            pending += item
+
+
+def invocation_reads(path: str, *texts: str) -> list[str]:
+    """What the gate refuses of a file's Jinja reading the dbt invocation (`INVOCATION`), in each of
+    `texts` (the file's text, and for a schema file each string of its decoded YAML): each name
+    token of `INVOCATION` that dbt's own Jinja lexer finds, and each such word in a string token's
+    value as Jinja decodes it, so a delimiter inside a string literal, a tag over several lines, an
+    escape and whitespace control read as dbt reads them, while a comment, a `raw` block and the
+    text between tags hold no token that is read. A text the lexer cannot read is refused, since
+    what it would run is unknown."""
     from dbt_common.clients.jinja import get_environment
     from jinja2 import TemplateSyntaxError
 
-    try:
-        names = {value for _, kind, value in get_environment().lex(text) if kind == "name"}
-    except TemplateSyntaxError as error:
-        return [
-            f"{path}: its Jinja does not lex (line {error.lineno}), so the gate cannot read what"
-            " it runs, which the gate refuses"
-        ]
+    lexer = get_environment().lexer
+    read: set[str] = set()
+    for text in texts:
+        if not any(mark in text for mark in JINJA):
+            continue
+        try:
+            tokens = list(lexer.tokenize(text))
+        except TemplateSyntaxError as error:
+            return [
+                f"{path}: its Jinja does not lex (line {error.lineno}), so the gate cannot read"
+                " what it runs, which the gate refuses"
+            ]
+        read |= {t.value for t in tokens if t.type == "name" and t.value in INVOCATION}
+        read |= {
+            word
+            for t in tokens
+            if t.type == "string"
+            for word in INVOCATION_WORD.findall(str(t.value))
+        }
     return [
         f"{path}: its Jinja reads {name}, which differs between the gate's parse and a real build,"
         " which the gate refuses"
-        for name in sorted(names.intersection(INVOCATION))
+        for name in sorted(read)
     ]
 
 
@@ -811,7 +848,10 @@ def parse_and_refuse(project: Path, report: Path) -> int:
             refused.append("dbt read a file outside the tree")
             continue
         path = found_at.relative_to(tree).as_posix()
-        refused += invocation_reads(path, found_at.read_text(errors="replace"))
+        decoded = (
+            list(yaml_strings(file.dict_from_yaml)) if isinstance(file, SchemaSourceFile) else []
+        )
+        refused += invocation_reads(path, found_at.read_text(errors="replace"), *decoded)
         if not isinstance(file, SchemaSourceFile):
             continue
         for key, entries in (file.dict_from_yaml or {}).items():

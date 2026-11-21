@@ -889,6 +889,60 @@ ROUTING_REFUSED: dict[str, tuple[Edit, list[str]]] = {
         payments_on("\n    flags.WHICH != 'parse'\n"),
         [reads_invocation(PAYMENTS_SQL, "flags")],
     ),
+    "a config() call only a command other than parse reaches, read through dbt's context": (
+        payments_on("context['flags'].WHICH != 'parse'"),
+        [reads_invocation(PAYMENTS_SQL, "context"), reads_invocation(PAYMENTS_SQL, "flags")],
+    ),
+    "a config() call only the invocation's arguments reach, got from dbt's context": (
+        payments_on("context.get('invocation_args_dict', {}).get('which') == 'build'"),
+        [
+            reads_invocation(PAYMENTS_SQL, "context"),
+            reads_invocation(PAYMENTS_SQL, "invocation_args_dict"),
+        ],
+    ),
+    "a config() call only a full-refresh build reaches, the macro taken by a key": (
+        payments_on("dbt['should_full_refresh']()"),
+        [reads_invocation(PAYMENTS_SQL, "should_full_refresh")],
+    ),
+    "a config() call only a build storing failures reaches, the macro got by name": (
+        payments_on("dbt.get('should_store_failures')()"),
+        [reads_invocation(PAYMENTS_SQL, "should_store_failures")],
+    ),
+    "a generic test's schema by the command, hidden from the file's text by YAML comments": (
+        replaced(
+            CHICAGO_DOCS,
+            "          - not_null\n      - name: revision_number",
+            "          - not_null:\n              # {{ '\n              config:\n"
+            "                schema: >-\n"
+            '                  {{ "payments" if flags.WHICH == "build" else none }}\n'
+            "                store_failures: true\n              # ' }}\n"
+            "      - name: revision_number",
+        ),
+        [reads_invocation(CHICAGO_DOCS, "flags")],
+    ),
+    "a generic test's schema by the command, its quotes YAML escapes": (
+        replaced(
+            CHICAGO_DOCS,
+            "          - not_null\n      - name: revision_number",
+            "          - not_null:\n              config:\n"
+            "                schema: \"{{ 'payments' if ('\\x27 ~ flags.WHICH ~ \\x27') =="
+            " 'build' else none }}\"\n"
+            "                store_failures: true\n"
+            "      - name: revision_number",
+        ),
+        [reads_invocation(CHICAGO_DOCS, "flags")],
+    ),
+    "a generic test's schema by the command, the name a YAML escape": (
+        replaced(
+            CHICAGO_DOCS,
+            "          - not_null\n      - name: revision_number",
+            "          - not_null:\n              config:\n"
+            "                schema: \"{{ 'payments' if \\x66lags.WHICH == 'build' else none }}\"\n"
+            "                store_failures: true\n"
+            "      - name: revision_number",
+        ),
+        [reads_invocation(CHICAGO_DOCS, "flags")],
+    ),
     "a generic test's schema that renders by the command": (
         replaced(
             CHICAGO_DOCS,
@@ -1810,7 +1864,7 @@ PASSES: dict[str, Edit] = {
         PAYMENTS_SQL,
         "\nselect",
         "\n-- flags.WHICH\n{# flags.WHICH #}{% raw %}{{ flags.WHICH }}{% endraw %}"
-        "{% set my_flags_col = 'invocation_id' %}\nselect",
+        "{% set my_flags_col = 'an_invocation_identifier' %}{#flags#}\nselect",
     ),
 }
 
