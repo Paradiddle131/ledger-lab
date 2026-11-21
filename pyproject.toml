@@ -94,6 +94,8 @@ markers = [
   "bigquery_persona: queries BigQuery as each persona by an impersonated token, off the cloud proxy",
 ]
 testpaths = ["tests"]
+# A parametrize given an empty list fails collection instead of skipping its test unseen.
+empty_parameter_set_mark = "fail_at_collect"
 # platform/ holds scripts run by path; tests import them as top-level modules.
 pythonpath = [".", "platform"]
 xfail_strict = true
