@@ -795,6 +795,13 @@ def payments_on(condition: str) -> Edit:
 PAYMENTS_MOVED = f"{ON_BIGQUERY}{PAYMENTS_NODE} lands in payments, {ROUTE_HELD} intermediate"
 
 
+def routed(path: str, route: str) -> str:
+    return (
+        f"{path}: its Jinja reaches what dbt holds by {route}, which the gate cannot follow to the"
+        " invocation and refuses"
+    )
+
+
 def reads_invocation(path: str, name: str) -> str:
     return (
         f"{path}: its Jinja reads {name}, which differs between the gate's parse and a real build,"
@@ -907,6 +914,26 @@ ROUTING_REFUSED: dict[str, tuple[Edit, list[str]]] = {
     "a config() call only a build storing failures reaches, the macro got by name": (
         payments_on("dbt.get('should_store_failures')()"),
         [reads_invocation(PAYMENTS_SQL, "should_store_failures")],
+    ),
+    "a config() call only a full-refresh build reaches, the macro's name built from parts": (
+        payments_on("dbt['should_' ~ 'full_refresh']()"),
+        [routed(PAYMENTS_SQL, "a key of dbt's macros")],
+    ),
+    "a config() call turning on the adapter's runtime config, whose arguments are the command's": (
+        payments_on("adapter.config.args"),
+        [routed(PAYMENTS_SQL, "the adapter's config")],
+    ),
+    "a config() call turning on a dispatch by a name built from parts": (
+        payments_on("adapter.dispatch('exact_' ~ 'decimal')"),
+        [routed(PAYMENTS_SQL, "a dispatch whose macro is not one string")],
+    ),
+    "a config() call turning on Python's internals": (
+        payments_on("''.__class__"),
+        [routed(PAYMENTS_SQL, "a name opening with __ (__class__)")],
+    ),
+    "a config() call only the selected resources reach": (
+        payments_on("selected_resources"),
+        [reads_invocation(PAYMENTS_SQL, "selected_resources")],
     ),
     "a generic test's schema by the command, hidden from the file's text by YAML comments": (
         replaced(

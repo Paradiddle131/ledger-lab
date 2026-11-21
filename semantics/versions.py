@@ -76,7 +76,8 @@ nodes are held to. The placement configs (`PLACEMENT`) are `schema`, `alias`, `e
   disables is refused (a disabled metric or semantic model is read as gone, as before).
 - On either tree, Jinja in any file of the project dbt parses (not `models/profiles.yml`, whose
   settings the probes take only as literals) that names what dbt knows of its own invocation
-  (`INVOCATION`: `context`, `flags`, `invocation_args_dict`, `invocation_id`, and dbt's macros
+  (`INVOCATION`: `context`, `flags`, `invocation_args_dict`, `invocation_id`, `selected_resources`,
+  and dbt's macros
   `should_full_refresh` and `should_store_failures`, which read a flag while the project is
   parsed) is refused: both parses run `dbt parse`, so a placement turning on the command or its
   flags would be read as a parse gives it, not as a real build's; so is `context`, dbt's whole
@@ -84,7 +85,11 @@ nodes are held to. The placement configs (`PLACEMENT`) are `schema`, `alias`, `e
   a word of a string token's decoded value (`context['flags']`, `dbt.get('should_full_refresh')`),
   in the file's text or, for a schema file, in each string of its decoded YAML, which is what dbt
   renders (so a YAML comment or escape hides none); a tag end inside a quoted string or a tag over
-  several lines is read as dbt reads it, and a text the lexer cannot read is refused.
+  several lines is read as dbt reads it, and a text the lexer cannot read is refused. So are the
+  other ways to the invocation (`invocation_routes`): `dbt` but as `dbt.<macro>` (a key or a mapping
+  method reaches a flag macro by a name built from parts), `adapter` but as `adapter.<name>`, its
+  `config` (the runtime config, whose `args` are the command's), an `adapter.dispatch` whose macro
+  is not one string literal, and a name or string opening with `__`.
 - On the working tree: a model, seed or snapshot's `schema` is the dataset `ROUTES` gives its
   folder, and none outside those folders; a routed folder's relation names (an alias, else the
   node's name) are its route's tables, each built once.
@@ -116,8 +121,8 @@ adapter's `_ALIASES`), though the outcome check still sees where it places a nod
 turns on the environment, the clock or command-line `--vars` is read as the gate's fixed
 environment gives it, not as a real build's, and the BigQuery output's settings the environment
 renders (its method and token) as the probes set them (`PROBED`), not as a real build's; one that
-reads the invocation by another name than `INVOCATION`'s (a key built from parts, such as
-`context['fl' ~ 'ags']`) is read as a parse gives it; one that
+reaches the invocation by a name or a route the gate does not list (`INVOCATION`,
+`invocation_routes`) is read as a parse gives it; one that
 turns on the project or region being one
 named value (the real project's id, which no file may hold, or a third region) is read as the two
 probes give it; SQL a node's Jinja runs through `run_query` or a `statement` block when dbt
@@ -326,7 +331,12 @@ INVOCATION = (
     "invocation_id",
     "should_full_refresh",
     "should_store_failures",
+    "selected_resources",
 )
+# The other ways Jinja reaches the invocation, which `invocation_routes` refuses: dbt's macro
+# namespace by a key or a mapping method (`dbt['should_' ~ 'full_refresh']`), the adapter's runtime
+# config (`adapter.config.args`), a dispatch by a name not written whole, and Python's internals.
+MAPPING_METHODS = ("get", "items", "keys", "values", "pop", "setdefault", "copy", "update")
 INVOCATION_WORD = re.compile(r"\b(?:" + "|".join(INVOCATION) + r")\b")
 # Git's modes for a file and an executable file; anything else (a link, a submodule) is refused.
 FILE_MODES = ("100644", "100755")
@@ -696,6 +706,7 @@ def invocation_reads(path: str, *texts: str) -> list[str]:
 
     lexer = get_environment().lexer
     read: set[str] = set()
+    routes: set[str] = set()
     for text in texts:
         if not any(mark in text for mark in JINJA):
             continue
@@ -713,11 +724,43 @@ def invocation_reads(path: str, *texts: str) -> list[str]:
             if t.type == "string"
             for word in INVOCATION_WORD.findall(str(t.value))
         }
+        routes |= invocation_routes([(t.type, str(t.value)) for t in tokens])
     return [
         f"{path}: its Jinja reads {name}, which differs between the gate's parse and a real build,"
         " which the gate refuses"
         for name in sorted(read)
+    ] + [
+        f"{path}: its Jinja reaches what dbt holds by {route}, which the gate cannot follow to the"
+        " invocation and refuses"
+        for route in sorted(routes)
     ]
+
+
+def invocation_routes(tokens: list[tuple[str, str]]) -> set[str]:
+    """The ways a token stream reaches dbt's invocation other than by its names: `dbt` but as
+    `dbt.<macro>`, `adapter` but as `adapter.<name>` other than its `config`, an
+    `adapter.dispatch` whose macro is not one string literal, and a name or string opening with
+    `__`, Python's internals."""
+    routes: set[str] = set()
+    padded = [*tokens, ("eof", ""), ("eof", "")]
+    for n, (kind, value) in enumerate(tokens):
+        (next_kind, _), (follow_kind, follow) = padded[n + 1], padded[n + 2]
+        attribute = follow if next_kind == "dot" and follow_kind == "name" else None
+        if kind in ("name", "string") and value.startswith("__"):
+            routes.add(f"a name opening with __ ({value})")
+        if kind != "name":
+            continue
+        if value == "dbt" and (attribute is None or attribute in MAPPING_METHODS):
+            routes.add("a key of dbt's macros")
+        if value == "adapter" and attribute is None:
+            routes.add("the adapter other than by an attribute")
+        if value == "adapter" and attribute == "config":
+            routes.add("the adapter's config")
+        if value == "adapter" and attribute == "dispatch":
+            call = [k for k, _ in padded[n + 3 : n + 6]]
+            if call[:2] != ["lparen", "string"] or call[2] not in ("rparen", "comma"):
+                routes.add("a dispatch whose macro is not one string")
+    return routes
 
 
 def parse_and_refuse(project: Path, report: Path) -> int:
