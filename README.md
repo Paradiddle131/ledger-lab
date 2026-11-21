@@ -143,12 +143,14 @@ The container stack needs Docker with Compose; the shared database always starts
 ```bash
 make stack-up                 # the shared database, one database per planned service
 make stack-up PROFILE=<name>  # plus one service
-make stack-test               # start the stack and check the running database
+make stack-test               # start the stack, check the running database and the agent's sessions
 make stack-down               # stop everything and drop its volumes
 ```
 
 The database password comes from `LEDGER_LAB_DB_PASSWORD` when it is set, else from a file `make stack-up` generates (ignored by git, deleted by `make stack-down`); `make stack-up` prints the loopback port it took (`LEDGER_LAB_DB_PORT` fixes one).
 After changing the password or the database list, run `make stack-down` first, because the server keeps what its volume was created with.
+
+The own agent keeps each person's sessions on the stack's `agent_sessions` database ([`agent/sessions.py`](agent/sessions.py)); `uv run python -m agent.sessions purge --log <audit log> --kept <its folder of kept values>`, with libpq's variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`) naming that database, removes the transcripts, and the audit records' kept values and salts, older than 30 days.
 
 The lab's GCP project comes only from `LEDGER_LAB_GCP_PROJECT`; `make cost-check` prints its month-to-date cost (with `LEDGER_LAB_BILLING_EXPORT` naming, as `dataset.table` in the lab project, the view over the billing export that the agent account may read; it holds data viewer on that view alone) and each spend fence's state, read live, and fails above $0.00 or on a loose fence; it prints $0.00 without any GCP call while no project is set, and fails as not checked, again without any GCP call, in a session that carries another lab's `GCP_PROJECT`, whatever `LEDGER_LAB_GCP_PROJECT` says.
 The project's spend fences, one service account per persona, the agent account's right to mint their tokens, the landing bucket and the warehouse's access rules (its datasets, the agent's builder role on them, the personas' dataset and query grants, and the policy tags with their masking rules and readers, generated from `access/personas.yaml` and `access/columns.yaml`) live in `platform/gcp/` as OpenTofu definitions; `make fences-validate` installs the pinned OpenTofu and validates them offline, and only the owner applies them.
