@@ -19,10 +19,10 @@ What `ask` checks, in this order:
   question and the verified queries only, with no glossary, no column description and no result;
   the turns after it show those as well;
 - for each tool call the model then makes, in this order:
-  - once `MAX_TOOL_CALLS` queries have been run (a query whose run raised an engine error counts;
-    a refused call does not), the call is refused, not put to the policy, and ends the turn;
-  - at the `MAX_STEPS`th model step, the call is refused, not put to the policy, and ends the
-    turn; each limit's refusal holds the `repr` of a tool or query that is not a string;
+  - once `MAX_TOOL_CALLS` calls have been handed to the tool, the call is refused, not put to the
+    policy, and ends the turn, its refusal holding the `repr` of a tool or query that is not a
+    string; each call handed to the tool counts, whether it returns rows or the tool refuses it;
+    a call refused before the tool does not;
   - the call must equal (tool and query) a planned call not yet made, each planned call counted
     as often as the plan holds it; any other call is a `Refusal` and is not put to the policy;
   - its tool and its query must each be a string, or the call is a `Refusal` holding the `repr`
@@ -36,6 +36,12 @@ What `ask` checks, in this order:
     no other tool;
   - only then is a connection opened, by calling `as_persona(persona)`, at most once per `ask`,
     and the query run;
+  - a call refused before the tool, unplanned or by one of the checks above, counts toward
+    `MAX_REFUSALS`; at that many, the model is asked for no more steps: the planned calls it has
+    not made are put through the same checks, the tool-call limit among them, in the plan's order,
+    without the model, and `ask` replies with its fixed text `CAPPED`;
+- so a turn takes at most `MAX_STEPS` model steps (`MAX_TOOL_CALLS` + `MAX_REFUSALS` + 1): each
+  step runs a query, is refused, or ends the turn;
 - once the turn has ended, its record is written (`AuditLog.append`, by default
   `agent.audit.FileLog`, which checks it against the schema and its seals before writing); when
   that raises, for any `Exception`, `ask` raises `AuditWriteFailed` and returns no `Answer`;
@@ -53,11 +59,12 @@ question, the answer's text, each run's result (`agent.audit.sealed_result` of i
 cells as `cell_text`) and its bound values, a seal, each under its own salt, the salt and value
 kept by the log apart from the record.
 Its outcome is `refused` with `no-identity` for no persona, `failed` when a step raised (above),
-`stopped` with `model-call-cap` at the tool-call limit or `model-step-cap` at the step limit,
-else `answered` when a query returned, `refused` with `policy` when none did and the tool policy
-denied one, `refused` with `unplanned` when none did, the policy denied none and a call was refused
-as unplanned, and `abstained` otherwise. A refusal for any other reason (a value that is not a
-string, a query the context lacks, a tool `ask` does not run) is not named in the record.
+`stopped` with `model-call-cap` at the tool-call limit, else `answered` when a query returned,
+`stopped` with `model-refusal-cap` when none did and the refusal limit was reached, `refused` with
+`policy` when none did and the tool policy denied one, `refused` with `unplanned` when none did,
+the policy denied none and a call was refused as unplanned, and `abstained` otherwise. A refusal
+for any other reason (a value that is not a string, a query the context lacks, a tool `ask` does
+not run) is not named in the record.
 
 How the tool runs a query: on a new cursor of the persona's connection (in DuckDB a cursor is a
 connection of its own to the same database, so it sees none of the parent's temporary objects),
@@ -89,9 +96,13 @@ Stated limits:
   log can still rewrite it from any record on, add to its end or cut its tail, and it verifies;
 - the glossary, the column descriptions and a result's cells reach the model as they are, on
   every turn but the planning one: an instruction there cannot add a tool call to the plan, but it
-  can shape the reply's text, and it can make the model skip a planned call;
-- the plan is the model's own reading of the question and the verified queries; a question that
-  itself carries an instruction is planned on like any other;
+  can shape the reply's text, make the model reply before it makes a planned call, and, through
+  refused calls, bring the turn to the refusal limit, after which the reply is `CAPPED`;
+- the planning turn shows the question and each verified query's question and SQL, and the
+  verified queries are trusted as the metric context's: an instruction in the asked question or
+  in a verified query is planned on like any other;
+- a turn that refused an unplanned or denied call but ran a query is recorded `answered` like a
+  turn that refused nothing: the record keeps no trace of the refused call;
 - no column description is given to the model unless the caller passes it: the metric context
   holds none.
 """
@@ -128,6 +139,7 @@ from agent.model import (
     Model,
     Refusal,
     Reply,
+    ToolCall,
     Turn,
     VerifiedQuery,
     model_from_config,
@@ -143,11 +155,18 @@ TOOL = READ_ONLY_TOOL
 # `Metric`, and the schema refuses the request for its action.
 RESOURCE = {TOOL: "Metric", "propose_entry": "Ledger"}
 MAX_TOOL_CALLS = 3
-# The model steps one `ask` takes at most, refused calls and the reply included: a call refused as
-# unplanned or by a check does not count toward `MAX_TOOL_CALLS`, so without this bound a model
-# that kept making such calls would never end the turn; it leaves room for the tool calls, as many
-# refusals again and more, and the reply.
-MAX_STEPS = 10
+# The refused tool calls the model may make in one `ask`, unplanned ones and ones a check refused
+# before the tool; at the last, `ask` asks the model for no more steps, runs the calls it planned
+# and has not made, through the same checks, and replies `CAPPED`. So no count of refused calls
+# keeps a planned call from its checks, and a turn takes at most `MAX_STEPS` model steps: each step
+# either runs a query (at most `MAX_TOOL_CALLS`), is refused (at most `MAX_REFUSALS`), or ends the
+# turn.
+MAX_REFUSALS = 5
+MAX_STEPS = MAX_TOOL_CALLS + MAX_REFUSALS + 1
+CAPPED = (
+    f"The model's further tool calls were refused after {MAX_REFUSALS} refused calls; the calls it"
+    " planned were run without it."
+)
 UNPLANNED = (
     "the call is not one the model planned before it was shown anything but the question and"
     " the verified queries, or it was planned fewer times"
@@ -158,10 +177,11 @@ SCHEMA = re.compile(r"[a-z_][a-z0-9_]*")
 
 ENGINE = "duckdb"
 AGENT = "own-agent"
-# The stop reasons of a turn that reached MAX_TOOL_CALLS or MAX_STEPS, and the refusal reason of
-# one whose only refusals of note were unplanned calls, from the schema's fixed lists.
+# The stop reasons of a turn that reached MAX_TOOL_CALLS, or MAX_REFUSALS with no query run, and
+# the refusal reason of one whose only refusals of note were unplanned calls, from the schema's
+# fixed lists.
 CAP = "model-call-cap"
-STEP_CAP = "model-step-cap"
+REFUSAL_CAP = "model-refusal-cap"
 UNPLANNED_REASON = "unplanned"
 # The reasons of a `failed` record, by the step that raised.
 MODEL_ERROR, POLICY_ERROR, CONNECTION_ERROR, TOOL_ERROR = (
@@ -279,76 +299,82 @@ def ask(
     connection: duckdb.DuckDBPyConnection | None = None
     results: list[Citation | Refusal] = []
     runs: list[Run] = []
-    denied = unplanned = False
+    denied = unplanned = capped = False
     stopped: str | None = None
-    calls = steps = 0
+    calls = refused = 0
     # The reason a `failed` record gives when the step under way raises.
     stage = MODEL_ERROR
     raised: Exception | None = None
     text = ""
+
+    def execute(call: ToolCall) -> bool:
+        """Put one planned call through the checks and run it; whether it was refused before the
+        tool."""
+        nonlocal connection, denied, calls, stage
+        if not (isinstance(call.query, str) and isinstance(call.tool, str)):
+            reason = "the tool or the query is not a string"
+            results.append(Refusal(_text(call.query), reason, _text(call.tool)))
+            return True
+        query = queries.get(call.query) if call.tool == TOOL else None
+        if call.tool == TOOL and query is None:
+            results.append(Refusal(call.query, "the metric context holds no such verified query"))
+            return True
+        stage = POLICY_ERROR
+        resource = Entity(RESOURCE.get(call.tool, "Metric"), query.metric if query else call.query)
+        decision = authorize(Entity("Persona", persona), call.tool, resource, {"session": session})
+        if not decision:
+            reasons = "; ".join(decision.reasons)
+            results.append(Refusal(call.query, f"the tool policy denied it: {reasons}", call.tool))
+            denied = True
+            return True
+        if query is None:
+            results.append(Refusal(call.query, f"ask runs no tool named {call.tool}", call.tool))
+            return True
+        if connection is None:
+            stage = CONNECTION_ERROR
+            connection = as_persona(persona)
+        stage = TOOL_ERROR
+        calls += 1
+        result, run = _run(connection, query, persona)
+        results.append(result)
+        if run is not None:
+            runs.append(run)
+        return False
+
+    def past_the_cap(call: ToolCall) -> str:
+        reason = f"the model made no reply within {MAX_TOOL_CALLS} tool calls"
+        results.append(Refusal(_text(call.query), reason, _text(call.tool)))
+        return reason
+
     try:
         stage = MODEL_ERROR
         planned = list(model.plan(Turn(question, tuple(queries.values()), ())))
         while True:
             stage = MODEL_ERROR
             step = model.step(Turn(question, tuple(queries.values()), tuple(results), *shown))
-            steps += 1
             if isinstance(step, Reply):
                 text = step.text
                 break
             if calls == MAX_TOOL_CALLS:
-                reason = f"the model made no reply within {MAX_TOOL_CALLS} tool calls"
-                results.append(Refusal(_text(step.query), reason, _text(step.tool)))
-                text, stopped = reason, CAP
+                text, stopped = past_the_cap(step), CAP
                 break
-            if steps == MAX_STEPS:
-                reason = f"the model made no reply within {MAX_STEPS} steps"
-                results.append(Refusal(_text(step.query), reason, _text(step.tool)))
-                text, stopped = reason, STEP_CAP
-                break
-            if step not in planned:
+            if step in planned:
+                planned.remove(step)
+                refused += execute(step)
+            else:
                 results.append(Refusal(_text(step.query), UNPLANNED, _text(step.tool)))
                 unplanned = True
-                continue
-            planned.remove(step)
-            if not (isinstance(step.query, str) and isinstance(step.tool, str)):
-                reason = "the tool or the query is not a string"
-                results.append(Refusal(_text(step.query), reason, _text(step.tool)))
-                continue
-            query = queries.get(step.query) if step.tool == TOOL else None
-            if step.tool == TOOL and query is None:
-                results.append(
-                    Refusal(step.query, "the metric context holds no such verified query")
-                )
-                continue
-            stage = POLICY_ERROR
-            resource = Entity(
-                RESOURCE.get(step.tool, "Metric"), query.metric if query else step.query
-            )
-            decision = authorize(
-                Entity("Persona", persona), step.tool, resource, {"session": session}
-            )
-            if not decision:
-                reasons = "; ".join(decision.reasons)
-                results.append(
-                    Refusal(step.query, f"the tool policy denied it: {reasons}", step.tool)
-                )
-                denied = True
-                continue
-            if query is None:
-                results.append(
-                    Refusal(step.query, f"ask runs no tool named {step.tool}", step.tool)
-                )
-                continue
-            if connection is None:
-                stage = CONNECTION_ERROR
-                connection = as_persona(persona)
-            stage = TOOL_ERROR
-            calls += 1
-            result, run = _run(connection, query, persona)
-            results.append(result)
-            if run is not None:
-                runs.append(run)
+                refused += 1
+            if refused == MAX_REFUSALS:
+                # The model is asked no more: the calls it planned and has not made run without it.
+                capped, text = True, CAPPED
+                for call in planned:
+                    if calls == MAX_TOOL_CALLS:
+                        past_the_cap(call)
+                        stopped = CAP
+                        break
+                    execute(call)
+                break
     except Exception as error:
         raised = error
     citations = [r for r in results if isinstance(r, Citation)]
@@ -361,6 +387,8 @@ def ask(
         outcome: tuple[str, str | None] = ("stopped", stopped)
     elif citations:
         outcome = ("answered", None)
+    elif capped:
+        outcome = ("stopped", REFUSAL_CAP)
     elif denied:
         outcome = ("refused", "policy")
     elif unplanned:

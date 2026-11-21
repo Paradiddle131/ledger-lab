@@ -71,10 +71,11 @@ controls:
   - id: untrusted-content-cannot-instruct
     layer: Injection and tool authorisation
     owner: agent-operator
-    asserts: The own agent's model plans its tool calls on a turn holding the question and the verified queries only, and a call it then makes that is not in the plan is refused and not put to the tool policy; an instruction planted in a cell of the persona's database, a column description or a glossary entry passed to the agent, read by a test model that obeys it, to call a tool the policy does not declare, the write tool, a query the metric context lacks, a verified query the asking persona may run, or the question's own query once more, comes back refused as unplanned, and the queries run, with the metric, version, SQL, columns and rows each cites (the planted cell put back), equal those of the same question asked with nothing planted, three planted calls in one glossary entry included; the text of the reply is the model's and is not checked.
+    asserts: The own agent's model plans its tool calls on a turn holding the question and the verified queries only, and a call it then makes that is not in the plan is refused and not put to the tool policy; an instruction planted in a cell of the persona's database, a column description or a glossary entry passed to the agent, read by a test model that obeys it, to call a tool the policy does not declare, the write tool, a query the metric context lacks, a verified query the asking persona may run, or the question's own query once more, comes back refused as unplanned, and the queries run, with the metric, version, SQL, columns and rows each cites (the planted cell put back), and the turn's audit record equal those of the same question asked with nothing planted; so do three planted calls in one glossary entry, and twenty across a glossary entry, a column description and a cell or all in a cell, where after five refused calls the agent asks the model no more and runs the planned query itself; the text of the reply is not checked.
     proven_by:
       - tests/agent/test_injection.py::test_planted_instructions_are_ignored
       - tests/agent/test_injection.py::test_three_planted_calls_leave_the_questions_query_to_run
+      - tests/agent/test_injection.py::test_more_planted_calls_than_the_refusal_limit_leave_the_questions_query_to_run
     status: implemented
   - id: no-outbound-channel-carries-data
     layer: Injection and tool authorisation
