@@ -15,6 +15,8 @@ values held in clear.
 
 import hashlib
 import json
+import os
+import stat
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,7 @@ import pytest
 from conftest import REPO, SAMPLED_SOURCES, git_out
 from jsonschema import Draft202012Validator
 
+import agent.audit
 from access.compile import open_persona
 from agent.ask import MAX_TOOL_CALLS, Audit, ask, load_context
 from agent.audit import (
@@ -31,6 +34,8 @@ from agent.audit import (
     AuditWriteFailed,
     ChainBroken,
     FileLog,
+    RecordRefused,
+    UnboundValue,
     bind,
     cell_text,
     new_salt,
@@ -458,14 +463,14 @@ def test_a_line_write_that_fails_part_way_leaves_the_log_as_it_was(
 ) -> None:
     """Half the record's line reaches the file, then the write raises: the log is truncated back,
     its chain verifies, and the next turn takes the position the failed one would have."""
-    import agent.audit
-
     assert isinstance(audit.log, FileLog)
     ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit)
     before = audit.log.path.read_bytes()
     real = agent.audit._write_all
 
     def torn(fd: int, data: bytes) -> None:
+        if not data.endswith(b"\n"):
+            return real(fd, data)  # the kept values' file, which is written in full
         real(fd, data[: len(data) // 2])
         raise OSError("the disk went away")
 
@@ -473,6 +478,7 @@ def test_a_line_write_that_fails_part_way_leaves_the_log_as_it_was(
     with pytest.raises(AuditWriteFailed):
         ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit)
     assert audit.log.path.read_bytes() == before
+    assert not (audit.log.kept / "1.json").exists()
     monkeypatch.setattr(agent.audit, "_write_all", real)
     ask(UK, QUESTION, as_persona=as_persona, audit=audit)
     records = read_log(audit.log.path.read_bytes())
@@ -548,3 +554,193 @@ def test_every_verified_query_bound_gives_the_rows_of_its_text(warehouse: Path) 
             assert sorted(map(repr, db.execute(text, values or []).fetchall())) == sorted(
                 map(repr, db.execute(query.sql).fetchall())
             ), query.id
+
+
+# What a failed append leaves behind
+
+# An invented marker asked inside the question, so the clear values of the turn can be searched for.
+MARKER = "INVENTED-MARKER-7f3a"
+
+
+def opened_path(fd: int) -> str:
+    return os.readlink(f"/proc/self/fd/{fd}")
+
+
+def failing(case: str, log: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make one step of the next append raise."""
+    write, fsync = agent.audit._write_all, os.fsync
+
+    def write_failing(fd: int, data: bytes) -> None:
+        # The log's line ends in a newline; the kept values' file does not.
+        if data.endswith(b"\n") == (case == "the line's write"):
+            write(fd, data[: len(data) // 2])
+            raise OSError("the disk went away")
+        write(fd, data)
+
+    def fsync_failing(fd: int) -> None:
+        path = opened_path(fd)
+        if (case == "the line's fsync" and path == str(log)) or (
+            case == "the temporary file's fsync" and path.endswith(".tmp")
+        ):
+            raise OSError("fsync failed")
+        fsync(fd)
+
+    def replace_failing(*_: Any) -> None:
+        raise OSError("rename failed")
+
+    if case.endswith("write"):
+        monkeypatch.setattr(agent.audit, "_write_all", write_failing)
+    elif case.endswith("fsync"):
+        monkeypatch.setattr(os, "fsync", fsync_failing)
+    else:
+        monkeypatch.setattr(os, "replace", replace_failing)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "the line's write",
+        "the line's fsync",
+        "the temporary file's write",
+        "the temporary file's fsync",
+        "the rename",
+    ],
+)
+def test_a_failed_append_leaves_no_value_of_its_turn_on_disk(
+    case: str, as_persona: AsPersona, audit: Audit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One step of the append raises: no answer, the log as it was, and no file under the folder
+    of kept values holds the marker the question carried; the next append then succeeds."""
+    assert isinstance(audit.log, FileLog)
+    ask(CHICAGO, UNANSWERED, as_persona=as_persona, audit=audit)
+    before = audit.log.path.read_bytes()
+    with monkeypatch.context() as patch:
+        failing(case, audit.log.path, patch)
+        with pytest.raises(AuditWriteFailed):
+            ask(CHICAGO, f"{QUESTION} {MARKER}", as_persona=as_persona, audit=audit)
+    assert audit.log.path.read_bytes() == before
+    held = [f.name for f in audit.log.kept.rglob("*") if MARKER.encode() in f.read_bytes()]
+    assert held == [], case
+    assert sorted(f.name for f in audit.log.kept.iterdir()) == ["0.json"]
+    ask(CHICAGO, UNANSWERED, as_persona=as_persona, audit=audit)
+    verify_chain(read_log(audit.log.path.read_bytes()))
+
+
+# The writer's own refusals, past the schema
+
+
+@pytest.fixture
+def written(as_persona: AsPersona, audit: Audit) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A record `ask` wrote, without its header, and its kept values: a body the writer takes."""
+    assert isinstance(audit.log, FileLog)
+    ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit)
+    (record,) = read_log(audit.log.path.read_bytes())
+    kept = {p: tuple(v) for p, v in json.loads((audit.log.kept / "0.json").read_text()).items()}
+    return {k: v for k, v in record.items() if k not in ("seq", "prev", "digest")}, kept
+
+
+def wrong_body(case: str, body: dict[str, Any], kept: dict[str, Any]) -> None:
+    if case == "a time that is no real instant":
+        body["at"] = "2026-02-30T10:00:05.000000Z"
+    elif case == "SQL with a value in clear":
+        body["runs"][0]["query"]["text"] = "select count(*) from payments where entity_id = 'x'"
+    elif case == "a missing kept value":
+        del kept["answer"]
+    elif case == "an extra kept value":
+        kept["note"] = (new_salt(), "an invented note")
+    elif case == "a kept value that does not open its seal":
+        kept["question"] = (new_salt(), kept["question"][1])
+    else:
+        raise AssertionError(case)
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("a time that is no real instant", "no real instant"),
+        ("SQL with a value in clear", "value in clear"),
+        ("a missing kept value", "kept values for"),
+        ("an extra kept value", "kept values for"),
+        ("a kept value that does not open its seal", "does not open its seal"),
+    ],
+)
+def test_the_writer_refuses_a_record_the_schema_lets_through(
+    case: str, message: str, written: tuple[dict[str, Any], dict[str, Any]], tmp_path: Path
+) -> None:
+    body, kept = written
+    log = FileLog(tmp_path / "other.jsonl", tmp_path / "other-kept")
+    log.append(copy_of(body), dict(kept))
+    changed, changed_kept = copy_of(body), dict(kept)
+    wrong_body(case, changed, changed_kept)
+    before = log.path.read_bytes()
+    with pytest.raises(RecordRefused, match=message):
+        log.append(changed, changed_kept)
+    assert log.path.read_bytes() == before
+    assert sorted(f.name for f in log.kept.iterdir()) == ["0.json"]
+
+
+def copy_of(value: Any) -> Any:
+    return json.loads(json.dumps(value))
+
+
+# The folder of kept values
+
+
+@pytest.mark.parametrize("mode", [0o750, 0o705, 0o755])
+def test_a_folder_of_kept_values_open_to_others_is_refused(
+    mode: int, as_persona: AsPersona, audit: Audit
+) -> None:
+    assert isinstance(audit.log, FileLog)
+    audit.log.kept.mkdir()
+    os.chmod(audit.log.kept, mode)
+    with pytest.raises(AuditWriteFailed, match="KeptFolderRefused"):
+        ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit)
+    assert stat.S_IMODE(audit.log.kept.stat().st_mode) == mode, "refused, not changed"
+    assert list(audit.log.kept.iterdir()) == []
+    assert audit.log.path.read_bytes() == b""
+
+
+def test_a_folder_of_kept_values_that_is_a_link_is_refused(
+    as_persona: AsPersona, audit: Audit, tmp_path: Path
+) -> None:
+    assert isinstance(audit.log, FileLog)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    audit.log.kept.symlink_to(elsewhere)
+    with pytest.raises(AuditWriteFailed, match="KeptFolderRefused"):
+        ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit)
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_a_leftover_temporary_file_is_replaced_not_followed(
+    as_persona: AsPersona, audit: Audit, tmp_path: Path
+) -> None:
+    """A temporary file left at the position's name, a link to a file elsewhere, is removed and
+    the kept values written to a new file of mode 0600; the linked file is untouched."""
+    assert isinstance(audit.log, FileLog)
+    audit.log.kept.mkdir(mode=0o700)
+    target = tmp_path / "planted"
+    target.write_text("planted")
+    os.chmod(target, 0o644)
+    (audit.log.kept / ".0.json.tmp").symlink_to(target)
+    ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit)
+    assert target.read_text() == "planted"
+    kept = audit.log.kept / "0.json"
+    assert not kept.is_symlink() and stat.S_IMODE(kept.stat().st_mode) == 0o600
+    assert sorted(f.name for f in audit.log.kept.iterdir()) == ["0.json"]
+
+
+# Strings in other quoting forms
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "select count(*) from payments where entity_id = N'x'",
+        "select count(*) from payments where entity_id = e'x'",
+        "select count(*) from payments where entity_id = $$x$$",
+    ],
+)
+def test_bind_refuses_a_string_it_would_leave_in_clear(sql: str) -> None:
+    with pytest.raises(UnboundValue, match="string form"):
+        bind(sql, "duckdb")

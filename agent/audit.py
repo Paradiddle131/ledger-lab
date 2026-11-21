@@ -27,18 +27,27 @@ in this order, holding an exclusive `flock` on the log file:
 - adds `seq`, `prev` and `digest` to the record and checks it (`check_record`): it validates against
   `agent/audit.schema.json`, every time is a real instant, every run's SQL passes `check_bound`, the
   kept values are exactly one per sealed field of its kind and each opens its field's seal;
-- writes the kept values to `<folder>/<seq>.json` through a temporary file, `fsync` and a rename,
-  replacing a file left at that position by an append that failed after it;
+- refuses a folder of kept values whose mode (read without following a link) grants anything to
+  group or others, or that is a link, and creates a missing one with owner-only permissions;
+- writes the kept values to `<folder>/<seq>.json` through a temporary file: it removes a temporary
+  file left at that name, creates it anew (`O_EXCL`, `O_NOFOLLOW`, mode 0600), writes, `fsync`s and
+  renames it over the position's file, replacing one left by an append that failed after it; when
+  the write, the `fsync` or the rename raises, it removes the temporary file and raises;
 - appends the record's line with one `O_APPEND` file descriptor and `fsync`s it; when the write or
-  the `fsync` raises, it truncates the log back to its length before the append and raises.
+  the `fsync` raises, it truncates the log back to its length before the append, removes the
+  position's file of kept values, `fsync`s the folder and raises.
 
 Stated limits of the writer: the lock is advisory, so it keeps one writer at a time only among
-writers that take it; when the truncation fails too, the line can stay, whole or torn: a whole
-one is the record of a turn that showed no answer, and a torn one makes every later append refuse
-the log until it is repaired by hand; the log is read whole on each append; the folder of kept
-values is a plain folder, created with owner-only permissions, and nothing here encrypts it.
+writers that take it; when a clean-up step itself raises (the truncation, a removal or an `fsync`
+of it), its error is raised in place of the first and what it was cleaning can stay: a whole line
+is then the record of a turn that showed no answer, a torn one makes every later append refuse the
+log until it is repaired by hand, and a temporary or position's file of kept values holds that
+turn's values in clear with no record naming it; a crash of the process between a write and its
+clean-up leaves the same; the log is read whole on each append; the folder's mode is checked, its
+parents' are not, and nothing here encrypts the kept values.
 """
 
+import contextlib
 import fcntl
 import functools
 import hashlib
@@ -46,6 +55,7 @@ import json
 import os
 import re
 import secrets
+import stat
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -213,9 +223,23 @@ def verify_links(records: Sequence[Mapping[str, Any]]) -> None:
         decided.add(named)
 
 
+# String forms other than a plain quoted literal, as sqlglot parses them: N'...', e'...', $$...$$,
+# hexadecimal, bit and Unicode strings.
+OTHER_STRINGS = (
+    exp.National,
+    exp.ByteString,
+    exp.RawString,
+    exp.HexString,
+    exp.BitString,
+    exp.UnicodeString,
+)
+
+
 def check_bound(sql: str, engine: str) -> None:
-    """Refuse SQL text that carries a string literal, or a number but 0 and 1, in clear: the
-    writer calls it before a query's text enters a record, so every other value is a parameter."""
+    """Refuse SQL text that does not parse, or that carries in clear a plain string literal, a
+    number but 0 and 1, or a string in one of the `OTHER_STRINGS` forms: the writer calls it before
+    a query's text enters a record. Stated limit: comments are not read, so a value written in a
+    comment passes."""
     try:
         trees = sqlglot.parse(sql, read=DIALECTS[engine])
     except ParseError as error:
@@ -226,14 +250,17 @@ def check_bound(sql: str, engine: str) -> None:
         for literal in tree.find_all(exp.Literal):
             if literal.is_string or literal.this not in ALLOWED_NUMBERS:
                 raise UnboundValue(f"a value in clear: {literal.sql()}")
+        for other in tree.find_all(*OTHER_STRINGS):
+            raise UnboundValue(f"a string in clear: {other.sql()}")
 
 
 def bind(sql: str, engine: str) -> tuple[str, dict[str, Any]]:
-    """One SQL statement rewritten so every value it carries is a named parameter: each string
-    literal and each integer but 0 and 1 becomes `$v<n>`, a value met twice the same parameter (so a
-    grouped expression stays equal to its selected one), and the text is sqlglot's in the engine's
-    dialect. Refuses a text that is not one statement or carries a number that is not an integer,
-    and passes its result through `check_bound`."""
+    """One SQL statement rewritten with its values as named parameters: each plain quoted string
+    literal (`'...'`) and each integer but 0 and 1 becomes `$v<n>`, a value met twice the same
+    parameter (so a grouped expression stays equal to its selected one), and the text is sqlglot's
+    in the engine's dialect. Refuses a text that does not parse, is not one statement, carries a
+    number that is not an integer or a string in one of the `OTHER_STRINGS` forms, and passes its
+    result through `check_bound`, which reads no comment."""
     try:
         trees = [tree for tree in sqlglot.parse(sql, read=DIALECTS[engine]) if tree is not None]
     except ParseError as error:
@@ -243,6 +270,8 @@ def bind(sql: str, engine: str) -> tuple[str, dict[str, Any]]:
     names: dict[tuple[type, Any], str] = {}
 
     def lift(node: Expression) -> Expression:
+        if isinstance(node, OTHER_STRINGS):
+            raise UnboundValue(f"a string form the tool does not bind: {node.sql()}")
         if not isinstance(node, exp.Literal):
             return node
         if node.is_string:
@@ -390,30 +419,60 @@ class FileLog:
                 _write_all(fd, line)
                 os.fsync(fd)
             except BaseException:
-                os.ftruncate(fd, size)
-                os.fsync(fd)
+                try:
+                    os.ftruncate(fd, size)
+                    os.fsync(fd)
+                finally:
+                    self._forget(record["seq"])
                 raise
             return record
         finally:
             os.close(fd)
 
-    def _keep(self, seq: int, kept: Mapping[str, tuple[str, Any]]) -> None:
-        self.kept.mkdir(mode=0o700, parents=True, exist_ok=True)
-        final = self.kept / f"{seq}.json"
-        temporary = self.kept / f".{seq}.json.tmp"
-        data = canonical({path: [salt, value] for path, (salt, value) in kept.items()})
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            _write_all(fd, data)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(temporary, final)
+    def _folder(self) -> None:
+        """Create the folder of kept values owner-only, or refuse one that is a link or whose mode
+        grants anything to group or others."""
+        with contextlib.suppress(FileExistsError):
+            self.kept.mkdir(mode=0o700, parents=True)
+        mode = os.lstat(self.kept).st_mode
+        if not stat.S_ISDIR(mode) or stat.S_IMODE(mode) & 0o077:
+            raise KeptFolderRefused("the folder of kept values is a link or open to others")
+
+    def _sync_folder(self) -> None:
         folder = os.open(self.kept, os.O_RDONLY)
         try:
             os.fsync(folder)
         finally:
             os.close(folder)
+
+    def _keep(self, seq: int, kept: Mapping[str, tuple[str, Any]]) -> None:
+        self._folder()
+        final = self.kept / f"{seq}.json"
+        temporary = self.kept / f".{seq}.json.tmp"
+        data = canonical({path: [salt, value] for path, (salt, value) in kept.items()})
+        temporary.unlink(missing_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        fd = os.open(temporary, flags, 0o600)
+        try:
+            try:
+                _write_all(fd, data)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(temporary, final)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+        self._sync_folder()
+
+    def _forget(self, seq: int) -> None:
+        """Remove the kept values of a position whose record was not written."""
+        (self.kept / f"{seq}.json").unlink(missing_ok=True)
+        self._sync_folder()
+
+
+class KeptFolderRefused(PermissionError):
+    """A folder of kept values that is a link or grants anything to group or others."""
 
 
 class AuditWriteFailed(RuntimeError):

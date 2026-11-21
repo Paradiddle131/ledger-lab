@@ -7,10 +7,11 @@ read-only tool, `run_metric_query`, writes the turn's audit record (`agent/audit
 
 What `ask` checks, in this order:
 - the persona must be a string equal to a persona id of the personas catalogue (by default
-  `access/personas.yaml`), compared exactly, with no stripping or case folding; anything else
-  writes a record refused for `no-identity` and raises `NoPersonaError` (or `AuditWriteFailed`
-  when that record is not written), before the metric context is loaded, the model is asked or a
-  connection is opened;
+  `access/personas.yaml`), compared exactly, with no stripping or case folding; a persona that is
+  not a string or not such an id writes a record refused for `no-identity` and raises
+  `NoPersonaError` (or `AuditWriteFailed` when that record is not written), before the metric
+  context is loaded, the model is asked or a connection is opened; a `NoPersonaError` that
+  `as_persona` raises later is a turn that raises, below, and writes no record;
 - for each tool call: the query id names a verified query of the context; the tool policy
   (`agent/policy/tools.py`) allows the persona to run `run_metric_query` on the query's metric;
   only then is a connection opened, by calling `as_persona(persona)`, at most once per `ask`;
@@ -51,7 +52,8 @@ Stated limits:
 - the record names no model (the model protocol carries no name or settings yet), and its release
   and data are the caller's word, not checked here against the code or the connection;
 - a turn that raises before it ends (the model, the policy or `as_persona` raising) writes no
-  record and returns no answer; a run the engine refused is not among the record's runs, and a turn
+  record and returns no answer, also when a query has already run as the persona and its rows have
+  been shown to the model; a run the engine refused is not among the record's runs, and a turn
   with only such runs is recorded as `abstained`;
 - the log's head digest is not yet anchored outside the writer's reach, so whoever can write the
   log can still rewrite it from any record on, add to its end or cut its tail, and it verifies.
