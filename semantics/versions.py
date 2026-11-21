@@ -82,7 +82,7 @@ nodes are held to. The placement configs (`PLACEMENT`) are `schema`, `alias`, `e
   flags would be read as a parse gives it, not as a real build's; so is `context`, dbt's whole
   context, which reaches each of them by a key. A read is a name token of dbt's own Jinja lexer or
   a word of a string token's decoded value (`context['flags']`, `dbt.get('should_full_refresh')`),
-  in the file's text and, for a schema file, in each string of its decoded YAML, which is what dbt
+  in the file's text or, for a schema file, in each string of its decoded YAML, which is what dbt
   renders (so a YAML comment or escape hides none); a tag end inside a quoted string or a tag over
   several lines is read as dbt reads it, and a text the lexer cannot read is refused.
 - On the working tree: a model, seed or snapshot's `schema` is the dataset `ROUTES` gives its
@@ -317,8 +317,8 @@ JINJA = ("{{", "{%", "{#")
 # project is parsed, and `context`, dbt's whole context, which reaches each of them by a key. A
 # placement turning on any of them is not the build's, so the gate refuses each read by name, in
 # every file of the project dbt parses: a name token of dbt's own Jinja lexer, or a word of a string
-# token's value (`context['flags']`, `dbt.get('should_full_refresh')`), and in a schema file also in
-# each string of the YAML as decoded, which is what dbt renders.
+# token's value (`context['flags']`, `dbt.get('should_full_refresh')`), and in a schema file in each
+# string of the YAML as decoded, which is what dbt renders.
 INVOCATION = (
     "context",
     "flags",
@@ -685,7 +685,7 @@ def yaml_strings(value: object) -> Iterator[str]:
 
 def invocation_reads(path: str, *texts: str) -> list[str]:
     """What the gate refuses of a file's Jinja reading the dbt invocation (`INVOCATION`), in each of
-    `texts` (the file's text, and for a schema file each string of its decoded YAML): each name
+    `texts` (the file's text, or for a schema file each string of its decoded YAML): each name
     token of `INVOCATION` that dbt's own Jinja lexer finds, and each such word in a string token's
     value as Jinja decodes it, so a delimiter inside a string literal, a tag over several lines, an
     escape and whitespace control read as dbt reads them, while a comment, a `raw` block and the
@@ -848,10 +848,13 @@ def parse_and_refuse(project: Path, report: Path) -> int:
             refused.append("dbt read a file outside the tree")
             continue
         path = found_at.relative_to(tree).as_posix()
-        decoded = (
-            list(yaml_strings(file.dict_from_yaml)) if isinstance(file, SchemaSourceFile) else []
+        # dbt renders a schema file's strings after decoding its YAML, and the rest as written.
+        rendered = (
+            list(yaml_strings(file.dict_from_yaml))
+            if isinstance(file, SchemaSourceFile)
+            else [found_at.read_text(errors="replace")]
         )
-        refused += invocation_reads(path, found_at.read_text(errors="replace"), *decoded)
+        refused += invocation_reads(path, *rendered)
         if not isinstance(file, SchemaSourceFile):
             continue
         for key, entries in (file.dict_from_yaml or {}).items():
