@@ -11,7 +11,8 @@ dependencies = [
 ]
 
 [dependency-groups]
-# The BigQuery adapter, installed only where the lab project exists: `uv sync --group bigquery`.
+# The BigQuery adapter: installed only where the lab project exists (`uv sync --group bigquery`);
+# `make sync` caches it, for the metric versions gate's offline BigQuery parse.
 bigquery = [
   "dbt-bigquery==1.12.3",
 ]
