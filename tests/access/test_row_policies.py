@@ -11,6 +11,7 @@ read it.
 
 import copy
 import json
+import re
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -28,6 +29,7 @@ from access.row_policies import (
     plan,
     policies,
     publish,
+    publish_sql,
 )
 from tests.conftest import load_columns
 
@@ -55,7 +57,7 @@ def test_each_entity_policy_grants_its_rows_to_the_personas_that_read_them(
     access: dict[str, Any],
     columns: dict[str, Any],
 ) -> None:
-    found = policies(access, columns)
+    found = [p for p in policies(access, columns) if p.table == "payments"]
     by_name = {p.name: p for p in found}
     for entity in (e["id"] for e in access["entities"]):
         want = readers(access, "payments", entity) & clear(columns, "payments")
@@ -91,22 +93,58 @@ def test_a_new_grant_moves_the_policies(access: dict[str, Any], columns: dict[st
             "access": "read",
         }
     )
-    nl = next(p for p in policies(changed, columns) if p.name == "nl_government_rows")
+    nl = next(
+        p
+        for p in policies(changed, columns)
+        if (p.table, p.name) == ("payments", "nl_government_rows")
+    )
     assert "payables-clerk" in nl.personas
-    before = next(p for p in policies(access, columns) if p.name == "nl_government_rows")
+    before = next(
+        p
+        for p in policies(access, columns)
+        if (p.table, p.name) == ("payments", "nl_government_rows")
+    )
     assert "payables-clerk" not in before.personas
+
+
+def test_the_masked_copy_grants_each_entitys_rows_to_its_masked_readers(
+    access: dict[str, Any], columns: dict[str, Any]
+) -> None:
+    found = [p for p in policies(access, columns) if p.table == "payments_masked"]
+    for entity in (e["id"] for e in access["entities"]):
+        want = readers(access, "payments", entity) - clear(columns, "payments")
+        named = [p for p in found if p.name == f"{entity.replace('-', '_')}_rows"]
+        assert [set(p.personas) for p in named] == ([want] if want else [])
+        assert all(p.condition == f"entity_id = '{entity}'" for p in named)
+    assert found[-1].name == AGENT_POLICY and found[-1].agent
+
+
+def test_every_row_reader_gets_one_copy_of_each_entity_it_reads(
+    access: dict[str, Any], columns: dict[str, Any]
+) -> None:
+    granted: dict[tuple[str, str], list[str]] = {}
+    for p in policies(access, columns):
+        for persona in p.personas:
+            granted.setdefault((persona, p.name), []).append(p.table)
+    for entity in (e["id"] for e in access["entities"]):
+        for persona in readers(access, "payments", entity):
+            assert len(granted[(persona, f"{entity.replace('-', '_')}_rows")]) == 1
 
 
 def test_a_masked_reader_gets_no_rows_of_the_clear_table_until_it_reads_every_tag_clear(
     access: dict[str, Any], columns: dict[str, Any]
 ) -> None:
-    chicago = next(p for p in policies(access, columns) if p.name == "chicago_rows")
+    chicago = next(
+        p for p in policies(access, columns) if (p.table, p.name) == ("payments", "chicago_rows")
+    )
     assert "accountant-chicago" not in chicago.personas
     changed = copy.deepcopy(columns)
     for tag in changed["tags"]:
         tag["clear"].append("accountant-chicago")
         tag["masked"].remove("accountant-chicago")
-    chicago = next(p for p in policies(access, changed) if p.name == "chicago_rows")
+    chicago = next(
+        p for p in policies(access, changed) if (p.table, p.name) == ("payments", "chicago_rows")
+    )
     assert "accountant-chicago" in chicago.personas
 
 
@@ -115,7 +153,7 @@ def test_the_owner_statements_grant_each_policy_to_its_accounts(
 ) -> None:
     statements = plan(access, columns, PROJECT, AGENT)
     assert len(statements) == len(policies(access, columns))
-    chicago = next(s for s in statements if "`chicago_rows`" in s)
+    chicago = next(s for s in statements if "`chicago_rows` ON `the-lab.payments.payments`" in s)
     assert chicago.startswith(
         f"CREATE OR REPLACE ROW ACCESS POLICY `chicago_rows` ON `{PROJECT}.payments.payments`"
         " GRANT TO ("
@@ -123,7 +161,7 @@ def test_the_owner_statements_grant_each_policy_to_its_accounts(
     assert chicago.endswith(" FILTER USING (entity_id = 'chicago');")
     for persona in readers(access, "payments", "chicago") & clear(columns, "payments"):
         assert f'"serviceAccount:{persona}@{PROJECT}.iam.gserviceaccount.com"' in chicago
-    agent = next(s for s in statements if f"`{AGENT_POLICY}`" in s)
+    agent = next(s for s in statements if f"`{AGENT_POLICY}`" in s and ".payments`" in s)
     assert f'"serviceAccount:{AGENT}@{PROJECT}.iam.gserviceaccount.com"' in agent
     assert agent.endswith(" FILTER USING (TRUE);")
 
@@ -161,7 +199,9 @@ class Warehouse:
         sql = command[-1]
         self.statements.append(sql)
         if "ROW_ACCESS_POLICIES" in sql:
-            return json.dumps(self.found)
+            table = re.search(r"table_name = '([a-z_]+)'", sql)
+            assert table
+            return json.dumps([r for r in self.found if r["table"] == table.group(1)])
         if "INFORMATION_SCHEMA.COLUMNS" in sql:
             return json.dumps(self.source if ".intermediate." in sql else self.copy)
         return ""
@@ -170,7 +210,11 @@ class Warehouse:
 def reported(found: Sequence[Policy]) -> list[dict[str, str]]:
     # BigQuery reports a filter as it normalises it; spacing and keyword case differ.
     return [
-        {"row_access_policy_name": p.name, "filter_predicate": p.condition.replace(" = ", "=")}
+        {
+            "table": p.table,
+            "row_access_policy_name": p.name,
+            "filter_predicate": p.condition.replace(" = ", "="),
+        }
         for p in found
     ]
 
@@ -187,26 +231,28 @@ def test_a_publish_checks_then_replaces_the_rows_in_one_transaction(
 ) -> None:
     warehouse = Warehouse(reported(policies(access, columns)), COLUMNS)
     publish(access, columns, PROJECT, WHERE, warehouse)
-    *checks, write = warehouse.statements
-    assert all(s.startswith("SELECT ") for s in checks)
-    assert write == (
+    writes = [s for s in warehouse.statements if not s.startswith("SELECT ")]
+    assert writes == [publish_sql(PROJECT, "payments", t) for t in ("payments", "payments_masked")]
+    assert writes[0] == (
         f"BEGIN TRANSACTION; DELETE FROM `{PROJECT}.payments.payments` WHERE TRUE;"  # noqa: S608
         f" INSERT INTO `{PROJECT}.payments.payments` SELECT * FROM"
         f" `{PROJECT}.intermediate.payments`; COMMIT TRANSACTION;"
     )
 
 
-def drop(found: list[dict[str, str]], name: str) -> list[dict[str, str]]:
-    return [r for r in found if r["row_access_policy_name"] != name]
+def drop(found: list[dict[str, str]], name: str, table: str = "payments") -> list[dict[str, str]]:
+    return [r for r in found if (r["table"], r["row_access_policy_name"]) != (table, name)]
 
 
 EDITS: dict[str, Callable[[list[dict[str, str]]], list[dict[str, str]]]] = {
     "no policy": lambda found: [],
+    "the masked copy's missing one": lambda found: drop(found, "chicago_rows", "payments_masked"),
+    "the masked copy's with none": lambda found: [r for r in found if r["table"] == "payments"],
     "one missing": lambda found: drop(found, "chicago_rows"),
     "the agent's missing": lambda found: drop(found, AGENT_POLICY),
     "one not generated": lambda found: [
         *found,
-        {"row_access_policy_name": "everyone", "filter_predicate": "TRUE"},
+        {"table": "payments", "row_access_policy_name": "everyone", "filter_predicate": "TRUE"},
     ],
     "one with another filter": lambda found: [
         {**r, "filter_predicate": "TRUE"} if r["row_access_policy_name"] == "chicago_rows" else r
