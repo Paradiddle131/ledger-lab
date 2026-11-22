@@ -20,7 +20,7 @@ from access.compile import open_persona
 from access.identities import identity
 from agent.ask import Audit
 from agent.audit import FileLog
-from tests import options_check
+from tests import options_check, workers
 from tests.models.dbt_build import SAMPLED_SOURCES, git_out
 
 if TYPE_CHECKING:
@@ -66,6 +66,15 @@ def load_access() -> dict[str, Any]:
 @pytest.fixture(scope="session")
 def access() -> dict[str, Any]:
     return load_access()
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_xdist_auto_num_workers(config: pytest.Config) -> int | None:
+    """`-n auto`'s worker count, capped by the memory available (`tests/workers.py`); with
+    `PYTEST_XDIST_AUTO_NUM_WORKERS` set, xdist's own reading of it decides."""
+    if os.environ.get(workers.VARIABLE):
+        return None
+    return workers.auto_workers(workers.usable_cpus(), workers.available_memory())
 
 
 def pytest_configure(config: pytest.Config) -> None:
