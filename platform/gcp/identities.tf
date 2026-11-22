@@ -27,3 +27,18 @@ resource "google_service_account_iam_member" "agent_mints_persona_tokens" {
   role               = "roles/iam.serviceAccountTokenCreator"
   member             = "serviceAccount:${data.google_service_account.agent.email}"
 }
+
+# The publisher: the one account a governed copy's publish runs as (access/row_policies.py). Its
+# row access policy is the one that grants every row of the copy, which BigQuery asks of a DELETE
+# or INSERT on a table with policies. The agent mints its token, as it mints a persona's, so the
+# owner's login reaches it by delegation and never acts as the agent itself.
+resource "google_service_account" "publisher" {
+  account_id   = "publisher"
+  display_name = "Publishes the governed copies"
+}
+
+resource "google_service_account_iam_member" "agent_mints_publisher_token" {
+  service_account_id = google_service_account.publisher.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${data.google_service_account.agent.email}"
+}

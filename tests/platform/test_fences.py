@@ -13,6 +13,8 @@ import pytest
 import yaml
 from fences import CONFIG, GCP, blocks, declared, local, one, unquote, variable
 
+from access.row_policies import PUBLISHER
+
 REPO = GCP.parents[1]
 QUOTA = "google_service_usage_consumer_quota_override"
 FREE_REGIONS = {"us-west1", "us-central1", "us-east1"}
@@ -57,7 +59,7 @@ def test_no_module_is_used() -> None:
 
 def test_a_resource_read_as_single_refuses_count_and_for_each() -> None:
     with pytest.raises(LookupError, match="multiplied"):
-        one("google_service_account_iam_member")
+        one("google_bigquery_dataset")
 
 
 def test_providers_are_pinned_exactly() -> None:
@@ -201,13 +203,13 @@ PERSONAS_FROM_FILE = re.compile(
 )
 
 
-def test_one_service_account_per_persona_and_no_more() -> None:
+def test_one_service_account_per_persona_the_publisher_and_no_more() -> None:
     accounts = {
         name: body
         for (rtype, name), body in blocks("resource").items()
         if rtype == "google_service_account"
     }
-    assert set(accounts) == {"kill_switch", "persona"}
+    assert set(accounts) == {"kill_switch", "persona", "publisher"}
     persona = accounts["persona"]
     assert persona["for_each"] == "${local.personas}"
     assert persona["account_id"] == "${each.key}"
@@ -216,6 +218,11 @@ def test_one_service_account_per_persona_and_no_more() -> None:
     kill_switch = unquote(accounts["kill_switch"]["account_id"])
     assert declared().kill_switch_account == kill_switch
     assert kill_switch not in persona_ids()
+    # The publisher is the account the governed copies' publish writes as.
+    publisher = unquote(accounts["publisher"]["account_id"])
+    assert publisher == PUBLISHER
+    assert publisher not in persona_ids()
+    assert attributes(accounts["publisher"]) == {"account_id", "display_name"}
 
 
 def test_the_agent_account_is_referenced_by_a_variable_never_managed_here() -> None:
@@ -227,12 +234,17 @@ def attributes(body: dict[str, Any]) -> set[str]:
     return set(body) - {"__is_block__"}
 
 
-def test_only_the_agent_mints_tokens_and_only_for_persona_accounts() -> None:
-    grants = [
-        b for (t, _), b in blocks("resource").items() if t == "google_service_account_iam_member"
-    ]
-    assert len(grants) == 1
-    (grant,) = grants
+def test_only_the_agent_mints_tokens_and_only_for_persona_accounts_and_the_publisher() -> None:
+    grants = {
+        n: b for (t, n), b in blocks("resource").items() if t == "google_service_account_iam_member"
+    }
+    assert set(grants) == {"agent_mints_persona_tokens", "agent_mints_publisher_token"}
+    publisher = grants["agent_mints_publisher_token"]
+    assert attributes(publisher) == {"service_account_id", "role", "member"}
+    assert publisher["service_account_id"] == "${google_service_account.publisher.name}"
+    assert unquote(publisher["role"]) == "roles/iam.serviceAccountTokenCreator"
+    assert unquote(publisher["member"]) == AGENT_MEMBER
+    grant = grants["agent_mints_persona_tokens"]
     assert attributes(grant) == {"for_each", "service_account_id", "role", "member"}
     assert grant["for_each"] == "${google_service_account.persona}"
     assert grant["service_account_id"] == "${each.value.name}"
@@ -241,11 +253,13 @@ def test_only_the_agent_mints_tokens_and_only_for_persona_accounts() -> None:
 
 
 def test_no_project_level_role_reaches_anyone_but_the_kill_switch_and_the_query_role() -> None:
-    # The personas' one project role, to run a query, is checked in test_access_rules.py.
+    # The personas' and the publisher's one project role, to run a query, is checked in
+    # test_access_rules.py.
     members = [
         unquote(body["member"])
         for (rtype, name), body in blocks("resource").items()
-        if rtype == "google_project_iam_member" and name != "persona_runs_queries"
+        if rtype == "google_project_iam_member"
+        and name not in {"persona_runs_queries", "publisher_runs_queries"}
     ]
     assert members, "the kill switch's roles are project-level"
     assert set(members) == {"serviceAccount:${google_service_account.kill_switch.email}"}
