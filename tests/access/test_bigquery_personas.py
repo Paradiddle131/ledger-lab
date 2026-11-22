@@ -324,6 +324,25 @@ def test_the_chain_goes_through_the_agent_account_when_it_is_named() -> None:
     assert chain(PERSONA, PROJECT, {AGENT_VARIABLE: "  "}) == [PERSONA]
 
 
+def test_the_agent_account_may_be_named_by_its_address_in_the_lab_project() -> None:
+    address = f" the-agent@{PROJECT}.iam.gserviceaccount.com "
+    assert chain(PERSONA, PROJECT, {AGENT_VARIABLE: address}) == [address.strip(), PERSONA]
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "the-agent@another-lab.iam.gserviceaccount.com",
+        f"the-agent@{PROJECT}.iam.gserviceaccount.com.evil",
+        f"the-agent@x@{PROJECT}.iam.gserviceaccount.com",
+        f"@{PROJECT}.iam.gserviceaccount.com",
+    ],
+)
+def test_an_agent_address_outside_the_lab_project_is_refused(address: str) -> None:
+    with pytest.raises(PersonaQueryError, match=AGENT_VARIABLE):
+        chain(PERSONA, PROJECT, {AGENT_VARIABLE: address})
+
+
 @pytest.mark.parametrize(
     "account_id", ["Agent", "a@b", "the-agent,other-agent", "ab", "agent-", "a" * 31]
 )

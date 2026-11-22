@@ -3,7 +3,8 @@ the persona mapping, and the governed copy they sit on.
 
 Offline: the policies follow the grants, and a grant change moves them; the statements the owner
 runs; a publish that checks the copy's policies and columns before it writes a row, and refuses a
-copy whose policies or columns differ; the command refusing a session with no lab project. Live,
+copy whose policies or columns differ; its write going as the publisher, minted through the agent;
+the command refusing a session with no lab project. Live,
 on the owner's machine (`bigquery_persona`, `make bigquery-row-policies`): each human persona reads
 exactly its granted entities' rows of the published copy, and one with no row grant on it cannot
 read it.
@@ -15,13 +16,15 @@ import re
 from collections.abc import Callable, Sequence
 from typing import Any
 
+import httpx
 import pytest
 
 from access import row_policies
 from access.bigquery import PersonaQueryError, PersonaSession
 from access.identities import identity
 from access.row_policies import (
-    AGENT_POLICY,
+    PUBLISHER,
+    PUBLISHER_POLICY,
     Policy,
     RowPolicyError,
     check_policies,
@@ -68,10 +71,10 @@ def test_each_entity_policy_grants_its_rows_to_the_personas_that_read_them(
         assert (policy.dataset, policy.table) == ("payments", "payments")
         assert policy.condition == f"entity_id = '{entity}'"
         assert set(policy.personas) == want
-        assert not policy.agent
-    agent = by_name[AGENT_POLICY]
-    assert (agent.condition, agent.personas, agent.agent) == ("TRUE", (), True)
-    assert [p.name for p in found][-1] == AGENT_POLICY
+        assert not policy.publisher
+    publisher = by_name[PUBLISHER_POLICY]
+    assert (publisher.condition, publisher.personas, publisher.publisher) == ("TRUE", (), True)
+    assert [p.name for p in found][-1] == PUBLISHER_POLICY
 
 
 def test_an_aggregate_grant_gets_no_policy(access: dict[str, Any], columns: dict[str, Any]) -> None:
@@ -130,7 +133,7 @@ def account(name: str) -> str:
 def test_the_owner_statements_grant_each_policy_to_exactly_its_accounts(
     access: dict[str, Any], columns: dict[str, Any]
 ) -> None:
-    statements = plan(access, columns, PROJECT, AGENT)
+    statements = plan(access, columns, PROJECT)
     assert len(statements) == len(policies(access, columns))
     chicago = next(s for s in statements if "`chicago_rows`" in s)
     assert chicago.startswith(
@@ -142,14 +145,14 @@ def test_the_owner_statements_grant_each_policy_to_exactly_its_accounts(
     named = 0
     for statement in statements:
         grantees = granted_to(statement)
-        if f"`{AGENT_POLICY}`" in statement:
-            assert grantees == {account(AGENT)}
+        if f"`{PUBLISHER_POLICY}`" in statement:
+            assert grantees == {account(PUBLISHER)}
             assert statement.endswith(" FILTER USING (TRUE);")
             continue
         entity = next(e for name, e in entities.items() if name in statement)
         want = readers(access, "payments", entity) & clear(columns, "payments")
         assert grantees == {account(p) for p in want}
-        assert account(AGENT) not in grantees
+        assert not grantees & {account(PUBLISHER), account(AGENT)}
         named += 1
     assert named == len(statements) - 1
 
@@ -180,6 +183,7 @@ class Warehouse:
         self.source = source
         self.copy = source if copy_columns is None else copy_columns
         self.statements: list[str] = []
+        self.writes: list[str] = []
 
     def __call__(self, command: Sequence[str]) -> str:
         assert command[:2] == ["bq", f"--project_id={PROJECT}"]
@@ -190,7 +194,11 @@ class Warehouse:
             return json.dumps(self.found)
         if "INFORMATION_SCHEMA.COLUMNS" in sql:
             return json.dumps(self.source if ".intermediate." in sql else self.copy)
-        return ""
+        raise AssertionError("a write went through the login's `bq`, not the publisher")
+
+    def write(self, sql: str) -> None:
+        self.statements.append(sql)
+        self.writes.append(sql)
 
 
 def reported(found: Sequence[Policy]) -> list[dict[str, str]]:
@@ -212,9 +220,10 @@ def test_a_publish_checks_then_replaces_the_rows_in_one_transaction(
     columns: dict[str, Any],
 ) -> None:
     warehouse = Warehouse(reported(policies(access, columns)), COLUMNS)
-    publish(access, columns, PROJECT, WHERE, warehouse)
+    publish(access, columns, PROJECT, WHERE, warehouse.write, warehouse)
     *checks, write = warehouse.statements
     assert all(s.startswith("SELECT ") for s in checks)
+    assert warehouse.writes == [write]
     assert write == (
         f"BEGIN TRANSACTION; DELETE FROM `{PROJECT}.payments.payments` WHERE TRUE;"  # noqa: S608
         f" INSERT INTO `{PROJECT}.payments.payments` SELECT * FROM"
@@ -229,7 +238,7 @@ def drop(found: list[dict[str, str]], name: str) -> list[dict[str, str]]:
 EDITS: dict[str, Callable[[list[dict[str, str]]], list[dict[str, str]]]] = {
     "no policy": lambda found: [],
     "one missing": lambda found: drop(found, "chicago_rows"),
-    "the agent's missing": lambda found: drop(found, AGENT_POLICY),
+    "the publisher's missing": lambda found: drop(found, PUBLISHER_POLICY),
     "one not generated": lambda found: [
         *found,
         {"row_access_policy_name": "everyone", "filter_predicate": "TRUE"},
@@ -247,8 +256,8 @@ def test_a_copy_without_exactly_its_policies_gets_no_rows(
 ) -> None:
     warehouse = Warehouse(EDITS[name](reported(policies(access, columns))), COLUMNS)
     with pytest.raises(RowPolicyError, match="no rows are published"):
-        publish(access, columns, PROJECT, WHERE, warehouse)
-    assert not any("INSERT" in s or "DELETE" in s for s in warehouse.statements)
+        publish(access, columns, PROJECT, WHERE, warehouse.write, warehouse)
+    assert not warehouse.writes
 
 
 def test_a_copy_whose_columns_differ_from_the_mart_gets_no_rows(
@@ -256,8 +265,8 @@ def test_a_copy_whose_columns_differ_from_the_mart_gets_no_rows(
 ) -> None:
     warehouse = Warehouse(reported(policies(access, columns)), COLUMNS, COLUMNS[:1])
     with pytest.raises(RowPolicyError, match="columns differ"):
-        publish(access, columns, PROJECT, WHERE, warehouse)
-    assert not any("INSERT" in s or "DELETE" in s for s in warehouse.statements)
+        publish(access, columns, PROJECT, WHERE, warehouse.write, warehouse)
+    assert not warehouse.writes
 
 
 def test_the_check_compares_names_and_filters_only() -> None:
@@ -268,6 +277,38 @@ def test_the_check_compares_names_and_filters_only() -> None:
         "payments",
         "payments",
     )
+
+
+@pytest.mark.parametrize("named", [AGENT, account(AGENT)], ids=["by id", "by address"])
+def test_a_publish_writes_as_the_publisher_through_the_agent(
+    named: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    minted: list[list[str]] = []
+    sent: list[httpx.Request] = []
+
+    def mint(accounts: Sequence[str]) -> str:
+        minted.append(list(accounts))
+        return "publisher-token"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, json={"jobComplete": True})
+
+    real = httpx.Client
+    monkeypatch.setattr(row_policies, "mint", mint)
+    monkeypatch.setattr(
+        row_policies.httpx,
+        "Client",
+        lambda **kw: real(transport=httpx.MockTransport(handle), **kw),
+    )
+    write = row_policies.publisher_write(PROJECT, {"LEDGER_LAB_AGENT_ACCOUNT": named})
+    write("SELECT 1")
+    assert minted == [[account(AGENT), account(PUBLISHER)]]
+    (request,) = sent
+    assert request.headers["Authorization"] == "Bearer publisher-token"
+    body = json.loads(request.content)
+    assert body["query"] == "SELECT 1"
+    assert body["maximumBytesBilled"] == str(row_policies.MAX_BYTES_BILLED)
 
 
 @pytest.mark.parametrize(

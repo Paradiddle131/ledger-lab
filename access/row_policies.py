@@ -13,12 +13,19 @@ One policy per product table and entity, `entity_id = '<entity>'`, granted to th
 `read` or `edit` grant on that entity's product (`access/identities.py`) that read every tagged
 column of the table in clear (`access/columns.yaml`); an aggregate grant gets none, and a tag's
 masked readers get no rows of the clear table, where a policy tag is only a second lock. One more,
-`TRUE`, is granted to the agent account that publishes, which reads every row of the mart to
-copy it. BigQuery shows a user the union of the policies granting it and no row of a
-table with policies none of which does.
+`TRUE`, is granted to the publisher account (`platform/gcp/identities.tf`), since BigQuery runs a
+DELETE or INSERT on a table with policies only for an account that sees every row of it. BigQuery
+shows a user the union of the policies granting it and no row of a table with policies none of
+which does.
+
+The checks before a publish read metadata as the session's login; the publish's one write runs as
+the publisher, with a token minted through the agent account (`access/bigquery.py`), so the owner's
+login needs only delegation on the agent account and no policy grants it a row. Behind the cloud
+session's proxy that token is replaced with the agent's own credential, which no policy grants every
+row, so a publish there is refused and writes nothing.
 
 The project comes from `LEDGER_LAB_GCP_PROJECT` and the location from `LEDGER_LAB_BQ_LOCATION`;
-the agent account's id (the part before the @) from `LEDGER_LAB_AGENT_ACCOUNT`. Nothing here is
+the agent account, for the publisher's token, from `LEDGER_LAB_AGENT_ACCOUNT`. Nothing here is
 written down: the statements are printed for the owner and never stored. Queries are capped
 (`MAX_BYTES_BILLED`); a policy listing reads metadata and bills nothing.
 """
@@ -32,9 +39,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import httpx
 import yaml
 
-from access.bigquery import AGENT_VARIABLE, service_account
+from access.bigquery import PersonaQueryError, PersonaSession, chain, mint, service_account
 from access.identities import identity
 
 HERE = Path(__file__).resolve().parent
@@ -42,7 +50,9 @@ PERSONAS = HERE / "personas.yaml"
 COLUMNS = HERE / "columns.yaml"
 SOURCE_DATASET = "intermediate"
 ENTITY = "entity_id"
-AGENT_POLICY = "agent_publishes_all_rows"
+# The account a publish writes as, declared in platform/gcp/identities.tf, and its policy.
+PUBLISHER = "publisher"
+PUBLISHER_POLICY = "publisher_writes_all_rows"
 # The payments mart reads a sample-sized table on BigQuery; the cap admits it several times over and
 # stays far inside the free tier's 1 TiB a month.
 MAX_BYTES_BILLED = 1_000_000_000
@@ -51,6 +61,7 @@ PROJECT_ID = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
 DATASET_OR_TABLE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 Run = Callable[[Sequence[str]], str]
+Write = Callable[[str], None]
 
 
 class RowPolicyError(RuntimeError):
@@ -60,23 +71,23 @@ class RowPolicyError(RuntimeError):
 @dataclass(frozen=True)
 class Policy:
     """One row access policy: its name, the table it is on, its filter and its grantees, as
-    persona ids and, for the agent's, the agent account."""
+    persona ids and, for the publisher's, the publisher account."""
 
     dataset: str
     table: str
     name: str
     condition: str
     personas: tuple[str, ...]
-    agent: bool = False
+    publisher: bool = False
 
-    def grantees(self, project: str, agent_account: str) -> list[str]:
+    def grantees(self, project: str) -> list[str]:
         accounts = [service_account(p, project) for p in self.personas]
-        if self.agent:
-            accounts.append(service_account(agent_account, project))
+        if self.publisher:
+            accounts.append(service_account(PUBLISHER, project))
         return [f"serviceAccount:{a}" for a in accounts]
 
-    def create(self, project: str, agent_account: str) -> str:
-        grantees = ", ".join(f'"{g}"' for g in self.grantees(project, agent_account))
+    def create(self, project: str) -> str:
+        grantees = ", ".join(f'"{g}"' for g in self.grantees(project))
         return (
             f"CREATE OR REPLACE ROW ACCESS POLICY `{self.name}`"
             f" ON {path(project, self.dataset, self.table)}"
@@ -121,7 +132,7 @@ def clear_readers(columns: Mapping[str, Any], product: str, table: str) -> froze
 def policies(catalogue: Mapping[str, Any], columns: Mapping[str, Any]) -> list[Policy]:
     """The row access policies of every entity-scoped product table: per entity with a reader,
     one granting its rows to those readers that read the table's tagged columns in clear, then the
-    agent's over all rows."""
+    publisher's over all rows."""
     personas = [p["id"] for p in catalogue["personas"]]
     entities = [e["id"] for e in catalogue["entities"]]
     for name in (*personas, *entities):
@@ -151,15 +162,8 @@ def policies(catalogue: Mapping[str, Any], columns: Mapping[str, Any]) -> list[P
                         readers,
                     )
                 )
-        found.append(Policy(dataset, table, AGENT_POLICY, "TRUE", (), agent=True))
+        found.append(Policy(dataset, table, PUBLISHER_POLICY, "TRUE", (), publisher=True))
     return found
-
-
-def agent_account(env: Mapping[str, str]) -> str:
-    agent = env.get(AGENT_VARIABLE, "").strip()
-    if not SLUG.fullmatch(agent):
-        raise RowPolicyError(f"{AGENT_VARIABLE} must name the agent account's id")
-    return agent
 
 
 def bq(project: str, where: str, *command: str) -> list[str]:
@@ -275,14 +279,29 @@ def create(catalogue: Mapping[str, Any], project: str, where: str, run: Run = ru
         run(query(project, where, create_sql(project, dataset, table)))
 
 
+def publisher_write(project: str, env: Mapping[str, str]) -> Write:
+    """A statement run as the publisher: its token minted through the agent account when
+    `LEDGER_LAB_AGENT_ACCOUNT` names it, held only for the one query, capped as the others."""
+    accounts = chain(service_account(PUBLISHER, project), project, env)
+
+    def write(sql: str) -> None:
+        token = mint(accounts)
+        with httpx.Client(timeout=120) as client:
+            PersonaSession(project, token, client, MAX_BYTES_BILLED).query(sql)
+
+    return write
+
+
 def publish(
     catalogue: Mapping[str, Any],
     columns: Mapping[str, Any],
     project: str,
     where: str,
+    write: Write,
     run: Run = run_tool,
 ) -> None:
-    """Each governed copy's rows from its mart, once its policies and columns check out."""
+    """Each governed copy's rows from its mart, once its policies and columns check out: the checks
+    through `run`, the write through `write`, as the publisher."""
     generated = policies(catalogue, columns)
     for dataset, table in entity_tables(catalogue):
         expected = [p for p in generated if (p.dataset, p.table) == (dataset, table)]
@@ -291,14 +310,12 @@ def publish(
         source = rows(run(query(project, where, columns_sql(project, SOURCE_DATASET, table))))
         copy = rows(run(query(project, where, columns_sql(project, dataset, table))))
         check_columns(source, copy)
-        run(query(project, where, publish_sql(project, dataset, table)))
+        write(publish_sql(project, dataset, table))
 
 
-def plan(
-    catalogue: Mapping[str, Any], columns: Mapping[str, Any], project: str, agent: str
-) -> list[str]:
+def plan(catalogue: Mapping[str, Any], columns: Mapping[str, Any], project: str) -> list[str]:
     """The statements the owner runs: every generated policy, created or replaced."""
-    return [p.create(project, agent) for p in policies(catalogue, columns)]
+    return [p.create(project) for p in policies(catalogue, columns)]
 
 
 def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
@@ -313,7 +330,7 @@ def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
     try:
         project, where = lab(env)
         if command in ("plan", "apply"):
-            statements = plan(catalogue, columns, project, agent_account(env))
+            statements = plan(catalogue, columns, project)
             if command == "plan":
                 print("\n".join(statements))
             for statement in statements if command == "apply" else []:
@@ -321,8 +338,8 @@ def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
         elif command == "create":
             create(catalogue, project, where)
         else:
-            publish(catalogue, columns, project, where)
-    except (RowPolicyError, LoadError) as error:
+            publish(catalogue, columns, project, where, publisher_write(project, env))
+    except (RowPolicyError, LoadError, PersonaQueryError) as error:
         print(f"row-policies: {error}", file=sys.stderr)
         return 1
     except subprocess.CalledProcessError as error:
