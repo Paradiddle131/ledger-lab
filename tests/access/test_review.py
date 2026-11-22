@@ -341,7 +341,11 @@ def test_a_declared_custom_role_granted_by_hand_is_recorded_as_declared(
     """A hand grant of a role platform/gcp declares carries its declared title and permissions;
     a role created by hand is one platform/gcp does not declare."""
     declared = declared_custom_roles(config)
-    for role in agent_entry(docs)["custom_roles_granted_by_hand"]:
+    agent = agent_entry(docs)
+    for role in [
+        *agent["custom_roles_granted_by_hand"],
+        *agent.get("custom_table_roles_granted_by_hand", []),
+    ]:
         if role["created"] == "declared":
             assert role["id"] in declared, role["id"]
             assert role["title"] == declared[role["id"]]["title"]
@@ -524,6 +528,38 @@ def test_a_cost_view_role_beyond_reading_is_refused(docs: dict[str, Doc], extra:
     agent_entry(planted)["custom_table_roles_granted_by_hand"][0]["permissions"].append(extra)
     with pytest.raises(AssertionError):
         test_the_cost_views_custom_role_only_reads_the_view(planted)
+
+
+def test_a_cost_view_role_recorded_as_declared_but_not_declared_is_refused(
+    docs: dict[str, Doc], config: Config
+) -> None:
+    planted = copy.deepcopy(docs)
+    agent_entry(planted)["custom_table_roles_granted_by_hand"][0]["created"] = "declared"
+    with pytest.raises(AssertionError):
+        test_a_declared_custom_role_granted_by_hand_is_recorded_as_declared(planted, config)
+
+
+def test_a_hand_made_cost_view_role_that_platform_gcp_declares_wider_is_refused(
+    docs: dict[str, Doc], config: Config
+) -> None:
+    widened = copy.deepcopy(config)
+    widened.setdefault("resource", []).append(
+        {
+            "google_project_iam_custom_role": {
+                "view_reader": {
+                    "role_id": "labViewReader",
+                    "title": "Reads and exports the cost view",
+                    "permissions": [
+                        "bigquery.tables.get",
+                        "bigquery.tables.getData",
+                        "bigquery.tables.export",
+                    ],
+                }
+            }
+        }
+    )
+    with pytest.raises(AssertionError):
+        test_a_declared_custom_role_granted_by_hand_is_recorded_as_declared(docs, widened)
 
 
 def test_a_hand_made_role_that_platform_gcp_declares_is_refused(
