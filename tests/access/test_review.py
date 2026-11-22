@@ -51,8 +51,8 @@ Config = dict[str, list[Any]]
 CHECKABLE = {"enter-and-approve-entry"}
 # The roles the owner granted the agent account by hand, as recorded on the tracker after the
 # owner narrowed them; adding one is a reviewed change to the data and to these lines together.
-# No predefined role on the project or on a table: #218 replaced service usage consumer and the
-# cost view's data viewer role with the narrow custom roles below.
+# No predefined role on the project or on a table: narrow custom roles replaced service usage
+# consumer and the cost view's data viewer role (below).
 HAND_GRANTED: list[str] = []
 HAND_GRANTED_CUSTOM = ["labQueryRunner", "labFenceReader"]
 HAND_GRANTED_TABLES: list[tuple[str, str]] = []
