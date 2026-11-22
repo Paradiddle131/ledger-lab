@@ -136,7 +136,7 @@ def run(
 
 
 @pytest.mark.parametrize("lab", [OWN, *ELSEWHERE.values()], ids=["own", *ELSEWHERE.keys()])
-def test_pytest_runs_across_a_worker_per_cpu(tmp_path: Path, lab: dict[str, str]) -> None:
+def test_make_test_runs_pytest_with_n_auto(tmp_path: Path, lab: dict[str, str]) -> None:
     result, _ = run(tmp_path, lab, "test")
     assert result.returncode == 0, result.stdout + result.stderr
     assert (tmp_path / "uv.log.args").read_text() == "run pytest -n auto"
