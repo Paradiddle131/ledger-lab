@@ -12,7 +12,10 @@ table, and with it its policies, is never replaced, and rows never sit in it wit
 One policy per product table and entity, `entity_id = '<entity>'`, granted to the personas with a
 `read` or `edit` grant on that entity's product (`access/identities.py`) that read every tagged
 column of the table in clear (`access/columns.yaml`); an aggregate grant gets none, and a tag's
-masked readers get no rows of the clear table, where a policy tag is only a second lock. One more,
+masked readers get no rows of the clear table, where a policy tag is only a second lock: they
+get the same policies on its masked copy, `<table>_masked`, which the models build with each
+tagged column under its masking rule (`payments_masked.sql`) and which is published the same
+way. One more,
 `TRUE`, is granted to the publisher account (`platform/gcp/identities.tf`), since BigQuery runs a
 DELETE or INSERT on a table with policies only for an account that sees every row of it. BigQuery
 shows a user the union of the policies granting it and no row of a table with policies none of
@@ -99,6 +102,38 @@ def load(path: Path = PERSONAS) -> dict[str, Any]:
     return yaml.safe_load(path.read_text())
 
 
+MASKED_SUFFIX = "_masked"
+
+
+@dataclass(frozen=True)
+class Copy:
+    """A governed copy: its dataset and table, the product it belongs to, and whom its rows are
+    for: `all` for a table with no tagged column, else `clear` (the table) or `masked` (its masked
+    copy, `<table>_masked`, which the models build beside it)."""
+
+    dataset: str
+    table: str
+    product: str
+    audience: str
+
+
+def copies(catalogue: Mapping[str, Any], columns: Mapping[str, Any]) -> list[Copy]:
+    """Each entity-scoped product table's governed copies, in the catalogue's order: the table,
+    and for a table with a tagged column its masked copy too."""
+    found: list[Copy] = []
+    for product in catalogue["data_products"]:
+        if product["scope"] != "entity":
+            continue
+        dataset = product["id"].replace("-", "_")
+        for table in product.get("tables", []):
+            if clear_readers(columns, product["id"], table) is None:
+                found.append(Copy(dataset, table, product["id"], "all"))
+            else:
+                found.append(Copy(dataset, table, product["id"], "clear"))
+                found.append(Copy(dataset, table + MASKED_SUFFIX, product["id"], "masked"))
+    return found
+
+
 def entity_tables(catalogue: Mapping[str, Any]) -> list[tuple[str, str]]:
     """Each entity-scoped product's dataset and table, in the catalogue's order."""
     return [
@@ -131,7 +166,8 @@ def clear_readers(columns: Mapping[str, Any], product: str, table: str) -> froze
 
 def policies(catalogue: Mapping[str, Any], columns: Mapping[str, Any]) -> list[Policy]:
     """The row access policies of every entity-scoped product table: per entity with a reader,
-    one granting its rows to those readers that read the table's tagged columns in clear, then the
+    one granting its rows to those of its readers the copy is for (on a table with a tagged column,
+    those that read every tagged column in clear; on its masked copy, the rest), then the
     publisher's over all rows."""
     personas = [p["id"] for p in catalogue["personas"]]
     entities = [e["id"] for e in catalogue["entities"]]
@@ -140,17 +176,15 @@ def policies(catalogue: Mapping[str, Any], columns: Mapping[str, Any]) -> list[P
             raise RowPolicyError(f"{name!r} is not a slug, so it cannot name a policy or account")
     reads = {p: identity(catalogue, p).reads for p in personas}
     found: list[Policy] = []
-    for dataset, table in entity_tables(catalogue):
-        product = next(
-            p["id"] for p in catalogue["data_products"] if p["id"].replace("-", "_") == dataset
-        )
-        clear = clear_readers(columns, product, table)
+    for each in copies(catalogue, columns):
+        dataset, table, product = each.dataset, each.table, each.product
+        clear = clear_readers(columns, product, table.removesuffix(MASKED_SUFFIX)) or frozenset()
         for entity in entities:
             readers = tuple(
                 p
                 for p in personas
                 if entity in (reads[p].get(product) or frozenset())
-                and (clear is None or p in clear)
+                and (each.audience == "all" or (each.audience == "clear") == (p in clear))
             )
             if readers:
                 found.append(
@@ -274,9 +308,15 @@ def check_columns(source: Sequence[Mapping[str, Any]], copy: Sequence[Mapping[st
         )
 
 
-def create(catalogue: Mapping[str, Any], project: str, where: str, run: Run = run_tool) -> None:
-    for dataset, table in entity_tables(catalogue):
-        run(query(project, where, create_sql(project, dataset, table)))
+def create(
+    catalogue: Mapping[str, Any],
+    columns: Mapping[str, Any],
+    project: str,
+    where: str,
+    run: Run = run_tool,
+) -> None:
+    for each in copies(catalogue, columns):
+        run(query(project, where, create_sql(project, each.dataset, each.table)))
 
 
 def publisher_write(project: str, env: Mapping[str, str]) -> Write:
@@ -300,17 +340,21 @@ def publish(
     write: Write,
     run: Run = run_tool,
 ) -> None:
-    """Each governed copy's rows from its mart, once its policies and columns check out: the checks
-    through `run`, the write through `write`, as the publisher."""
+    """Each governed copy's rows from its mart, once every copy's policies and columns check out
+    (a copy that fails stops the publish before any copy gets a row): the checks through `run`, the
+    writes through `write`, as the publisher."""
     generated = policies(catalogue, columns)
-    for dataset, table in entity_tables(catalogue):
+    each_copy = copies(catalogue, columns)
+    for each in each_copy:
+        dataset, table = each.dataset, each.table
         expected = [p for p in generated if (p.dataset, p.table) == (dataset, table)]
         found = rows(run(query(project, where, policies_sql(project, dataset, table))))
         check_policies(expected, found, dataset, table)
         source = rows(run(query(project, where, columns_sql(project, SOURCE_DATASET, table))))
         copy = rows(run(query(project, where, columns_sql(project, dataset, table))))
         check_columns(source, copy)
-        write(publish_sql(project, dataset, table))
+    for each in each_copy:
+        write(publish_sql(project, each.dataset, each.table))
 
 
 def plan(catalogue: Mapping[str, Any], columns: Mapping[str, Any], project: str) -> list[str]:
@@ -336,7 +380,7 @@ def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
             for statement in statements if command == "apply" else []:
                 run_tool(query(project, where, statement))
         elif command == "create":
-            create(catalogue, project, where)
+            create(catalogue, columns, project, where)
         else:
             publish(catalogue, columns, project, where, publisher_write(project, env))
     except (RowPolicyError, LoadError, PersonaQueryError) as error:
