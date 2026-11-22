@@ -5,9 +5,9 @@ dbt builds the payments mart in `intermediate`, which no persona reads, and repl
 build, so a policy on it would be dropped each time. The product's own table in its dataset is a
 governed copy instead: created once, empty, with the mart's columns (`create`); its policies are
 applied by the owner, since they grant rows to accounts (`plan` prints the statements, `apply`
-runs them); and each publish (`publish`) first checks that the table holds exactly the generated
-policies, then replaces its rows from the mart in one transaction, so the table, and with it its
-policies, is never replaced, and rows never sit in it without them.
+runs them); and each publish (`publish`) first checks that the table holds the generated policies
+by name and filter, not grantees, then replaces its rows from the mart in one transaction, so the
+table, and with it its policies, is never replaced, and rows never sit in it without them.
 
 One policy per product table and entity, `entity_id = '<entity>'`, granted to the personas with a
 `read` or `edit` grant on that entity's product (`access/identities.py`) that read every tagged
@@ -255,7 +255,8 @@ def check_policies(
             f"{dataset}.{table} does not hold its generated row access policies (missing:"
             f" {', '.join(missing) or 'none'}; not generated: {', '.join(extra) or 'none'};"
             f" another filter: {', '.join(changed) or 'none'}): no rows are published until the"
-            " owner applies them (`python -m access.row_policies plan`)"
+            " owner applies them (`python -m access.row_policies plan`) and drops each policy"
+            " that is no longer generated (`DROP ROW ACCESS POLICY`), which `plan` does not emit"
         )
 
 

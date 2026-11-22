@@ -4,13 +4,14 @@ the persona mapping, and the governed copy they sit on.
 Offline: the policies follow the grants, and a grant change moves them; the statements the owner
 runs; a publish that checks the copy's policies and columns before it writes a row, and refuses a
 copy whose policies or columns differ; the command refusing a session with no lab project. Live,
-on the owner's machine (`bigquery_persona`, `make bigquery-personas`): each human persona reads
+on the owner's machine (`bigquery_persona`, `make bigquery-row-policies`): each human persona reads
 exactly its granted entities' rows of the published copy, and one with no row grant on it cannot
 read it.
 """
 
 import copy
 import json
+import re
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -110,7 +111,23 @@ def test_a_masked_reader_gets_no_rows_of_the_clear_table_until_it_reads_every_ta
     assert "accountant-chicago" in chicago.personas
 
 
-def test_the_owner_statements_grant_each_policy_to_its_accounts(
+GRANT = re.compile(r" GRANT TO \(([^)]*)\) FILTER USING ")
+
+
+def granted_to(statement: str) -> set[str]:
+    """The accounts a statement's `GRANT TO (...)` list names, each one exactly as written."""
+    found = GRANT.search(statement)
+    assert found, statement
+    names = [g.strip() for g in found.group(1).split(",")]
+    assert all(n.startswith('"serviceAccount:') and n.endswith('"') for n in names), statement
+    return {n[len('"serviceAccount:') : -1] for n in names}
+
+
+def account(name: str) -> str:
+    return f"{name}@{PROJECT}.iam.gserviceaccount.com"
+
+
+def test_the_owner_statements_grant_each_policy_to_exactly_its_accounts(
     access: dict[str, Any], columns: dict[str, Any]
 ) -> None:
     statements = plan(access, columns, PROJECT, AGENT)
@@ -121,11 +138,20 @@ def test_the_owner_statements_grant_each_policy_to_its_accounts(
         " GRANT TO ("
     )
     assert chicago.endswith(" FILTER USING (entity_id = 'chicago');")
-    for persona in readers(access, "payments", "chicago") & clear(columns, "payments"):
-        assert f'"serviceAccount:{persona}@{PROJECT}.iam.gserviceaccount.com"' in chicago
-    agent = next(s for s in statements if f"`{AGENT_POLICY}`" in s)
-    assert f'"serviceAccount:{AGENT}@{PROJECT}.iam.gserviceaccount.com"' in agent
-    assert agent.endswith(" FILTER USING (TRUE);")
+    entities = {f"`{e['id'].replace('-', '_')}_rows`": e["id"] for e in access["entities"]}
+    named = 0
+    for statement in statements:
+        grantees = granted_to(statement)
+        if f"`{AGENT_POLICY}`" in statement:
+            assert grantees == {account(AGENT)}
+            assert statement.endswith(" FILTER USING (TRUE);")
+            continue
+        entity = next(e for name, e in entities.items() if name in statement)
+        want = readers(access, "payments", entity) & clear(columns, "payments")
+        assert grantees == {account(p) for p in want}
+        assert account(AGENT) not in grantees
+        named += 1
+    assert named == len(statements) - 1
 
 
 @pytest.mark.parametrize(
