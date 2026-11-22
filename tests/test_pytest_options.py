@@ -37,6 +37,7 @@ def test_the_repositorys_options_pass() -> None:
         ('"-ra", "-m",', '"-ra", "-mnot stack", "-m",', "addopts"),
         ('"-ra", "-m",', '"-ra", "-k",', "addopts"),
         ('testpaths = ["tests"]', 'testpaths = ["tests/platform"]', "testpaths"),
+        ('testpaths = ["tests"]', 'testpaths = ["tests", "platform"]', "testpaths"),
         (
             'testpaths = ["tests"]',
             'testpaths = ["tests"]\nnorecursedirs = ["semantics"]',
@@ -52,6 +53,7 @@ def test_the_repositorys_options_pass() -> None:
         "a second -m",
         "-k for -m",
         "testpaths narrowed",
+        "testpaths widened",
         "norecursedirs",
         "no empty mark",
     ],
