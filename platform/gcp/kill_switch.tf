@@ -58,3 +58,18 @@ resource "google_eventarc_trigger" "budget_to_kill_switch" {
     workflow = google_workflows_workflow.kill_switch.id
   }
 }
+
+# The cost check reads this account (`make cost-check`): the agent gets that one read on this
+# account alone, not on the project, and no permission that acts as it.
+resource "google_project_iam_custom_role" "account_reader" {
+  role_id     = "labAccountReader"
+  title       = "Reads one service account"
+  description = "Granted on one service account: reads it, never acts as it."
+  permissions = ["iam.serviceAccounts.get"]
+}
+
+resource "google_service_account_iam_member" "agent_reads_kill_switch_account" {
+  service_account_id = google_service_account.kill_switch.name
+  role               = google_project_iam_custom_role.account_reader.name
+  member             = "serviceAccount:${data.google_service_account.agent.email}"
+}

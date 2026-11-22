@@ -177,6 +177,8 @@ def test_the_agent_account_shows_its_roles_its_reach_and_the_conflict_it_holds(
         ("roles/datacatalog.viewer", "the policy-tag taxonomy"),
         ("roles/storage.objectUser", "the landing bucket"),
         *{(TOKENS, f"account {p}") for p in [*personas, "publisher"]},
+        ("Reads one Pub/Sub topic (custom role)", "Pub/Sub topic budget"),
+        ("Reads one service account (custom role)", "account kill-switch"),
     }
     assert {k for k, source in rows.items() if source == "granted by hand, not declared"} == {
         ("Runs BigQuery queries (custom role)", "the lab project"),
@@ -719,10 +721,10 @@ resource "google_bigquery_dataset" "side" {
   }
 }""",
     "a grant on a resource the review has no words for": f"""
-resource "google_pubsub_topic_iam_member" "agent_publishes" {{
-  topic  = google_pubsub_topic.budget.name
-  role   = "roles/pubsub.publisher"
-  member = "{AGENT}"
+resource "google_workflows_workflow_iam_member" "agent_invokes" {{
+  workflow = google_workflows_workflow.kill_switch.name
+  role     = "roles/workflows.invoker"
+  member   = "{AGENT}"
 }}""",
 }
 

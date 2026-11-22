@@ -83,7 +83,24 @@ TARGETS = {
     "google_data_catalog_taxonomy": ("policy-tag taxonomy", None),
     "google_storage_bucket": ("landing bucket", None),
     "google_service_account": ("account", "service_account_id"),
+    "google_pubsub_topic": ("Pub/Sub topic", "topic"),
 }
+# The permissions that let a holder on a service account act as it: take its tokens or keys, sign
+# as it, attach it, or grant itself any of these. A role on an account holding none of them, a
+# declared custom role whose permissions say so, only reads the account; any predefined role on an
+# account is taken to act as it.
+ACTS_AS = frozenset(
+    {
+        "iam.serviceAccounts.actAs",
+        "iam.serviceAccounts.getAccessToken",
+        "iam.serviceAccounts.getOpenIdToken",
+        "iam.serviceAccounts.implicitDelegation",
+        "iam.serviceAccounts.setIamPolicy",
+        "iam.serviceAccounts.signBlob",
+        "iam.serviceAccounts.signJwt",
+        "iam.serviceAccountKeys.create",
+    }
+)
 PERSONA_ACCOUNTS = "google_service_account.persona"
 CLEAR_READER = "roles/datacatalog.categoryFineGrainedReader"
 MASKED_READER = "roles/bigquerydatapolicy.maskedReader"
@@ -292,6 +309,9 @@ def target(rtype: str, body: Mapping[str, Any], every: bool, addresses: Mapping[
         for address, identity in addresses.items():
             if expression in (f"${{{address}.name}}", f"${{{address}.id}}"):
                 return f"account {identity}"
+    named = re.fullmatch(r"\$\{google_pubsub_topic\.([a-z_]+)\.(?:name|id)\}", expression)
+    if rtype == "google_pubsub_topic" and named:
+        return f"{noun} {named[1]}"
     index = INDEX.search(expression)
     if index is None:
         raise ValueError(f"cannot tell which {noun} {expression} names")
@@ -322,11 +342,12 @@ def declared_grants(
             f"access/review.yaml lists undeclared accounts: {listed - service_accounts}"
         )
     addresses = {a["declared"]: a["id"] for a in accounts}
-    roles = {
-        address.split(".")[1]: f"{unquote(body['title'])} (custom role)"
+    custom_roles = {
+        address.split(".")[1]: body
         for address, body in resources.items()
         if address.startswith("google_project_iam_custom_role.")
     }
+    roles = {k: f"{unquote(b['title'])} (custom role)" for k, b in custom_roles.items()}
     refused: list[str] = []
     for address, body in sorted({**resources, **data}.items()):
         rtype = address.rsplit(".", 1)[0]
@@ -350,6 +371,11 @@ def declared_grants(
             role = unquote(substitute(unquote(body["role"]), instance))
             role = role[3:-2] if role.startswith('${"') else role
             custom = CUSTOM_ROLE.fullmatch(role)
+            acts = (
+                custom is None
+                or custom[1] not in custom_roles
+                or bool({unquote(p) for p in custom_roles[custom[1]]["permissions"]} & ACTS_AS)
+            )
             role = roles.get(custom[1], role) if custom else role
             subbed = {
                 k: substitute(unquote(v), instance) for k, v in body.items() if k != "for_each"
@@ -361,7 +387,7 @@ def declared_grants(
                     refused.append(f"{address}: a member the review cannot attribute")
                     continue
                 found[who].append(CloudGrant(role, on, True))
-                if base == "google_service_account":
+                if base == "google_service_account" and acts:
                     if "every" in instance:
                         refused.append(f"{address}: a role on every account of a collection")
                     else:
