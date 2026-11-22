@@ -21,12 +21,13 @@ the command line or in `PYTEST_ADDOPTS` (`-m`, `-k`, `-o`), the caller's choice.
 another file is refused like any other options file.
 """
 
-import ast
 import tomllib
 from pathlib import Path
 
+import pytest
+
 PLAIN = ["-q", "--strict-markers", "--strict-config", "-ra"]
-IGNORES = {"collect_ignore", "collect_ignore_glob"}
+IGNORES = ("collect_ignore", "collect_ignore_glob")
 SETTINGS = {
     "addopts",
     "markers",
@@ -59,25 +60,41 @@ def problems(repo: Path, inipath: Path | None) -> list[str]:
         found.append(f'testpaths must be ["tests"], not {options.get("testpaths")}')
     if options.get("empty_parameter_set_mark") != "fail_at_collect":
         found.append('empty_parameter_set_mark is not "fail_at_collect"')
-    conftests = [repo / "conftest.py", *sorted((repo / "tests").rglob("conftest.py"))]
-    for conftest in (c for c in conftests if c.is_file()):
-        if names := sorted(assigned(conftest)):
-            found.append(f"{conftest.relative_to(repo)} sets {', '.join(names)}")
     return found
 
 
-def assigned(module: Path) -> set[str]:
-    """The names of IGNORES a module's code holds in any form: a name read or bound anywhere (an
-    assignment, unpacking, `:=`, a `for` target, a `global`), an import alias, or a string that
-    could name it (`globals()["collect_ignore"]`); a comment does not count."""
-    found: set[str] = set()
-    for node in ast.walk(ast.parse(module.read_text())):
-        if isinstance(node, ast.Name):
-            found.add(node.id)
-        elif isinstance(node, ast.alias):
-            found |= {node.name.rsplit(".", 1)[-1], node.asname or ""}
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            found.add(node.value)
-        elif isinstance(node, ast.Global | ast.Nonlocal):
-            found |= set(node.names)
-    return found & IGNORES
+def pytest_configure(config: pytest.Config) -> None:
+    """Registers the conftest check; `tests/conftest.py` loads this module as a plugin."""
+    config.pluginmanager.register(ConftestIgnores(config.rootpath), "conftest collect_ignore check")
+
+
+class ConftestIgnores:
+    """Fails a run in which a conftest pytest loaded holds `collect_ignore` or
+    `collect_ignore_glob`. pytest reads each as an attribute of the conftest module (`getattr`)
+    while it collects the conftest's directory, so this asks each module the same way, however
+    its code bound the name, and asks after collection too, since pytest loads a nested conftest
+    only once collection reaches its directory: the tests the attribute left out are already
+    gone, and the run ends with a usage error (exit status 4) instead of running the rest."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.conftests: dict[str, object] = {}
+        self.seen: set[tuple[str, str]] = set()
+
+    def pytest_plugin_registered(self, plugin: object, plugin_name: str) -> None:
+        """pytest registers each conftest under its path; this is also replayed for each one
+        registered before this plugin. A module deleting the attribute later is still named."""
+        if Path(plugin_name).name == "conftest.py":
+            self.conftests[plugin_name] = plugin
+            self.seen |= {(plugin_name, name) for name in IGNORES if hasattr(plugin, name)}
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_collection_finish(self) -> None:
+        now = {(p, n) for p, conftest in self.conftests.items() for n in IGNORES if hasattr(conftest, n)}
+        if found := sorted(self.seen | now):
+            raise pytest.UsageError(
+                "pytest's options: " + "; ".join(f"{self.shown(p)} sets {n}" for p, n in found)
+            )
+
+    def shown(self, path: str) -> str:
+        return str(Path(path).relative_to(self.root)) if Path(path).is_relative_to(self.root) else path
