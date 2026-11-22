@@ -23,9 +23,9 @@ the project file's `vars` as dbt loads them:
   manifest and parser of filters;
 - the semantic model of each measure those metrics resolve to and of each semantic model a metric
   aggregates directly, with the semantic models they join through a shared entity name: their
-  relation, entities, dimensions, defaults and other keys, and of their measures only the ones
-  resolved to;
-- the project's time spines;
+  relation, entities, dimensions, defaults and other keys, of their measures only the ones
+  resolved to, and the `schema` config of the node each reads (its BigQuery dataset, below);
+- the project's time spines, with the `schema` config of each time spine's node;
 - the project file's whole `vars` block, so a var changed means every metric's version goes up.
 
 Left out of it: the wording of a component (the `description` and `label` of an input metric, a
@@ -37,17 +37,100 @@ Outside the definition, so a change there is not seen by the gate:
 - the SQL of the dbt models a semantic model reads (caught, if at all, by the models' tests, the
   payments data contract's gate and the values pinned over the landed build);
 - command-line `--vars` a consumer passes to dbt;
-- relation names decided by the profile, by a model's SQL `config()`, or on a target other than
-  the local one: the gate compares the local target's parse;
+- relation names decided by the profile, or on a target other than the local one, but for what
+  the routing below holds: the gate compares the local target's parse;
 - dbt packages, which the gate refuses rather than reads.
 
 The ways a project's macros can decide relation names that the gate refuses:
 
 - a project macro named `generate_alias_name`, `generate_schema_name` or `generate_database_name`,
   or one of those after a `<prefix>__`, such as `default__generate_alias_name` or
-  `duckdb__generate_schema_name`, which dbt's own versions of the three dispatch to;
+  `duckdb__generate_schema_name`, which dbt's own versions of the three dispatch to, except one
+  `generate_schema_name` whose macro block is the gate's own text (`SCHEMA_MACRO`) character for
+  character: on BigQuery it returns a node's `schema` config trimmed of surrounding whitespace,
+  else the profile's dataset, and on any other target the profile's schema, reading nothing but
+  `target.type`, `target.schema` and that config, and calling no macro;
 - a project file `dispatch` entry for the `dbt` macro namespace, which those three dispatch in, or
   a `dispatch` setting the gate cannot read as entries for other namespaces.
+
+The routing, which the gate holds (`ROUTES`: a folder of the project mapped to a BigQuery dataset
+and the relation names the folder holds; a test holds each to a data product's dataset in
+platform/gcp/warehouse.tf and to its `tables` in access/personas.yaml), and the rules the project's
+nodes are held to. The placement configs (`PLACEMENT`) are `schema`, `alias`, `enabled`,
+`database`, a snapshot's `target_schema` and `target_database`, and dbt-bigquery's names `dataset`,
+`project`, `target_dataset` and `target_project`, which dbt translates only on a BigQuery target.
+
+- On either tree, for each model, seed, snapshot and data test of the project, enabled or not, as
+  the local parse records it (it runs only the `config()` calls the local target reaches, and
+  records a generic test's YAML config already rendered, so those are left to the outcome below):
+  - a placement config set in a `config()` call (a node's SQL, or a generic test's own `config`,
+    which dbt records the same way) is refused, but a data test's `alias`, which dbt's generic
+    tests set there themselves;
+  - a placement config whose rendered value is not the value dbt records as written (dbt Jinja,
+    `none` included, or a later setting that overrides it) is refused;
+  - `database`, `target_schema`, `target_database` and the four dbt-bigquery names, written with a
+    value, are refused, and on a data test also `schema`, which places its stored failures;
+  - a model, seed or snapshot with a `schema` where the project has no allowed schema macro is
+    refused (dbt's own prefixes it with the profile's dataset).
+- On either tree, a model, seed, snapshot or data test of the project that the local parse
+  disables is refused (a disabled metric or semantic model is read as gone, as before).
+- On either tree, Jinja in any file of the project dbt parses (not `models/profiles.yml`, whose
+  settings the probes take only as literals) that names what dbt knows of its own invocation
+  (`INVOCATION`: `context`, `flags`, `invocation_args_dict`, `invocation_id`, `selected_resources`,
+  and dbt's macros
+  `should_full_refresh` and `should_store_failures`, which read a flag while the project is
+  parsed) is refused: both parses run `dbt parse`, so a placement turning on the command or its
+  flags would be read as a parse gives it, not as a real build's; so is `context`, dbt's whole
+  context, which reaches each of them by a key. A read is a name token of dbt's own Jinja lexer or
+  a word of a string token's decoded value (`context['flags']`, `dbt.get('should_full_refresh')`),
+  in the file's text or, for a schema file, in each string of its decoded YAML, which is what dbt
+  renders (so a YAML comment or escape hides none); a tag end inside a quoted string or a tag over
+  several lines is read as dbt reads it, and a text the lexer cannot read is refused. So are the
+  other ways to the invocation (`invocation_routes`): `dbt` but as `dbt.<macro>` (a key or a mapping
+  method reaches a flag macro by a name built from parts), `adapter` but as `adapter.<name>`, its
+  `config` (the runtime config, whose `args` are the command's), an `adapter.dispatch` whose macro
+  is not one string literal, and a name or string opening with `__`.
+- On the working tree: a model, seed or snapshot's `schema` is the dataset `ROUTES` gives its
+  folder, and none outside those folders; a routed folder's relation names (an alias, else the
+  node's name) are its route's tables, each built once.
+- On the working tree, the outcome: dbt-bigquery's own parse of the tree, run from the lock's
+  `bigquery` group in uv's cache with the network refused, beside the local parse and under the
+  same fixed environment, on each of two throwaway profiles (`PROBES`). Each is the tree's own
+  BigQuery output of `models/profiles.yml`, its name and every literal setting kept (the dataset
+  `intermediate` among them), with a stand-in token, an invented project and a free-tier region;
+  the two differ in project and region, the first region being the lab's. Refused, on either: a
+  model, seed, snapshot or function (a UDF, which `dbt build` creates as it does a model) of the
+  project that lands anywhere but its folder's route, else the profile's dataset, of the profile's
+  project; a data test placed anywhere but `dbt_test__audit` of the profile's project, where dbt
+  would put its stored failures; a routed folder whose relations are not its route's tables, each
+  once; a relation name holding a character other than a letter, a digit or `_` (dbt-bigquery
+  quotes it unescaped); a node's `pre_hook`, `post_hook`, `sql_header` or `grants`, and an
+  `on-run-*` hook of the project; a materialization the project defines; and a project macro
+  that overrides one of dbt's or dbt-bigquery's own by name, directly or as `<prefix>__<name>`
+  of one (the allowed schema macro aside), since no parse shows what such SQL and macros write.
+  This sees what the local parse cannot: a generic test's YAML config read rendered, a `config()`
+  call only the BigQuery target runs, a node enabled only there, whether they turn on the target's
+  type, name or literal settings, or on its project or region.
+- When the `bigquery` group is not in uv's cache, the gate fails and says to run `make sync`,
+  which caches it; any other failure of the BigQuery parse, dbt-bigquery not importing among them,
+  fails the gate with dbt's error class.
+
+Stated limits of the routing: a placement config dbt-bigquery adds after the locked version is not
+refused by the local rules until it is listed (a test compares the listed names with the locked
+adapter's `_ALIASES`), though the outcome check still sees where it places a node; a placement that
+turns on the environment, the clock or command-line `--vars` is read as the gate's fixed
+environment gives it, not as a real build's, and the BigQuery output's settings the environment
+renders (its method and token) as the probes set them (`PROBED`), not as a real build's; one that
+reaches the invocation by a name or a route the gate does not list (`INVOCATION`,
+`invocation_routes`) is read as a parse gives it; one that
+turns on the project or region being one
+named value (the real project's id, which no file may hold, or a third region) is read as the two
+probes give it; SQL a node's Jinja runs through `run_query` or a `statement` block when dbt
+executes it (a parse does not), and a project macro that overrides `ref` or `source` (which dbt
+provides as functions, not macros), are not read;
+the macro's text is compared, its behaviour rests on dbt's `target` (a project macro named `target`
+makes the pinned dbt's parse fail); and since both trees are read with the working tree's gate, a
+change to `SCHEMA_MACRO` makes an `origin/main` holding the old text unreadable.
 
 Stated limits of that refusal: it rests on dbt's default implementations of the three, in the dbt
 the lock pins, calling no other macro (the database one asks the adapter for a model's catalog
@@ -65,13 +148,16 @@ The gate fails when:
 - either tree holds, in what dbt reads, a symbolic link or a submodule; declares dbt packages
   (`packages.yml`, `dependencies.yml`); has a project file holding Jinja, or a path setting that is
   absolute or outside the tree; defines a macro that decides relation names or sets a `dispatch`
-  entry for the `dbt` namespace (both above); holds dbt Jinja where dbt renders it in a semantic
-  model or metric entry, or in the entry of a model, seed or snapshot a semantic model reads or a
-  time spine is (dbt renders that Jinja with the environment, command-line variables and the clock);
-- dbt cannot parse either tree: the message names the tree and dbt's error class, never dbt's own
-  output; a parse that fails only by leaving a semantic model's `node_relation` unset, which a
-  backward step of the wall clock during the parse causes, is run once more first, and the message
-  says when the failure is that second parse's;
+  entry for the `dbt` namespace (both above); breaks a rule of the routing (above); holds dbt
+  Jinja where dbt renders it in a semantic model or metric entry, or in the entry of a model, seed
+  or snapshot a semantic model reads or a time spine is (dbt renders that Jinja with the
+  environment, command-line variables and the clock);
+- dbt cannot parse either tree, or the working tree on the BigQuery target: the message names the
+  tree and dbt's error class, never dbt's own output; a parse, local or BigQuery, that fails only
+  by leaving a semantic model's `node_relation` unset, which a backward step of the wall clock
+  during the parse causes, is run once more first, and the message says when the failure is that
+  second parse's;
+- the lock's `bigquery` group is not in uv's cache (above);
 - a metric `origin/main` defines is gone from the working tree or renamed;
 - a metric's definition changed and its version did not go up, or its version went down;
 - a metric has no version that is an integer from 1 to 2^53 - 1, or no owner.
@@ -99,10 +185,15 @@ import sys
 import tempfile
 from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+# The lock groups' environments (platform/group_env.py), found from this file wherever it runs.
+sys.path.append(str(Path(__file__).resolve().parents[1] / "platform"))
+import group_env  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 HERE = Path(__file__).resolve().parent
@@ -115,8 +206,109 @@ PACKAGE_FILES = ("packages.yml", "dependencies.yml")
 # project macro of one of these names, or of one of them after `<prefix>__` (the `default__` and
 # `<adapter>__` implementations dbt's own macros dispatch to), is refused.
 RELATION_MACROS = ("generate_alias_name", "generate_schema_name", "generate_database_name")
+# The one relation macro a project may define: `generate_schema_name` with exactly this text (dbt's
+# parse of the macro block, from `{% macro` to `{%- endmacro %}`). On BigQuery it returns a node's
+# `schema` config trimmed of surrounding whitespace, else the profile's dataset; on any other target
+# the profile's schema.
+SCHEMA_MACRO_NAME = "generate_schema_name"
+SCHEMA_MACRO = (
+    "{% macro generate_schema_name(custom_schema_name, node) -%}\n"
+    "{%- if custom_schema_name is none or target.type != 'bigquery' -%}\n"
+    "{{ target.schema }}\n"
+    "{%- else -%}\n"
+    "{{ custom_schema_name | trim }}\n"
+    "{%- endif -%}\n"
+    "{%- endmacro %}"
+)
+
+
+@dataclass(frozen=True)
+class Route:
+    """Where the models, seeds and snapshots of one folder are built on BigQuery: the dataset,
+    and the relation names the folder holds, which are the data product's `tables`."""
+
+    dataset: str
+    tables: tuple[str, ...]
+
+
+# The routing that macro implements, which the project file's `+schema` settings must match: each
+# folder of the project (as dbt gives a node's path, relative to `models/`) mapped to the BigQuery
+# dataset its models, seeds and snapshots are built in and the relations it holds. A node in no
+# folder here has no `schema` config. A test holds each route to a data product's dataset in
+# platform/gcp/warehouse.tf and to that product's `tables` in access/personas.yaml.
+ROUTES = {
+    "models/marts/group_totals": Route("group_totals", ("group_totals", "group_totals_left_out")),
+}
+# The kinds of node that are built as relations, whose routing the gate checks.
+BUILT = ("model", "seed", "snapshot")
+# Configs that would place a node outside the routing: another database (a BigQuery project), and
+# a snapshot's own schema or database, which dbt uses in place of the schema macro.
+UNROUTED = ("database", "target_schema", "target_database")
+# dbt-bigquery's own names for the placement configs (`BigQueryCredentials._ALIASES`, which a test
+# compares with the locked adapter's): dbt translates them only on a BigQuery target, so the local
+# parse the gate reads keeps them under these names; each is refused. Written as pairs, which the
+# fresh-clone scan does not read as a project setting.
+BIGQUERY_ALIASES: dict[str, str] = dict(
+    (
+        ("dataset", "schema"),
+        ("project", "database"),
+        ("target_dataset", "target_schema"),
+        ("target_project", "target_database"),
+    )
+)
+# Every config key the gate refuses outright on a node, where dbt records it as written; a data
+# test also may not set `schema`, which places its stored failures.
+REFUSED_CONFIGS = (*UNROUTED, *BIGQUERY_ALIASES)
+# The configs that decide whether and where a node is built: each, when a node sets it, must be the
+# literal dbt renders, and none may be set in a `config()` call (a node's SQL, or a generic test's
+# own `config`, which dbt records the same way), so the local parse places the node as BigQuery's.
+PLACEMENT = ("schema", "alias", "enabled", *REFUSED_CONFIGS)
+# The kinds of node held to the placement rules: the built ones, and data tests, whose stored
+# failures are built as tables.
+PLACED = (*BUILT, "test")
 # The macro namespace dbt's own macros, the three above among them, dispatch in.
 DBT_NAMESPACE = "dbt"
+# The outcome check: dbt-bigquery's parse of the working tree, run by the Python of the lock's
+# `bigquery` group's one environment (platform/group_env.py: built once per lock from uv's cache
+# with no network, `uv sync --frozen --offline --only-group bigquery`, so it holds neither the
+# project nor `dev`'s dbt-core pins), in a fresh process per parse with no network (every proxy
+# variable pointed at a port nothing listens on, `semantics/offline` on `PYTHONPATH`, whose
+# `sitecustomize` ends the process at its first connection or name lookup), on a throwaway profile
+# that names an invented project and a stand-in token.
+BIGQUERY_GROUP = "bigquery"
+CLOSED = "http://127.0.0.1:9"
+PROXIES = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
+# What uv prints when `--offline` finds a package missing from its cache.
+NOT_CACHED = "Network connectivity is disabled"
+NOT_CACHED_ADVICE = (
+    "the lock's bigquery group is not in uv's cache, so where the nodes land on BigQuery cannot be"
+    " read: run `make sync`, which caches it"
+)
+# The two throwaway profiles the outcome check parses the working tree on: each is the tree's own
+# `models/profiles.yml` BigQuery output, its name and every setting written as a literal kept, with
+# an invented project, a stand-in token and one of the free-tier regions in place of what the real
+# build reads from the environment. They differ in project and region (the first is the lab's,
+# platform/gcp/variables.tf), so a placement that turns on either is off its route in one of them.
+PROBES = (("probe-project", "us-central1"), ("probe-other-project", "us-east1"))
+PROFILES_FILE = f"{PROJECT}/profiles.yml"
+BIGQUERY_TYPE = "bigquery"
+# What the real output reads from the environment, which each probe sets itself.
+PROBED = {"method": "oauth-secrets", "token": "stand-in"}
+# The dataset dbt places every data test in, where its stored failures would be written.
+TEST_SCHEMA = "dbt_test__audit"
+# The kinds of node the outcome check places: the placed ones, and dbt's functions (UDFs), which
+# `dbt build` creates in a dataset as it does a model; an `operation` (an `on-run-*` hook) runs SQL
+# no parse places, and is refused.
+OUTCOME_KINDS = (*PLACED, "function")
+OPERATION = "operation"
+# A node's configs that run SQL besides its build, which no parse places (`grants` among them:
+# dbt grants each listed principal on the relation): each is refused.
+SIDE_SQL = ("pre_hook", "post_hook", "sql_header", "grants")
+# The characters a relation name may hold on the outcome check, so that dbt-bigquery's quoted
+# identifier is the relation the parse names and no more.
+RELATION_NAME = re.compile(r"[A-Za-z0-9_]+")
+# The prefix dbt gives a materialization's macro (`materialization_<name>_<adapter>`).
+MATERIALIZATION = "materialization_"
 # The largest integer the audit record (agent/audit.schema.json) carries exactly.
 MAX_VERSION = 2**53 - 1
 # What a component may change without changing the number of a metric built from it.
@@ -130,6 +322,28 @@ SEMANTIC_KEYS = ("semantic_models", "metrics")
 # The schema-file keys of what a semantic model can read or a time spine can be.
 READ_KEYS = ("models", "seeds", "snapshots")
 JINJA = ("{{", "{%", "{#")
+# What Jinja can read of the dbt invocation itself, which differs between the gate's `dbt parse`
+# and a real build (`flags.WHICH`, `--full-refresh`, `--store-failures` and the rest): dbt's
+# `flags`, `invocation_args_dict` and `invocation_id`, and dbt's own macros that read a flag while a
+# project is parsed, and `context`, dbt's whole context, which reaches each of them by a key. A
+# placement turning on any of them is not the build's, so the gate refuses each read by name, in
+# every file of the project dbt parses: a name token of dbt's own Jinja lexer, or a word of a string
+# token's value (`context['flags']`, `dbt.get('should_full_refresh')`), and in a schema file in each
+# string of the YAML as decoded, which is what dbt renders.
+INVOCATION = (
+    "context",
+    "flags",
+    "invocation_args_dict",
+    "invocation_id",
+    "should_full_refresh",
+    "should_store_failures",
+    "selected_resources",
+)
+# The other ways Jinja reaches the invocation, which `invocation_routes` refuses: dbt's macro
+# namespace by a key or a mapping method (`dbt['should_' ~ 'full_refresh']`), the adapter's runtime
+# config (`adapter.config.args`), a dispatch by a name not written whole, and Python's internals.
+MAPPING_METHODS = ("get", "items", "keys", "values", "pop", "setdefault", "copy", "update")
+INVOCATION_WORD = re.compile(r"\b(?:" + "|".join(INVOCATION) + r")\b")
 # Git's modes for a file and an executable file; anything else (a link, a submodule) is refused.
 FILE_MODES = ("100644", "100755")
 DUCKDB_FILE = "ledger_lab.duckdb"
@@ -149,6 +363,10 @@ NODE_RELATION_UNSET = re.compile(
 def node_relation_unset(output: str) -> bool:
     """Whether dbt's output, or its error's text, holds the error of an unset `node_relation`."""
     return NODE_RELATION_UNSET.search(output) is not None
+
+
+# What a parse's failure message adds when it is the second parse's (`once_more`).
+SECOND_PARSE = ", on a second parse after the first left a semantic model's node_relation unset"
 
 
 def once_more[R](run: Callable[[], R], again: Callable[[R], bool]) -> tuple[R, bool]:
@@ -190,6 +408,23 @@ class Parsed:
 
     manifest: Block
     vars: object
+    routes: Block
+
+
+@dataclass(frozen=True)
+class Landed:
+    """Where dbt-bigquery's parse places one node of the project: its kind, name, path (relative
+    to `models/`), place in the tree, project, dataset and relation name."""
+
+    kind: str
+    name: str
+    path: str
+    place: str
+    database: str | None
+    schema: str
+    relation: str
+    # The configs set on the node that run SQL of their own besides its build (`SIDE_SQL`).
+    side: tuple[str, ...] = ()
 
 
 def git(repo: Path, *args: str, stdin: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
@@ -386,10 +621,11 @@ def parse_command(project: Path, report: Path) -> list[str]:
     ]
 
 
-def parse(tree: Path, work: Path, which: str) -> Parsed:
+def parse(tree: Path, work: Path, which: str, routed: bool = False) -> Parsed:
     """What dbt's parse of the exported tree gives; Unreadable when dbt cannot parse it or it
-    holds what the gate refuses. A parse whose only error is an unset `node_relation` is run once
-    more. The message never carries dbt's own output."""
+    holds what the gate refuses, and, when `routed`, a node off the gate's routing. A parse whose
+    only error is an unset `node_relation` is run once more. The message never carries dbt's own
+    output."""
     project = tree / PROJECT
     for folder in ("home", "tmp"):
         (work / folder).mkdir(parents=True, exist_ok=True)
@@ -411,11 +647,7 @@ def parse(tree: Path, work: Path, which: str) -> Parsed:
         return json.loads(report.read_text()).get("node_relation_unset") is True
 
     result, second = once_more(run, unset)
-    retried = (
-        ", on a second parse after the first left a semantic model's node_relation unset"
-        if second
-        else ""
-    )
+    retried = SECOND_PARSE if second else ""
     if result.returncode != 0 or not report.is_file():
         raise Unreadable(
             f"dbt could not parse the {which} tree (the parse ended with exit status"
@@ -424,10 +656,11 @@ def parse(tree: Path, work: Path, which: str) -> Parsed:
     found = json.loads(report.read_text())
     if found.get("error"):
         raise Unreadable(f"dbt could not parse the {which} tree ({found['error']}){retried}")
-    if found["refused"]:
-        raise Unreadable("; ".join(found["refused"]))
+    refused = found["refused"] + (found["off_routes"] if routed else [])
+    if refused:
+        raise Unreadable("; ".join(refused))
     semantic = json.loads((work / "target" / "semantic_manifest.json").read_text())
-    return Parsed(semantic, found["vars"])
+    return Parsed(semantic, found["vars"], found["routes"])
 
 
 def jinja_at(
@@ -450,6 +683,90 @@ def jinja_at(
             )
             if renders(path) or (path[-1:] == ("description",) and not wording):
                 yield ".".join(str(p) for p in path)
+
+
+def yaml_strings(value: object) -> Iterator[str]:
+    """Every string of a decoded YAML document, keys included: what dbt renders, after YAML's own
+    comments, escapes and folding are gone."""
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            yield item
+        elif isinstance(item, dict):
+            pending += [*item.keys(), *item.values()]
+        elif isinstance(item, list):
+            pending += item
+
+
+def invocation_reads(path: str, *texts: str) -> list[str]:
+    """What the gate refuses of a file's Jinja reading the dbt invocation (`INVOCATION`), in each of
+    `texts` (the file's text, or for a schema file each string of its decoded YAML): each name
+    token of `INVOCATION` that dbt's own Jinja lexer finds, and each such word in a string token's
+    value as Jinja decodes it, so a delimiter inside a string literal, a tag over several lines, an
+    escape and whitespace control read as dbt reads them, while a comment, a `raw` block and the
+    text between tags hold no token that is read. A text the lexer cannot read is refused, since
+    what it would run is unknown."""
+    from dbt_common.clients.jinja import get_environment
+    from jinja2 import TemplateSyntaxError
+
+    lexer = get_environment().lexer
+    read: set[str] = set()
+    routes: set[str] = set()
+    for text in texts:
+        if not any(mark in text for mark in JINJA):
+            continue
+        try:
+            tokens = list(lexer.tokenize(text))
+        except TemplateSyntaxError as error:
+            return [
+                f"{path}: its Jinja does not lex (line {error.lineno}), so the gate cannot read"
+                " what it runs, which the gate refuses"
+            ]
+        read |= {t.value for t in tokens if t.type == "name" and t.value in INVOCATION}
+        read |= {
+            word
+            for t in tokens
+            if t.type == "string"
+            for word in INVOCATION_WORD.findall(str(t.value))
+        }
+        routes |= invocation_routes([(t.type, str(t.value)) for t in tokens])
+    return [
+        f"{path}: its Jinja reads {name}, which differs between the gate's parse and a real build,"
+        " which the gate refuses"
+        for name in sorted(read)
+    ] + [
+        f"{path}: its Jinja reaches what dbt holds by {route}, which the gate cannot follow to the"
+        " invocation and refuses"
+        for route in sorted(routes)
+    ]
+
+
+def invocation_routes(tokens: list[tuple[str, str]]) -> set[str]:
+    """The ways a token stream reaches dbt's invocation other than by its names: `dbt` but as
+    `dbt.<macro>`, `adapter` but as `adapter.<name>` other than its `config`, an
+    `adapter.dispatch` whose macro is not one string literal, and a name or string opening with
+    `__`, Python's internals."""
+    routes: set[str] = set()
+    padded = [*tokens, ("eof", ""), ("eof", "")]
+    for n, (kind, value) in enumerate(tokens):
+        (next_kind, _), (follow_kind, follow) = padded[n + 1], padded[n + 2]
+        attribute = follow if next_kind == "dot" and follow_kind == "name" else None
+        if kind in ("name", "string") and value.startswith("__"):
+            routes.add(f"a name opening with __ ({value})")
+        if kind != "name":
+            continue
+        if value == "dbt" and (attribute is None or attribute in MAPPING_METHODS):
+            routes.add("a key of dbt's macros")
+        if value == "adapter" and attribute is None:
+            routes.add("the adapter other than by an attribute")
+        if value == "adapter" and attribute == "config":
+            routes.add("the adapter's config")
+        if value == "adapter" and attribute == "dispatch":
+            call = [k for k, _ in padded[n + 3 : n + 6]]
+            if call[:2] != ["lparen", "string"] or call[2] not in ("rparen", "comma"):
+                routes.add("a dispatch whose macro is not one string")
+    return routes
 
 
 def parse_and_refuse(project: Path, report: Path) -> int:
@@ -492,9 +809,78 @@ def parse_and_refuse(project: Path, report: Path) -> int:
     refused = [
         f"{in_tree(project, macro.original_file_path, tree)}: macro {macro.name} decides relation"
         " names, which the gate does not compare"
+        + (
+            f", other than {SCHEMA_MACRO_NAME} with the gate's own text (semantics/versions.py)"
+            if macro.name == SCHEMA_MACRO_NAME
+            else ""
+        )
         for macro in manifest.macros.values()
-        if macro.package_name == root and names_relations(macro.name)
+        if macro.package_name == root
+        and names_relations(macro.name)
+        and not allowed_macro(macro.name, macro.macro_sql)
     ]
+    built = [
+        node
+        for node in manifest.nodes.values()
+        if node.package_name == root and node.resource_type.value in BUILT
+    ]
+    macro_allowed = any(
+        macro.package_name == root and allowed_macro(macro.name, macro.macro_sql)
+        for macro in manifest.macros.values()
+    )
+    disabled = [
+        node
+        for versions_of in manifest.disabled.values()
+        for node in versions_of
+        if node.package_name == root and node.resource_type.value in PLACED
+    ]
+    refused += [
+        f"{in_tree(project, node.original_file_path, tree)}: {node.resource_type.value}"
+        f" {node.name} is disabled in the local parse, which the gate does not read"
+        for node in disabled
+    ]
+    for node in [*manifest.nodes.values(), *disabled]:
+        if node.package_name != root or node.resource_type.value not in PLACED:
+            continue
+        kind = node.resource_type.value
+        what = f"{in_tree(project, node.original_file_path, tree)}: {kind} {node.name}"
+        refused += unroutable(
+            what,
+            kind,
+            {key: node.config.get(key) for key in PLACEMENT},
+            dict(node.unrendered_config),
+            dict(getattr(node, "config_call_dict", None) or {}),
+            macro_allowed,
+        )
+    off_routes: list[str] = []
+    for node in built:
+        what = f"{in_tree(project, node.original_file_path, tree)}: {node.resource_type.value}"
+        what += f" {node.name}"
+        off_routes += off_route(what, node.original_file_path, node.config.schema)
+    off_routes += off_tables(
+        [
+            (
+                node.original_file_path,
+                in_tree(project, node.original_file_path, tree),
+                node.alias or node.name,
+            )
+            for node in built
+        ]
+    )
+    schema_of = {node.unique_id: node.config.schema for node in built}
+    routes = {
+        "semantic_models": {
+            model.name: next(
+                (schema_of[uid] for uid in model.depends_on.nodes if uid in schema_of), None
+            )
+            for model in manifest.semantic_models.values()
+        },
+        "time_spines": {
+            node.name: node.config.schema
+            for node in built
+            if getattr(node, "time_spine", None) is not None
+        },
+    }
     if routes_dbt_macros(project_file.get("dispatch")):
         refused.append(
             f"{PROJECT_FILE}'s dispatch sets where dbt's own macros are found, among them the"
@@ -510,9 +896,16 @@ def parse_and_refuse(project: Path, report: Path) -> int:
             # A second guard: the path settings checked before the parse keep dbt in the tree.
             refused.append("dbt read a file outside the tree")
             continue
+        path = found_at.relative_to(tree).as_posix()
+        # dbt renders a schema file's strings after decoding its YAML, and the rest as written.
+        rendered = (
+            list(yaml_strings(file.dict_from_yaml))
+            if isinstance(file, SchemaSourceFile)
+            else [found_at.read_text(errors="replace")]
+        )
+        refused += invocation_reads(path, *rendered)
         if not isinstance(file, SchemaSourceFile):
             continue
-        path = found_at.relative_to(tree).as_posix()
         for key, entries in (file.dict_from_yaml or {}).items():
             if key not in SEMANTIC_KEYS and key not in READ_KEYS:
                 continue
@@ -523,8 +916,427 @@ def parse_and_refuse(project: Path, report: Path) -> int:
                     continue
                 for place in jinja_at(key, entry, renders):
                     refused.append(f"{path}: {key} {name} holds dbt Jinja at {place}")
-    report.write_text(json.dumps({"refused": sorted(set(refused)), "vars": project_vars}))
+    report.write_text(
+        json.dumps(
+            {
+                "refused": sorted(set(refused)),
+                "off_routes": sorted(off_routes),
+                "vars": project_vars,
+                "routes": routes,
+            }
+        )
+    )
     return 0
+
+
+def bigquery_environment() -> Path:
+    """The folder of the `bigquery` group's environment, built from uv's cache with no network when
+    it is not; GateError when it cannot be (`group_failure` says why when the cache lacks it)."""
+    try:
+        return group_env.environment(BIGQUERY_GROUP, repo=REPO)
+    except group_env.UnbuiltError as e:
+        raise GateError(group_failure(e.stderr) or str(e)) from e
+
+
+def offline_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment of a command in the `bigquery` group: the caller's, with the group's
+    executables first on `PATH`, every proxy variable pointed at `CLOSED` and `semantics/offline`
+    on `PYTHONPATH`."""
+    env = group_env.run_environment(bigquery_environment(), dict(os.environ))
+    env |= {name: CLOSED for name in PROXIES}
+    env |= {"NO_PROXY": "", "no_proxy": "", "DBT_SEND_ANONYMOUS_USAGE_STATS": "false"}
+    env["PYTHONPATH"] = str(HERE / "offline")
+    return env | (extra or {})
+
+
+def offline_command(*command: str) -> list[str]:
+    """`command` in the `bigquery` group's environment: its first word that environment's own
+    executable."""
+    return group_env.command(bigquery_environment(), *command)
+
+
+def offline_run(
+    *command: str, extra: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """A command run in the `bigquery` group from uv's cache, with no network."""
+    return subprocess.run(  # noqa: S603
+        offline_command(*command),
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=REPO,
+        env=offline_environment(extra),
+    )
+
+
+def group_failure(stderr: str) -> str | None:
+    """Why the `bigquery` group could not run, from what the command wrote, or None when the
+    failure is not the group's: its packages are not in uv's cache."""
+    if NOT_CACHED in " ".join(stderr.split()):
+        return NOT_CACHED_ADVICE
+    return None
+
+
+def probe_profile(tree: Path, project: str, location: str) -> Block:
+    """The throwaway profile of one probe: the tree's own BigQuery output of `models/profiles.yml`
+    (the one output whose `type` is the literal `bigquery`, of the profile `dbt_project.yml`
+    names), as its target, with its name and every literal setting kept and `PROBED`, `project` and
+    `location` in place of the rest; Unreadable when there is no such output, or its `dataset` is
+    not a literal."""
+    try:
+        name = yaml.safe_load((tree / PROJECT_FILE).read_text())["profile"]
+        outputs = yaml.safe_load((tree / PROFILES_FILE).read_text())[name]["outputs"]
+    except (OSError, yaml.YAMLError, KeyError, TypeError) as e:
+        raise Unreadable(f"{PROFILES_FILE} names no outputs for the project's profile") from e
+    found = [
+        key
+        for key, out in outputs.items()
+        if isinstance(out, dict) and out.get("type") == BIGQUERY_TYPE
+    ]
+    if len(found) != 1:
+        raise Unreadable(f"{PROFILES_FILE} holds {len(found)} outputs of type bigquery, not one")
+    (output,) = found
+    literal = {
+        key: value
+        for key, value in outputs[output].items()
+        if not (isinstance(value, str) and any(mark in value for mark in JINJA))
+    }
+    if not isinstance(literal.get("dataset"), str):
+        raise Unreadable(f"{PROFILES_FILE}'s {output} output has no literal dataset")
+    target = literal | PROBED | {"project": project, "location": location}
+    return {name: {"target": output, "outputs": {output: target}}}
+
+
+def bigquery_command(project: Path, work: Path) -> list[str]:
+    """The command of one BigQuery parse: this file, in the `bigquery` group
+    (`parse_on_bigquery`)."""
+    return offline_command(
+        "python", str(Path(__file__).resolve()), "--bigquery-parse", str(project), str(work)
+    )
+
+
+def start_bigquery(
+    tree: Path, work: Path, probe: tuple[str, str] = PROBES[0]
+) -> subprocess.Popen[str]:
+    """dbt-bigquery's parse of the exported tree (`parse_on_bigquery`) on one probe's profile
+    (`probe_profile`), started in a process group of its own, so it runs beside the local parse and
+    can be ended whole; Unreadable when the tree's profile has no BigQuery output to probe."""
+    (work / "profiles").mkdir(parents=True, exist_ok=True)
+    profile = probe_profile(tree, *probe)
+    (work / "profiles" / "profiles.yml").write_text(yaml.safe_dump(profile))
+    return subprocess.Popen(  # noqa: S603
+        bigquery_command(tree / PROJECT, work),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=REPO,
+        env=offline_environment(),
+        start_new_session=True,
+    )
+
+
+def end(child: subprocess.Popen[str]) -> None:
+    """The BigQuery parse ended, with every process it started, if it still runs."""
+    if child.poll() is None:
+        os.killpg(child.pid, signal.SIGKILL)
+        child.wait()
+
+
+@dataclass(frozen=True)
+class Finished:
+    """A finished BigQuery parse: the report it wrote (None when it wrote none or failed), its
+    exit status and its standard error."""
+
+    found: Block | None
+    status: int
+    stderr: str
+
+
+def bigquery_report(child: subprocess.Popen[str], work: Path) -> Finished:
+    """The BigQuery parse `child`, waited for."""
+    _, stderr = child.communicate()
+    report = work / "report.json"
+    ok = child.returncode == 0 and report.is_file()
+    found = json.loads(report.read_text()) if ok else None
+    return Finished(found, child.returncode, stderr or "")
+
+
+def bigquery_refusals(
+    child: subprocess.Popen[str], work: Path, restart: Callable[[], subprocess.Popen[str]]
+) -> list[str]:
+    """What the BigQuery parse found off the gate's routing, each marked as BigQuery's; GateError
+    when the `bigquery` group cannot run, Unreadable when dbt cannot parse the tree on BigQuery. A
+    parse whose only error is an unset `node_relation` is run once more, by `restart`. The message
+    never carries dbt's own output."""
+    started = [child]
+
+    def run() -> Finished:
+        if started:
+            return bigquery_report(started.pop(), work)
+        (work / "report.json").unlink(missing_ok=True)
+        again = restart()
+        try:
+            return bigquery_report(again, work)
+        finally:
+            end(again)
+
+    def unset(done: Finished) -> bool:
+        return done.found is not None and done.found.get("node_relation_unset") is True
+
+    done, second = once_more(run, unset)
+    retried = SECOND_PARSE if second else ""
+    found = done.found
+    if found is None:
+        reason = group_failure(done.stderr)
+        if reason:
+            raise GateError(reason)
+        raise Unreadable(
+            "dbt could not parse the working tree on a BigQuery target (the parse ended with exit"
+            f" status {done.status}){retried}"
+        )
+    if found.get("error"):
+        raise Unreadable(
+            f"dbt could not parse the working tree on a BigQuery target ({found['error']}){retried}"
+        )
+    return [f"on BigQuery, {line}" for line in found["refused"]]
+
+
+def parse_on_bigquery(project: Path, work: Path) -> int:
+    """Run in the `bigquery` group (`start_bigquery`): `dbt parse` of the project on the probe's
+    profile in `work/profiles`, under the gate's fixed environment (`environment`) with every proxy
+    variable pointed at `CLOSED`, writing to
+    `work/report.json` dbt's error class when it fails, else where each node of the project lands
+    (`landed`) and what lands off the routing (`placed_off`)."""
+    fixed = environment(work) | {name: CLOSED for name in PROXIES}
+    os.environ.clear()
+    os.environ.update(fixed)
+    for folder in ("home", "tmp"):
+        (work / folder).mkdir(parents=True, exist_ok=True)
+    profile = yaml.safe_load((work / "profiles" / "profiles.yml").read_text())
+    ((_, chosen),) = profile.items()
+    output = chosen["outputs"][chosen["target"]]
+    from dbt.cli.main import dbtRunner
+    from dbt.contracts.graph.manifest import Manifest
+
+    tree = project.resolve().parent
+    args = ["parse", "--no-partial-parse", "--no-use-colors", "--quiet", "--project-dir"]
+    result = dbtRunner().invoke([*args, str(project), "--profiles-dir", str(work / "profiles")])
+    manifest = result.result
+    report = work / "report.json"
+    if not result.success or not isinstance(manifest, Manifest):
+        error = failure(result.exception, project, tree)
+        unset = node_relation_unset(str(result.exception))
+        report.write_text(json.dumps({"error": error, "node_relation_unset": unset}))
+        return 0
+    root = manifest.metadata.project_name
+    nodes = [
+        Landed(
+            node.resource_type.value,
+            node.name,
+            node.original_file_path,
+            in_tree(project, node.original_file_path, tree),
+            node.database,
+            node.schema,
+            node.alias or node.name,
+            tuple(key for key in SIDE_SQL if side_sql(node.config, key)),
+        )
+        for node in [*manifest.nodes.values(), *manifest.functions.values()]
+        if node.package_name == root and node.resource_type.value in OUTCOME_KINDS
+    ]
+    operations = [
+        in_tree(project, node.original_file_path, tree)
+        for node in manifest.nodes.values()
+        if node.package_name == root and node.resource_type.value == OPERATION
+    ]
+    macros = [
+        (macro.name, in_tree(project, macro.original_file_path, tree), macro.macro_sql)
+        for macro in manifest.macros.values()
+        if macro.package_name == root
+    ]
+    installed = {macro.name for macro in manifest.macros.values() if macro.package_name != root}
+    landed = {f"{n.kind} {n.name}": [n.database, n.schema] for n in nodes}
+    refused = placed_off(nodes, macros, installed, output["project"], output["dataset"])
+    refused += [
+        f"{place}: an on-run hook of the project runs SQL no parse places, which the gate refuses"
+        for place in sorted(set(operations))
+    ]
+    report.write_text(json.dumps({"refused": refused, "landed": landed}))
+    return 0
+
+
+def side_sql(config: Any, key: str) -> bool:
+    """Whether a node's config sets `key` (a hook list or a SQL header) to anything."""
+    value = getattr(config, key, None)
+    if value is None and hasattr(config, "get"):
+        value = config.get(key)
+    return bool(value)
+
+
+def unprefixed(macro: str) -> str:
+    """A macro's name without the `<prefix>__` of a dispatched implementation."""
+    return macro.split("__", 1)[-1]
+
+
+def placed_off(
+    nodes: list[Landed],
+    macros: list[tuple[str, str, str]],
+    installed: Collection[str],
+    project: str,
+    dataset: str,
+) -> list[str]:
+    """What dbt-bigquery's parse of the working tree places off the gate's routing: a model, seed
+    or snapshot outside its route's dataset (`ROUTES`, else the profile's `dataset`) or the
+    profile's `project`; a data test outside `TEST_SCHEMA` or that project; a routed folder whose
+    relations are not its route's tables; and a macro of the project that is a materialization,
+    or that overrides one of the `installed` macros of dbt and dbt-bigquery by name (directly, or
+    as `<prefix>__<name>` of one), whose writes no parse shows, but the allowed schema macro.
+    `macros` holds each project macro's name, place in the tree and text."""
+    found: list[str] = []
+    bases = {unprefixed(name) for name in installed}
+    for name, place, text in macros:
+        if allowed_macro(name, text):
+            continue
+        if name.startswith(MATERIALIZATION):
+            found.append(
+                f"{place}: macro {name} is a materialization of the project, whose writes no"
+                " parse shows, which the gate refuses"
+            )
+        elif unprefixed(name) in bases:
+            found.append(
+                f"{place}: macro {name} overrides one of dbt's or dbt-bigquery's own macros, whose"
+                " writes no parse shows, which the gate refuses"
+            )
+    built: list[tuple[str, str, str]] = []
+    for node in nodes:
+        where = node.schema
+        if node.database != project:
+            where += f" of the project {node.database}"
+        what = f"{node.place}: {node.kind} {node.name}"
+        found += [
+            f"{what} sets {key}, which runs SQL no parse places, which the gate refuses"
+            for key in node.side
+        ]
+        if not RELATION_NAME.fullmatch(node.relation):
+            found.append(
+                f"{what} names its relation {node.relation!r}, which holds a character other than"
+                " a letter, a digit or `_`, which the gate refuses"
+            )
+        if node.kind == "test":
+            if (node.database, node.schema) != (project, TEST_SCHEMA):
+                found.append(
+                    f"{what} is placed in {where}, where the gate holds a data test to"
+                    f" {TEST_SCHEMA} of the profile's project"
+                )
+            continue
+        built.append((node.path, node.place, node.relation))
+        expected = route(node.path) or dataset
+        if (node.database, node.schema) != (project, expected):
+            found.append(
+                f"{what} lands in {where}, where the gate's routing (semantics/versions.py"
+                f" ROUTES) builds it in {expected} of the profile's project"
+            )
+    return sorted(set(found + off_tables(built)))
+
+
+def allowed_macro(name: str, text: str) -> bool:
+    """Whether a project macro that decides relation names is the one the gate allows: named
+    `generate_schema_name`, its macro block exactly `SCHEMA_MACRO`, character for character."""
+    return name == SCHEMA_MACRO_NAME and text == SCHEMA_MACRO
+
+
+def folder_of(path: str) -> str | None:
+    """The folder of `ROUTES` that holds a node at this path (relative to `models/`), or None
+    when no folder, or more than one, does."""
+    found = [folder for folder in ROUTES if path == folder or path.startswith(folder + "/")]
+    return found[0] if len(found) == 1 else None
+
+
+def route(path: str) -> str | None:
+    """The dataset `ROUTES` builds a node at this path (relative to `models/`) in, or None for
+    the profile's dataset."""
+    folder = folder_of(path)
+    return ROUTES[folder].dataset if folder else None
+
+
+def unroutable(
+    what: str, kind: str, config: Block, unrendered: Block, in_call: Block, macro_allowed: bool
+) -> list[str]:
+    """Why a node's placement cannot be read from its parse, on either tree, or nothing. `kind` is
+    its resource type, `config` its rendered `PLACEMENT` configs, `unrendered` the config dbt
+    records as written (the project file, properties files and `config()` calls), and `in_call`
+    what a `config()` call set. Refused: a `PLACEMENT` key in a `config()` call (but a data test's
+    `alias`, which dbt's generic tests set there themselves); a `PLACEMENT` key whose rendered value
+    is not its written value (dbt Jinja, or a later setting that overrides it); a key of
+    `REFUSED_CONFIGS`, and on a data test `schema`, written anywhere; and on a model, seed or
+    snapshot, a `schema` where the project has no allowed schema macro (dbt's own prefixes it with
+    the profile's dataset)."""
+    found: list[str] = []
+    test = kind == "test"
+    for key in PLACEMENT:
+        if key in in_call and not (test and key == "alias"):
+            found.append(
+                f"{what} sets its {key} in a config() call (in its SQL, or a generic test's own"
+                " config), which the gate does not read"
+            )
+        if key in unrendered and config.get(key) != unrendered[key]:
+            found.append(
+                f"{what} sets its {key} other than as the literal dbt renders (dbt Jinja, or a"
+                " setting it overrides), which the gate does not compare"
+            )
+    for key in (*REFUSED_CONFIGS, *(("schema",) if test else ())):
+        if unrendered.get(key) is None:
+            continue
+        alias = BIGQUERY_ALIASES.get(key)
+        named = f" (dbt-bigquery's name for {alias}, which the local parse does not read)"
+        found.append(
+            f"{what} sets {key}{named if alias else ''}, which places it outside the gate's routing"
+        )
+    if not test and config.get("schema") is not None and not macro_allowed:
+        found.append(
+            f"{what} sets a schema while the project has no {SCHEMA_MACRO_NAME} with the gate's"
+            " own text, so dbt would prefix it with the profile's dataset"
+        )
+    return found
+
+
+def off_tables(nodes: list[tuple[str, str, str]]) -> list[str]:
+    """The working tree's routed folders whose relations are not their route's `tables`: a node
+    in such a folder whose relation name (its alias, else its name) is not one of them, and a
+    table none of them builds, or more than one does. `nodes` holds each built node's path, its
+    place in the tree and its relation name."""
+    found: list[str] = []
+    held: dict[str, list[str]] = {folder: [] for folder in ROUTES}
+    for path, place, relation in sorted(nodes):
+        folder = folder_of(path)
+        if folder is None:
+            continue
+        held[folder].append(relation)
+        if relation not in ROUTES[folder].tables:
+            found.append(
+                f"{place}: builds {relation} in {folder}, which the gate's routing"
+                f" (semantics/versions.py ROUTES) holds to {', '.join(ROUTES[folder].tables)}"
+            )
+    for folder, relations in held.items():
+        for table in ROUTES[folder].tables:
+            if relations.count(table) != 1:
+                found.append(
+                    f"{folder} builds {table} {relations.count(table)} times, where the gate's"
+                    " routing (semantics/versions.py ROUTES) holds it to once"
+                )
+    return found
+
+
+def off_route(what: str, path: str, schema: object) -> list[str]:
+    """A built node of the working tree whose `schema` config is not the one `ROUTES` gives its
+    path (none outside the routes), or nothing."""
+    expected = route(path)
+    if schema == expected:
+        return []
+    where = f"schema {expected}" if expected else "the profile's dataset"
+    return [
+        f"{what} sets schema {schema!r}, where the gate's routing (semantics/versions.py ROUTES)"
+        f" builds it in {where}"
+    ]
 
 
 def names_relations(macro: str) -> bool:
@@ -626,9 +1438,14 @@ def parts(metric: object, granularities: list[str]) -> Parts:
     return found
 
 
-def definitions(manifest: Block, project_vars: object = None) -> dict[str, Metric]:
+def definitions(
+    manifest: Block, project_vars: object = None, routes: Block | None = None
+) -> dict[str, Metric]:
     """Every metric of a semantic manifest dbt wrote, with its definition; every definition holds
-    the project file's `vars`."""
+    the project file's `vars`, and the `schema` config (`routes`, from the parse) of the node each
+    semantic model it reads and each time spine is built from."""
+    routes = routes or {}
+    model_routes = routes.get("semantic_models") or {}
     from metricflow_semantic_interfaces.implementations.semantic_manifest import (
         PydanticSemanticManifest,
     )
@@ -642,6 +1459,7 @@ def definitions(manifest: Block, project_vars: object = None) -> dict[str, Metri
     raw_models = {m["name"]: m for m in manifest.get("semantic_models") or []}
     built = {m.name: parts(m, granularities) for m in parsed.metrics}
     time = normal({k: spines.get(k) for k in ("time_spines", "time_spine_table_configurations")})
+    time["routes"] = normal(routes.get("time_spines") or {})
     found: dict[str, Metric] = {}
     for name, raw in raw_metrics.items():
         meta = (raw.get("config") or {}).get("meta") or {}
@@ -659,7 +1477,7 @@ def definitions(manifest: Block, project_vars: object = None) -> dict[str, Metri
         definition = {
             "metric": own,
             "inputs": inputs,
-            "semantic_models": semantic(closure, built, measures, raw_models),
+            "semantic_models": semantic(closure, built, measures, raw_models, model_routes),
             "time_spines": time,
             "vars": normal(project_vars),
         }
@@ -683,10 +1501,14 @@ def reached(name: str, built: dict[str, Parts]) -> set[str]:
 
 
 def semantic(
-    closure: set[str], built: dict[str, Parts], measures: set[str], models: dict[str, Block]
+    closure: set[str],
+    built: dict[str, Parts],
+    measures: set[str],
+    models: dict[str, Block],
+    routes: Block,
 ) -> dict[str, Block]:
     """The semantic models the metrics read, with every one they join through a shared entity,
-    each with only the measures resolved to."""
+    each with only the measures resolved to and the `schema` config of the node it reads."""
     owners = {
         m["name"]: name for name, model in models.items() for m in model.get("measures") or []
     }
@@ -705,15 +1527,16 @@ def semantic(
     for name in sorted(reach):
         model = normal(models[name], WORDING)
         model["measures"] = [m for m in model.get("measures") or [] if m.get("name") in measures]
+        model["route"] = normal(routes.get(name))
         found[name] = model
     return found
 
 
-def read(tree: Path, work: Path, which: str) -> dict[str, Metric]:
+def read(tree: Path, work: Path, which: str, routed: bool = False) -> dict[str, Metric]:
     """Every metric dbt reads from the exported tree's project, with its definition; Unreadable
     when the tree cannot be parsed or holds what the gate refuses."""
-    parsed = parse(tree, work, which)
-    return definitions(parsed.manifest, parsed.vars)
+    parsed = parse(tree, work, which, routed)
+    return definitions(parsed.manifest, parsed.vars, parsed.routes)
 
 
 def valid_version(version: object) -> bool:
@@ -792,11 +1615,29 @@ def check(repo: Path = REPO, base: str = BASE) -> tuple[bool, str]:
         published = published_metrics(repo, commit, base, Path(scratch) / "base")
         tree = Path(scratch) / "work" / "tree"
         tree.mkdir()
+        children: list[tuple[subprocess.Popen[str], Path, tuple[str, str]]] = []
         try:
             export_working(repo, tree)
-            current = read(tree, Path(scratch) / "work", "working")
+            for n, probe in enumerate(PROBES):
+                work = Path(scratch) / f"bigquery-{n}"
+                children.append((start_bigquery(tree, work, probe), work, probe))
+            current = read(tree, Path(scratch) / "work", "working", routed=True)
+            refused = sorted(
+                {
+                    line
+                    for child, folder, probe in children
+                    for line in bigquery_refusals(
+                        child, folder, partial(start_bigquery, tree, folder, probe)
+                    )
+                }
+            )
+            if refused:
+                raise Unreadable("; ".join(refused))
         except Unreadable as e:
             return False, f"metric-versions: the working tree's metrics cannot be read: {e}"
+        finally:
+            for child, _, _ in children:
+                end(child)
     return compare(published, current, base)
 
 
@@ -808,6 +1649,8 @@ def stop(signum: int, _frame: object) -> None:
 def main(argv: list[str], run: Callable[[], tuple[bool, str]] = check) -> int:
     if argv[:1] == ["--parse"] and len(argv) == 3:
         return parse_and_refuse(Path(argv[1]), Path(argv[2]))
+    if argv[:1] == ["--bigquery-parse"] and len(argv) == 3:
+        return parse_on_bigquery(Path(argv[1]), Path(argv[2]))
     signal.signal(signal.SIGTERM, stop)
     try:
         ok, report = run()

@@ -16,7 +16,7 @@ def test_a_foreign_project_beside_the_lab_one_leaves_no_lab_project(foreign: str
     env = {"LEDGER_LAB_GCP_PROJECT": "the-lab", "GCP_PROJECT": foreign}
     assert foreign_session(env)
     assert lab_project_or_none(env) is None
-    with pytest.raises(NoLabProjectError, match="belongs to another lab") as refused:
+    with pytest.raises(NoLabProjectError, match="may belong to another lab") as refused:
         lab_project(env)
     assert "the-lab" not in str(refused.value)
     assert "another-lab" not in str(refused.value)
@@ -36,7 +36,7 @@ def test_a_foreign_variable_of_spaces_is_still_a_foreign_session() -> None:
 
 
 def test_only_the_foreign_project_set_raises_and_says_why() -> None:
-    with pytest.raises(NoLabProjectError, match="belongs to another lab"):
+    with pytest.raises(NoLabProjectError, match="may belong to another lab"):
         lab_project({"GCP_PROJECT": "another-lab"})
 
 

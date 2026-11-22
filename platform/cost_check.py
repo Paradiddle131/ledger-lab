@@ -13,17 +13,19 @@ With `LEDGER_LAB_GCP_PROJECT` set and no `GCP_PROJECT` it
   `platform/gcp` (`fences.py`); a fence that is missing, differs or answers in an unexpected shape
   fails. Where the environment hands gcloud its token (`CLOUDSDK_AUTH_ACCESS_TOKEN`, as a cloud
   session does), curl sends no credential and the session's proxy supplies it; elsewhere curl sends
-  the token of gcloud's own login, never a key file, and a read that login lacks the permission
-  for is not checked rather than failed, while any other refusal still fails;
+  the token of gcloud's own login, never a key file, and a read that login lacks the IAM
+  permission on the resource for is not checked rather than failed, while any other refusal of a
+  fence read still fails, among them one by a login that may not spend the lab project's quota
+  (`USER_PROJECT_DENIED`); the budget and the kill switch's project roles are the exception below;
 - asks `testIamPermissions` whether this account itself could move a fence, and fails if it can;
   off the proxy this account is gcloud's login, not the agent account, so it is not asked;
 - reports a fence this account may not read (the budget, the kill switch's project roles) as not
   checked, which neither passes nor fails.
-A read the API answers with a rate limit is sent again after a pause, a bounded number of times,
-and fails as any unread fence does once the last attempt is refused too. The billing reads name the
-lab project as the one whose quota they spend (`x-goog-user-project`): sent with gcloud's own login
-and no quota project, the Cloud Billing API spends the quota of gcloud's shared project, which every
-gcloud user draws on.
+A REST read (`curl`) the API answers with a rate limit is sent again after each of
+`RATE_LIMIT_PAUSES`, and fails as any unread fence does once the last attempt is refused too. The
+billing reads name the lab project as the one whose quota they spend (`x-goog-user-project`): sent
+with gcloud's own login and no quota project, Google may charge a read to gcloud's shared project,
+which every gcloud user draws on (https://cloud.google.com/docs/quotas/quota-project).
 Every call reads; none creates, changes or deletes anything. The output names each fence by its
 role and never prints a project, billing account, service account or an API's error message.
 """
@@ -235,7 +237,8 @@ class Credential:
 
 
 # The pauses before each further attempt at a read the API answers with a rate limit: three
-# attempts, about twenty seconds at most, once a minute's quota has had time to refill in part.
+# attempts with twenty seconds of pauses between them, so a minute's quota has had time to refill
+# in part; each attempt itself is bounded by curl's `--max-time`.
 RATE_LIMIT_PAUSES = (5.0, 15.0)
 
 
@@ -826,7 +829,7 @@ def check(
     """The exit code and the lines to print."""
     if foreign_session(env):
         return 1, (
-            f"cost-check: NOT CHECKED {FOREIGN} is set, so this session's GCP credential is "
+            f"cost-check: NOT CHECKED {FOREIGN} is set, so this session's GCP credential may be "
             "another lab's: no GCP call is made and the lab's cost is unread; run it in the lab's "
             "own environment"
         )

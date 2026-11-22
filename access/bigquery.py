@@ -3,9 +3,10 @@
 The token comes from `gcloud auth print-access-token --impersonate-service-account`, run as the
 login of the machine the test runs on, never from a key file, and lives only in memory. The one
 identity `platform/gcp/identities.tf` lets mint persona tokens is the agent account, so the login
-reaches the persona's account through it: the chain is the agent account, named by its account id
-(the part before the @) in `LEDGER_LAB_AGENT_ACCOUNT`, then the persona's account, and the login
-needs only `iam.serviceAccounts.implicitDelegation` on the agent account. With the variable unset
+reaches the persona's account through it: the chain is the agent account, named in
+`LEDGER_LAB_AGENT_ACCOUNT` by its account id (the part before the @) or by its whole address in the
+lab's project, then the persona's account, and the login needs only
+`iam.serviceAccounts.implicitDelegation` on the agent account. With the variable unset
 the login mints the persona's token itself, which only the agent account may do.
 
 Behind the cloud session's proxy the Authorization header on `*.googleapis.com` is replaced with
@@ -13,10 +14,11 @@ the session's own credential, so a query made there runs as the agent account wh
 carries; the persona queries run off that proxy, on the owner's machine, and each test reads
 `SESSION_USER()` to show whose identity BigQuery saw.
 
-A query goes to the `jobs.query` REST method as standard SQL, uncached, under a fixed byte cap no
-setting raises, and runs where the tables it reads are. A refusal reports BigQuery's HTTP status and
-reason, and a failed mint `gcloud`'s exit status, or that it timed out or could not run, never
-their messages or the command, which name the project and the accounts.
+A query goes to the `jobs.query` REST method as standard SQL, uncached, under a byte cap fixed in
+code that no setting raises (a persona's, or the publish's in `access/row_policies.py`), and runs
+where the tables it reads are. A refusal reports BigQuery's HTTP status and reason, and a failed
+mint `gcloud`'s exit status, or that it timed out or could not run, never their messages or the
+command, which name the project and the accounts.
 """
 
 import re
@@ -53,15 +55,26 @@ def service_account(account_id: str, project: str) -> str:
     return f"{account_id}@{project}.iam.gserviceaccount.com"
 
 
+def agent_id(value: str, project: str) -> str:
+    """The agent account's id from `LEDGER_LAB_AGENT_ACCOUNT`, which names it by its id or by its
+    whole address in the lab's project; an address in another project is refused."""
+    agent = value.strip()
+    if "@" in agent:
+        agent, _, domain = agent.partition("@")
+        if domain != service_account("", project)[1:]:
+            raise PersonaQueryError(f"{AGENT_VARIABLE} names an account outside the lab's project")
+    if not ACCOUNT_ID.fullmatch(agent):
+        raise PersonaQueryError(f"{AGENT_VARIABLE} is not a service account id")
+    return agent
+
+
 def chain(persona_account: str, project: str, env: Mapping[str, str]) -> list[str]:
     """The accounts the mint goes through, the persona's last: the agent account first when
     `LEDGER_LAB_AGENT_ACCOUNT` names it."""
     agent = env.get(AGENT_VARIABLE, "").strip()
     if not agent:
         return [persona_account]
-    if not ACCOUNT_ID.fullmatch(agent):
-        raise PersonaQueryError(f"{AGENT_VARIABLE} is not a service account id")
-    return [service_account(agent, project), persona_account]
+    return [service_account(agent_id(agent, project), project), persona_account]
 
 
 def _run(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
@@ -104,8 +117,15 @@ class Answer:
 class PersonaSession:
     """Queries on the lab's BigQuery that carry one persona's token."""
 
-    def __init__(self, project: str, token: str, client: httpx.Client) -> None:
+    def __init__(
+        self,
+        project: str,
+        token: str,
+        client: httpx.Client,
+        max_bytes_billed: int = MAX_BYTES_BILLED,
+    ) -> None:
         self._url = ENDPOINT.format(project=quote(project, safe=""))
+        self._max_bytes_billed = max_bytes_billed
         # httpx.Headers masks the Authorization value in its repr, which a traceback's locals show.
         self._headers = httpx.Headers({"Authorization": f"Bearer {token}"})
         self._client = client
@@ -115,7 +135,7 @@ class PersonaSession:
             "query": sql,
             "useLegacySql": False,
             "useQueryCache": False,
-            "maximumBytesBilled": str(MAX_BYTES_BILLED),
+            "maximumBytesBilled": str(self._max_bytes_billed),
             "timeoutMs": QUERY_TIMEOUT_MS,
         }
         response = self._client.post(self._url, json=body, headers=self._headers)
