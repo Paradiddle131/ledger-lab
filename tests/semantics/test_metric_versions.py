@@ -841,11 +841,31 @@ def committed(committed_once: Block) -> Block:
     return copy.deepcopy(committed_once)
 
 
+def shared_containers(one: object, other: object) -> list[int]:
+    """The ids of the lists and dicts that two trees hold as the same object."""
+    seen: set[int] = set()
+    pending = [one]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict | list) and id(value) not in seen:
+            seen.add(id(value))
+            pending += list(value.values()) if isinstance(value, dict) else value
+    found: list[int] = []
+    pending = [other]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict | list):
+            if id(value) in seen:
+                found.append(id(value))
+            pending += list(value.values()) if isinstance(value, dict) else value
+    return found
+
+
 def test_each_case_gets_its_own_copy_of_the_committed_parse(
     committed: Block, committed_once: Block
 ) -> None:
     assert committed == committed_once and committed is not committed_once
-    assert all(committed[key] is not committed_once[key] for key in committed_once)
+    assert not shared_containers(committed, committed_once)
     kept = copy.deepcopy(committed_once)
     committed["metrics"][0]["config"]["meta"].clear()
     committed["semantic_models"][0]["measures"].clear()

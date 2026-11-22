@@ -21,6 +21,7 @@ from access.identities import identity
 from agent.ask import Audit
 from agent.audit import FileLog
 from tests.models.dbt_build import SAMPLED_SOURCES, git_out
+from tests.options_check import problems
 
 if TYPE_CHECKING:
     from tests.models.dbt_build import Build
@@ -65,6 +66,13 @@ def load_access() -> dict[str, Any]:
 @pytest.fixture(scope="session")
 def access() -> dict[str, Any]:
     return load_access()
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Stop any run whose options let a plain run select other tests than the declared markers
+    leave (`tests/options_check.py`); it runs whatever the run selects."""
+    if found := problems(REPO, config.inipath):
+        raise pytest.UsageError("pytest's options: " + "; ".join(found))
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
