@@ -4,7 +4,7 @@
 LOADOUT ?= $(or $(shell sed -n 's/^The collection .* is cloned at `\([^`]*\)`.*/\1/p' $(HOME)/.claude/CLAUDE.md 2>/dev/null),../loadout)
 GUARDS := $(LOADOUT)/cloud/githooks
 
-.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test warehouse-parity bigquery-personas bigquery-row-policies stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
+.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test warehouse-parity bigquery-personas bigquery-row-policies bigquery-thresholds stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
 
 check: lint typecheck test ids portable scan contract metric-versions
 	@echo "make check: all passed"
@@ -112,6 +112,12 @@ bigquery-personas: sync
 # without the tag's clear role (access/policy_tags.py).
 bigquery-row-policies: sync
 	uv run pytest -m bigquery_persona tests/access/test_row_policies.py tests/access/test_policy_tags.py
+
+# Each aggregate reader's read of its product's aggregate views on BigQuery, as the persona: only
+# the groups of at least the minimum group, no raw read of the privacy unit, and a refusal without
+# the grant (access/thresholds.py).
+bigquery-thresholds: sync
+	uv run pytest -m bigquery_persona tests/access/test_thresholds.py
 
 # The container stack: the shared database always, one more service per PROFILE=<name>.
 # Each checkout is its own Compose project (containers, network, volume) and the database takes a

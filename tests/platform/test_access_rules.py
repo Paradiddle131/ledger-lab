@@ -64,8 +64,28 @@ def dataset_id(product: str) -> str:
     return product.replace("-", "_")
 
 
+def aggregates_dataset(product: str) -> str:
+    return f"{dataset_id(product)}_aggregates"
+
+
+def expected_aggregate_datasets() -> dict[str, str]:
+    """Each aggregates dataset, by the product whose aggregate tables it holds."""
+    return {p: aggregates_dataset(p) for p in catalogue("aggregates.yaml")["products"]}
+
+
 def expected_datasets() -> set[str]:
-    return LAYERS | {dataset_id(p["id"]) for p in catalogue("personas.yaml")["data_products"]}
+    products = {dataset_id(p["id"]) for p in catalogue("personas.yaml")["data_products"]}
+    return LAYERS | products | set(expected_aggregate_datasets().values())
+
+
+def expected_aggregate_grants() -> set[tuple[str, str]]:
+    """Each aggregate grant on a product with aggregate tables, as the read of its views."""
+    tables = expected_aggregate_datasets()
+    return {
+        (g["persona"], tables[g["product"]])
+        for g in catalogue("personas.yaml")["grants"]
+        if g["access"] == "aggregate" and g["product"] in tables
+    }
 
 
 def expected_dataset_grants() -> set[tuple[str, str, str]]:
@@ -99,7 +119,18 @@ COLUMNS_FROM_FILE = (
 )
 DATASETS_FROM_FILE = re.compile(
     r"\$\{merge\(\{landed = \"[^\"]+\", intermediate = \"[^\"]+\"\}, "
-    r'\{for p in local\.access\.data_products : replace\(p\.id, "-", "_"\) => p\.holds\}\)\}'
+    r'\{for p in local\.access\.data_products : replace\(p\.id, "-", "_"\) => p\.holds\}, '
+    r'\{for d, p in local\.aggregate_datasets : d => "[^"]+"\}\)\}'
+)
+AGGREGATES_FILE = 'yamldecode(file("${path.module}/../../access/aggregates.yaml"))'
+AGGREGATE_DATASETS = (
+    '${{for p in keys(local.aggregates.products) : "${replace(p, "-", "_")}_aggregates" => p}}'
+)
+AGGREGATE_GRANTS = (
+    "${{for g in distinct([for g in local.access.grants : {persona = g.persona, "
+    'dataset = "${replace(g.product, "-", "_")}_aggregates"} if g.access == "aggregate" && '
+    "contains(keys(local.aggregates.products), g.product)]) : "
+    '"${g.persona} ${g.dataset}" => g}}'
 )
 GRANTS_FROM_FILE = (
     "${{for g in distinct([for g in local.access.grants : {persona = g.persona, "
@@ -120,7 +151,24 @@ def test_the_generated_maps_read_the_catalogues() -> None:
     assert local("access") == f"${{{PERSONAS_FILE}}}"
     assert DATASETS_FROM_FILE.fullmatch(squash(local("datasets")))
     assert squash(local("dataset_grants")) == GRANTS_FROM_FILE
-    assert local("warehouse_readers") == "${toset([for g in local.dataset_grants : g.persona])}"
+    assert squash(local("warehouse_readers")) == (
+        "${toset(concat([for g in local.dataset_grants : g.persona], "
+        "[for g in local.aggregate_grants : g.persona]))}"
+    )
+    assert local("aggregates") == f"${{{AGGREGATES_FILE}}}"
+    assert squash(local("aggregate_datasets")) == AGGREGATE_DATASETS
+    assert squash(local("aggregate_grants")) == AGGREGATE_GRANTS
+    assert squash(local("built")) == (
+        "${{for d, _ in local.datasets : d => d if !contains(keys(local.aggregate_datasets), d)}}"
+    )
+    assert squash(local("aggregate_sources")) == (
+        "${{for d, p in local.aggregate_datasets : d => (contains(local.governed, "
+        'replace(p, "-", "_")) ? "intermediate" : replace(p, "-", "_"))}}'
+    )
+    assert {unquote(k): unquote(v) for k, v in local("basic_roles").items()} == {
+        "roles/bigquery.dataViewer": "READER",
+        "roles/bigquery.dataEditor": "WRITER",
+    }
     assert squash(local("columns")) == COLUMNS_FROM_FILE
     assert squash(local("clear_readers")) == readers_from_columns("clear")
     assert squash(local("masked_readers")) == readers_from_columns("masked")
@@ -188,17 +236,7 @@ def test_every_grant_goes_to_a_persona_the_agent_the_publisher_or_the_kill_switc
 
 # Each grant of the access rules: (resource, for_each, role, member).
 ACCESS_GRANTS = {
-    ("google_bigquery_dataset_iam_member", "agent_builds_warehouse"): (
-        "${google_bigquery_dataset.warehouse}",
-        BUILDER,
-        AGENT,
-    ),
     ("google_data_catalog_taxonomy_iam_member", "agent_reads_taxonomy"): (None, VIEWER, AGENT),
-    ("google_bigquery_dataset_iam_member", "persona_reads_product"): (
-        "${local.dataset_grants}",
-        "${each.value.role}",
-        PERSONA_IN_MAP,
-    ),
     ("google_data_catalog_policy_tag_iam_member", "persona_reads_in_clear"): (
         "${local.clear_readers}",
         CLEAR,
@@ -218,16 +256,6 @@ ACCESS_GRANTS = {
         "${local.warehouse_readers}",
         QUERY_RUNNER,
         PERSONA_IN_SET,
-    ),
-    ("google_bigquery_dataset_iam_member", "publisher_writes_governed_copies"): (
-        "${local.governed}",
-        ROW_PUBLISHER,
-        PUBLISHER,
-    ),
-    ("google_bigquery_dataset_iam_member", "publisher_reads_marts"): (
-        None,
-        "roles/bigquery.dataViewer",
-        PUBLISHER,
     ),
     ("google_project_iam_member", "publisher_runs_queries"): (None, QUERY_RUNNER, PUBLISHER),
 }
@@ -251,29 +279,85 @@ def test_the_access_rules_grant_exactly_these_and_the_fences_their_own() -> None
         assert unquote(body["member"]) == member, key
 
 
+# Each entry of a dataset's access list: (for_each, dataset, role, the account's email), its
+# dataset and email as the expressions `platform/gcp` writes them.
+DATASET = "${{google_bigquery_dataset.warehouse[{}].dataset_id}}"
+VIEWER_BASIC = '${local.basic_roles["roles/bigquery.dataViewer"]}'
+DATASET_ACCESS = {
+    "agent_builds_warehouse": (
+        "${local.built}",
+        DATASET.format("each.key"),
+        BUILDER,
+        "${data.google_service_account.agent.email}",
+    ),
+    "persona_reads_product": (
+        "${local.dataset_grants}",
+        DATASET.format("each.value.dataset"),
+        "${local.basic_roles[each.value.role]}",
+        "${google_service_account.persona[each.value.persona].email}",
+    ),
+    "persona_reads_aggregates": (
+        "${local.aggregate_grants}",
+        DATASET.format("each.value.dataset"),
+        VIEWER_BASIC,
+        "${google_service_account.persona[each.value.persona].email}",
+    ),
+    "publisher_writes_governed_copies": (
+        "${local.governed}",
+        DATASET.format("each.key"),
+        ROW_PUBLISHER,
+        "${google_service_account.publisher.email}",
+    ),
+    "publisher_reads_marts": (
+        None,
+        DATASET.format('"intermediate"'),
+        VIEWER_BASIC,
+        "${google_service_account.publisher.email}",
+    ),
+}
+
+
+def test_every_dataset_grant_is_an_access_entry_and_none_a_dataset_iam_member() -> None:
+    """The provider's dataset IAM member rewrites the whole access list from its role entries,
+    dropping a view authorization, so no dataset grant is one."""
+    resources = blocks("resource")
+    assert not [k for k in resources if k[0].startswith("google_bigquery_dataset_iam_")]
+    entries = {n: b for (t, n), b in resources.items() if t == "google_bigquery_dataset_access"}
+    assert set(entries) == {*DATASET_ACCESS, "aggregates_read_source"}
+    for name, (for_each, dataset, role, email) in DATASET_ACCESS.items():
+        body = entries[name]
+        assert set(body) - {"__is_block__"} == {"dataset_id", "role", "user_by_email"} | (
+            {"for_each"} if for_each else set()
+        ), name
+        assert body.get("for_each") == for_each, name
+        assert body["dataset_id"] == dataset, name
+        assert unquote(body["role"]) == role, name
+        assert unquote(body["user_by_email"]) == email, name
+
+
+def test_each_aggregates_dataset_authorizes_its_views_on_its_source_alone() -> None:
+    body = blocks("resource")[("google_bigquery_dataset_access", "aggregates_read_source")]
+    assert set(body) - {"__is_block__"} == {"for_each", "dataset_id", "dataset"}
+    assert body["for_each"] == "${local.aggregate_sources}"
+    assert body["dataset_id"] == DATASET.format("each.value")
+    (entry,) = body["dataset"]
+    assert [unquote(t) for t in entry["target_types"]] == ["VIEWS"]
+    (views,) = entry["dataset"]
+    assert views["dataset_id"] == DATASET.format("each.key")
+    assert views["project_id"] == "${var.project}"
+
+
 def test_grants_land_on_the_resource_their_map_names() -> None:
     resources = blocks("resource")
-    product = resources[("google_bigquery_dataset_iam_member", "persona_reads_product")]
-    assert product["dataset_id"] == (
-        "${google_bigquery_dataset.warehouse[each.value.dataset].dataset_id}"
-    )
     clear = resources[("google_data_catalog_policy_tag_iam_member", "persona_reads_in_clear")]
     assert clear["policy_tag"] == "${google_data_catalog_policy_tag.sensitive[each.value.tag].name}"
     masked = resources["google_bigquery_datapolicy_data_policy_iam_member", "persona_reads_masked"]
     taxonomy = resources["google_data_catalog_taxonomy_iam_member", "agent_reads_taxonomy"]
     assert taxonomy["taxonomy"] == "${google_data_catalog_taxonomy.sensitive.name}"
-    builder = resources["google_bigquery_dataset_iam_member", "agent_builds_warehouse"]
-    assert builder["dataset_id"] == "${each.value.dataset_id}"
     assert masked["data_policy_id"] == (
         "${google_bigquery_datapolicy_data_policy.masking[each.value.tag].data_policy_id}"
     )
     assert masked["location"] == "${var.region}"
-    writes = resources["google_bigquery_dataset_iam_member", "publisher_writes_governed_copies"]
-    assert writes["dataset_id"] == "${google_bigquery_dataset.warehouse[each.key].dataset_id}"
-    reads = resources["google_bigquery_dataset_iam_member", "publisher_reads_marts"]
-    assert reads["dataset_id"] == (
-        '${google_bigquery_dataset.warehouse["intermediate"].dataset_id}'
-    )
 
 
 def test_project_roles_reach_only_the_kill_switch_and_the_personas_query_role() -> None:
@@ -477,7 +561,25 @@ def test_tofu_generates_each_personas_dataset_grants_and_no_others() -> None:
     grants = tofu_eval("values(local.dataset_grants)")
     assert {(g["persona"], g["dataset"], g["role"]) for g in grants} == expected_dataset_grants()
     assert len(grants) == len(expected_dataset_grants())
-    assert set(tofu_eval("local.warehouse_readers")) == {p for p, _, _ in expected_dataset_grants()}
+    readers = {p for p, _, _ in expected_dataset_grants()} | {
+        p for p, _ in expected_aggregate_grants()
+    }
+    assert set(tofu_eval("local.warehouse_readers")) == readers
+
+
+@pytest.mark.tofu
+def test_tofu_generates_the_aggregate_reads_their_sources_and_the_built_datasets() -> None:
+    grants = tofu_eval("values(local.aggregate_grants)")
+    assert {(g["persona"], g["dataset"]) for g in grants} == expected_aggregate_grants()
+    assert len(grants) == len(expected_aggregate_grants())
+    # payments is entity-scoped with a governed copy: its views read the mart, never the copy.
+    assert tofu_eval("local.aggregate_sources") == {
+        "payments_aggregates": "intermediate",
+        "group_totals_aggregates": "group_totals",
+    }
+    aggregates = set(expected_aggregate_datasets().values())
+    assert set(tofu_eval("keys(local.datasets)")) == expected_datasets()
+    assert set(tofu_eval("keys(local.built)")) == expected_datasets() - aggregates
 
 
 @pytest.mark.tofu

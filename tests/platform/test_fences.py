@@ -32,7 +32,7 @@ ALLOWED = {
     "google_storage_bucket",
     "google_storage_bucket_iam_member",
     "google_bigquery_dataset",
-    "google_bigquery_dataset_iam_member",
+    "google_bigquery_dataset_access",
     "google_project_iam_custom_role",
     "google_data_catalog_taxonomy",
     "google_data_catalog_policy_tag",

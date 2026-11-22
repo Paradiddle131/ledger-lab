@@ -42,7 +42,14 @@ from access.review import (
     review,
     unquote,
 )
-from tests.platform.test_access_rules import RECORDED, expected_dataset_grants, expected_readers
+from tests.platform.test_access_rules import (
+    RECORDED,
+    expected_aggregate_datasets,
+    expected_aggregate_grants,
+    expected_dataset_grants,
+    expected_datasets,
+    expected_readers,
+)
 
 Doc = dict[str, Any]
 Config = dict[str, list[Any]]
@@ -65,6 +72,7 @@ QUERY_PERMISSIONS = {"bigquery.jobs.create", "bigquery.config.get"}
 # and acting as an account among them) and setting anyone's access to anything.
 REFUSED = {*PROJECT_PERMISSIONS, *BILLING_PERMISSIONS, *KILL_SWITCH_ACCOUNT_PERMISSIONS}
 QUERY_ROLE = ("Runs BigQuery queries (custom role)", "the lab project")
+VIEWER = "roles/bigquery.dataViewer"
 CLEAR = "roles/datacatalog.categoryFineGrainedReader"
 MASKED = "roles/bigquerydatapolicy.maskedReader"
 TOKENS = "roles/iam.serviceAccountTokenCreator"
@@ -125,6 +133,9 @@ def expected_roles(persona: str) -> set[tuple[str, str]]:
     grants = {
         (r, f"warehouse dataset {d}") for p, d, r in expected_dataset_grants() if p == persona
     }
+    grants |= {
+        (VIEWER, f"warehouse dataset {d}") for p, d in expected_aggregate_grants() if p == persona
+    }
     query = {QUERY_ROLE} if grants else set()
     clear = {(CLEAR, f"policy tag {t}") for t, p in expected_readers("clear") if p == persona}
     masked = {(MASKED, f"masking rule {t}") for t, p in expected_readers("masked") if p == persona}
@@ -167,7 +178,10 @@ def test_the_agent_account_shows_its_roles_its_reach_and_the_conflict_it_holds(
     personas = [p["id"] for p in docs["access"]["personas"]]
     rows = roles(section)
     assert {k for k, source in rows.items() if source == "declared"} == {
-        ("Builds the warehouse models (custom role)", "every warehouse dataset"),
+        *{
+            ("Builds the warehouse models (custom role)", f"warehouse dataset {d}")
+            for d in expected_datasets() - set(expected_aggregate_datasets().values())
+        },
         (CLEAR, "every policy tag"),
         ("roles/datacatalog.viewer", "the policy-tag taxonomy"),
         ("roles/storage.objectUser", "the landing bucket"),
@@ -612,10 +626,42 @@ resource "google_bigquery_dataset_iam_member" "someone" {
   role       = "roles/bigquery.dataOwner"
   member     = "user:${var.someone}"
 }""",
-    "a dataset access block grant": """
-resource "google_bigquery_dataset_access" "agent_owns" {
+    "a dataset access entry for a special group": """
+resource "google_bigquery_dataset_access" "everyone_reads" {
   dataset_id    = google_bigquery_dataset.warehouse["payments"].dataset_id
-  role          = "OWNER"
+  role          = "READER"
+  special_group = "allAuthenticatedUsers"
+}""",
+    "a dataset access entry for a person": """
+resource "google_bigquery_dataset_access" "someone_reads" {
+  dataset_id    = google_bigquery_dataset.warehouse["payments"].dataset_id
+  role          = "READER"
+  user_by_email = var.someone
+}""",
+    "a dataset access entry authorizing one view": """
+resource "google_bigquery_dataset_access" "one_view" {
+  dataset_id = google_bigquery_dataset.warehouse["intermediate"].dataset_id
+  view {
+    project_id = var.project
+    dataset_id = google_bigquery_dataset.warehouse["landed"].dataset_id
+    table_id   = "anything"
+  }
+}""",
+    "an authorization of views outside the aggregates datasets": """
+resource "google_bigquery_dataset_access" "landed_reads_marts" {
+  dataset_id = google_bigquery_dataset.warehouse["intermediate"].dataset_id
+  dataset {
+    dataset {
+      project_id = var.project
+      dataset_id = google_bigquery_dataset.warehouse["landed"].dataset_id
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
+    "a dataset role the review cannot read": """
+resource "google_bigquery_dataset_access" "agent_some_role" {
+  dataset_id    = google_bigquery_dataset.warehouse["payments"].dataset_id
+  role          = local.unknown_role
   user_by_email = data.google_service_account.agent.email
 }""",
     "an authoritative project policy": f"""
@@ -754,6 +800,26 @@ resource "google_service_account_iam_member" "ks_acts_as_agent" {
 }""",
         "kill-switch",
         "`agent`, `agent-operator`, `approver`",
+    ),
+    "the agent as owner of a dataset through its access list": (
+        """
+resource "google_bigquery_dataset_access" "agent_owns" {
+  dataset_id    = google_bigquery_dataset.warehouse["payments"].dataset_id
+  role          = "OWNER"
+  user_by_email = data.google_service_account.agent.email
+}""",
+        "agent",
+        "| roles/bigquery.dataOwner | warehouse dataset payments | declared |",
+    ),
+    "the approver reading the payments aggregates": (
+        """
+resource "google_bigquery_dataset_access" "approver_aggregates" {
+  dataset_id    = google_bigquery_dataset.warehouse["payments_aggregates"].dataset_id
+  role          = local.basic_roles["roles/bigquery.dataViewer"]
+  user_by_email = google_service_account.persona["approver"].email
+}""",
+        "approver",
+        "| roles/bigquery.dataViewer | warehouse dataset payments_aggregates | declared |",
     ),
     "the agent as masked reader of every rule": (
         f"""

@@ -37,6 +37,7 @@ CATALOGUES = {
     "access": ("access/personas.yaml", "access/schema.json"),
     "columns": ("access/columns.yaml", "access/columns.schema.json"),
     "review": ("access/review.yaml", "access/review.schema.json"),
+    "aggregates": ("access/aggregates.yaml", "access/aggregates.schema.json"),
 }
 
 
@@ -90,6 +91,20 @@ MASKED_READER = "roles/bigquerydatapolicy.maskedReader"
 KINDS = {"human": "human persona", "agent": "agent persona", "automation": "automation account"}
 INDEX = re.compile(r'\["([^"]+)"\]')
 CUSTOM_ROLE = re.compile(r"^\$\{google_project_iam_custom_role\.([a-z_]+)\.name\}$")
+# A dataset access entry's role named through the basic form `platform/gcp` maps it to.
+BASIC_ROLE = re.compile(r'^\$\{local\.basic_roles\["([^"]+)"\]\}$')
+# The basic dataset roles, each the predefined role BigQuery documents it as.
+BASIC = {
+    "READER": "roles/bigquery.dataViewer",
+    "WRITER": "roles/bigquery.dataEditor",
+    "OWNER": "roles/bigquery.dataOwner",
+}
+DATASET_ACCESS = "google_bigquery_dataset_access"
+# What a dataset access entry may set: a role and one service account, or an authorization of
+# one dataset's views; any other member (a group, a domain, a special group, an IAM member, a
+# view or routine) is refused.
+ROLE_ENTRY = {"for_each", "dataset_id", "role", "user_by_email"}
+VIEWS_ENTRY = {"for_each", "dataset_id", "dataset"}
 
 Doc = dict[str, Any]
 Config = Mapping[str, list[Any]]
@@ -216,6 +231,31 @@ def instances(
     if for_each is None:
         return [{}]
     access, columns = docs["access"], docs["columns"]
+    aggregated = {p: f"{p.replace('-', '_')}_aggregates" for p in docs["aggregates"]["products"]}
+    aggregate_grants = sorted(
+        {
+            (g["persona"], aggregated[g["product"]])
+            for g in access["grants"]
+            if g["access"] == "aggregate" and g["product"] in aggregated
+        }
+    )
+    if for_each == "${local.aggregate_grants}":
+        return [{"each.value.persona": p, "each.value.dataset": d} for p, d in aggregate_grants]
+    governed = {
+        p["id"].replace("-", "_")
+        for p in access["data_products"]
+        if p["scope"] == "entity" and p.get("tables")
+    }
+    if for_each == "${local.aggregate_sources}":
+        return [
+            {"each.key": d, "each.value": "intermediate" if p.replace("-", "_") in governed else p}
+            for p, d in sorted(aggregated.items())
+        ]
+    if for_each == "${local.built}":
+        built = {"landed", "intermediate"} | {
+            p["id"].replace("-", "_") for p in access["data_products"]
+        }
+        return [{"each.key": d} for d in sorted(built)]
     if for_each == "${local.dataset_grants}" or for_each == "${local.warehouse_readers}":
         roles = local_map(config, "dataset_roles")
         grants = sorted(
@@ -226,7 +266,8 @@ def instances(
             }
         )
         if for_each == "${local.warehouse_readers}":
-            return [{"each.key": p} for p in sorted({p for p, _, _ in grants})]
+            readers = {p for p, _, _ in grants} | {p for p, _ in aggregate_grants}
+            return [{"each.key": p} for p in sorted(readers)]
         return [
             {"each.value.persona": p, "each.value.dataset": d, "each.value.role": r}
             for p, d, r in grants
@@ -239,16 +280,7 @@ def instances(
                 for p in t[kind]
             ]
     if for_each == "${local.governed}":
-        return [
-            {"each.key": d}
-            for d in sorted(
-                {
-                    p["id"].replace("-", "_")
-                    for p in access["data_products"]
-                    if p["scope"] == "entity" and p.get("tables")
-                }
-            )
-        ]
+        return [{"each.key": d} for d in sorted(governed)]
     if for_each == f"${{{PERSONA_ACCOUNTS}}}":
         return [
             {"each.key": p["id"], "each.value.name": f'{PERSONA_ACCOUNTS}["{p["id"]}"].name'}
@@ -260,7 +292,7 @@ def instances(
 
 
 def substitute(expression: str, instance: Mapping[str, str]) -> str:
-    for ref, value in instance.items():
+    for ref, value in sorted(instance.items(), key=lambda item: -len(item[0])):
         if ref.startswith("each."):
             quoted = value if ref == "each.value.name" else f'"{value}"'
             expression = expression.replace(ref, quoted)
@@ -333,14 +365,52 @@ def declared_grants(
         grant = re.search(r"_iam_(member|binding)$", rtype)
         if rtype == "google_bigquery_dataset" and "access" in body:
             refused.append(f"{address}: an access block, which the review cannot read")
+        elif rtype == DATASET_ACCESS:
+            keys = set(body) - {"__is_block__"}
+            if keys not in (ROLE_ENTRY, ROLE_ENTRY - {"for_each"}, VIEWS_ENTRY):
+                refused.append(f"{address}: a dataset access entry the review cannot read")
         elif grant is None and rtype not in GRANTS_NOTHING:
             refused.append(f"{address}: a {rtype}, which the review does not know to grant nothing")
         elif grant and rtype[: grant.start()] not in TARGETS:
             refused.append(f"{address}: a grant on a resource the review has no words for")
     found: dict[str, list[CloudGrant]] = {i: [] for i in [*sorted(personas), *addresses.values()]}
     acts_as: dict[str, set[str]] = {i: set() for i in found}
+    aggregated = {f"{p.replace('-', '_')}_aggregates" for p in docs["aggregates"]["products"]}
     for address, body in sorted(resources.items()):
         rtype, _ = address.split(".", 1)
+        if rtype == DATASET_ACCESS and set(body) - {"__is_block__"} <= ROLE_ENTRY | VIEWS_ENTRY:
+            for instance in instances(body.get("for_each"), docs, config):
+                subbed = {
+                    k: substitute(unquote(v), instance)
+                    for k, v in body.items()
+                    if isinstance(v, str) and k != "for_each"
+                }
+                on = target("google_bigquery_dataset", subbed, False, addresses)
+                if "dataset" in body:
+                    (entry,) = body["dataset"]
+                    (views,) = entry["dataset"]
+                    of = INDEX.search(substitute(unquote(views["dataset_id"]), instance))
+                    types = [unquote(t) for t in entry["target_types"]]
+                    if of is None or of[1] not in aggregated or types != ["VIEWS"]:
+                        refused.append(f"{address}: an authorization of views it cannot attribute")
+                    continue
+                role = subbed["role"]
+                basic = BASIC_ROLE.fullmatch(role)
+                if basic and basic[1] in local_map(config, "basic_roles"):
+                    role = basic[1]
+                elif role in BASIC:
+                    role = BASIC[role]
+                elif custom := CUSTOM_ROLE.fullmatch(role):
+                    role = roles.get(custom[1], role)
+                else:
+                    refused.append(f"{address}: a dataset role the review cannot read")
+                    continue
+                who = attribute(f"serviceAccount:{subbed['user_by_email']}", addresses, personas)
+                if who is None:
+                    refused.append(f"{address}: a member the review cannot attribute")
+                    continue
+                found[who].append(CloudGrant(role, on, True))
+            continue
         grant = re.search(r"_iam_(member|binding)$", rtype)
         if grant is None or rtype[: grant.start()] not in TARGETS:
             continue
