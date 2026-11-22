@@ -32,6 +32,12 @@ locals {
   }
   # The personas that read the warehouse, so need to run a query at all.
   warehouse_readers = toset([for g in local.dataset_grants : g.persona])
+  # The datasets of the entity-scoped products with tables: each holds a governed copy of its mart
+  # (access/row_policies.py), which the publisher fills.
+  governed = toset([
+    for p in local.access.data_products : replace(p.id, "-", "_")
+    if p.scope == "entity" && length(try(p.tables, [])) > 0
+  ])
 }
 
 resource "google_bigquery_dataset" "warehouse" {
@@ -111,4 +117,33 @@ resource "google_project_iam_member" "persona_runs_queries" {
   project  = var.project
   role     = google_project_iam_custom_role.query_runner.name
   member   = "serviceAccount:${google_service_account.persona[each.key].email}"
+}
+
+# Publishing a governed copy replaces its rows from its mart: read the table and its data and write
+# its data; no table create or delete, no access setting and no row access policy.
+resource "google_project_iam_custom_role" "row_publisher" {
+  role_id     = "labRowPublisher"
+  title       = "Publishes the governed copies"
+  description = "Granted per governed dataset: replaces a table's rows, nothing else."
+  permissions = ["bigquery.tables.get", "bigquery.tables.getData", "bigquery.tables.updateData"]
+}
+
+resource "google_bigquery_dataset_iam_member" "publisher_writes_governed_copies" {
+  for_each   = local.governed
+  dataset_id = google_bigquery_dataset.warehouse[each.key].dataset_id
+  role       = google_project_iam_custom_role.row_publisher.name
+  member     = "serviceAccount:${google_service_account.publisher.email}"
+}
+
+# The marts it copies from: read only, on the layer no persona reads.
+resource "google_bigquery_dataset_iam_member" "publisher_reads_marts" {
+  dataset_id = google_bigquery_dataset.warehouse["intermediate"].dataset_id
+  role       = "roles/bigquery.dataViewer"
+  member     = "serviceAccount:${google_service_account.publisher.email}"
+}
+
+resource "google_project_iam_member" "publisher_runs_queries" {
+  project = var.project
+  role    = google_project_iam_custom_role.query_runner.name
+  member  = "serviceAccount:${google_service_account.publisher.email}"
 }

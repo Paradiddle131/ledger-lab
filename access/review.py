@@ -238,6 +238,17 @@ def instances(
                 for t in columns["tags"]
                 for p in t[kind]
             ]
+    if for_each == "${local.governed}":
+        return [
+            {"each.key": d}
+            for d in sorted(
+                {
+                    p["id"].replace("-", "_")
+                    for p in access["data_products"]
+                    if p["scope"] == "entity" and p.get("tables")
+                }
+            )
+        ]
     if for_each == f"${{{PERSONA_ACCOUNTS}}}":
         return [
             {"each.key": p["id"], "each.value.name": f'{PERSONA_ACCOUNTS}["{p["id"]}"].name'}

@@ -191,6 +191,10 @@ from typing import Any
 
 import yaml
 
+# The lock groups' environments (platform/group_env.py), found from this file wherever it runs.
+sys.path.append(str(Path(__file__).resolve().parents[1] / "platform"))
+import group_env  # noqa: E402
+
 REPO = Path(__file__).resolve().parents[1]
 HERE = Path(__file__).resolve().parent
 BASE = "origin/main"
@@ -264,11 +268,13 @@ PLACEMENT = ("schema", "alias", "enabled", *REFUSED_CONFIGS)
 PLACED = (*BUILT, "test")
 # The macro namespace dbt's own macros, the three above among them, dispatch in.
 DBT_NAMESPACE = "dbt"
-# The outcome check: dbt-bigquery's parse of the working tree, run in the lock's `bigquery` group
-# from uv's cache with no network (`uv run --isolated --frozen --offline --only-group bigquery`,
-# every proxy variable pointed at a port nothing listens on, `semantics/offline` on `PYTHONPATH`,
-# whose `sitecustomize` ends the process at its first connection or name lookup), on a throwaway
-# profile that names an invented project and a stand-in token.
+# The outcome check: dbt-bigquery's parse of the working tree, run by the Python of the lock's
+# `bigquery` group's one environment (platform/group_env.py: built once per lock from uv's cache
+# with no network, `uv sync --frozen --offline --only-group bigquery`, so it holds neither the
+# project nor `dev`'s dbt-core pins), in a fresh process per parse with no network (every proxy
+# variable pointed at a port nothing listens on, `semantics/offline` on `PYTHONPATH`, whose
+# `sitecustomize` ends the process at its first connection or name lookup), on a throwaway profile
+# that names an invented project and a stand-in token.
 BIGQUERY_GROUP = "bigquery"
 CLOSED = "http://127.0.0.1:9"
 PROXIES = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
@@ -923,28 +929,30 @@ def parse_and_refuse(project: Path, report: Path) -> int:
     return 0
 
 
+def bigquery_environment() -> Path:
+    """The folder of the `bigquery` group's environment, built from uv's cache with no network when
+    it is not; GateError when it cannot be (`group_failure` says why when the cache lacks it)."""
+    try:
+        return group_env.environment(BIGQUERY_GROUP, repo=REPO)
+    except group_env.UnbuiltError as e:
+        raise GateError(group_failure(e.stderr) or str(e)) from e
+
+
 def offline_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
-    """The environment of a command in the `bigquery` group: the caller's, which uv needs to find
-    its cache, with every proxy variable pointed at `CLOSED` and `semantics/offline` on
-    `PYTHONPATH`."""
-    env = dict(os.environ) | {name: CLOSED for name in PROXIES}
+    """The environment of a command in the `bigquery` group: the caller's, with the group's
+    executables first on `PATH`, every proxy variable pointed at `CLOSED` and `semantics/offline`
+    on `PYTHONPATH`."""
+    env = group_env.run_environment(bigquery_environment(), dict(os.environ))
+    env |= {name: CLOSED for name in PROXIES}
     env |= {"NO_PROXY": "", "no_proxy": "", "DBT_SEND_ANONYMOUS_USAGE_STATS": "false"}
     env["PYTHONPATH"] = str(HERE / "offline")
     return env | (extra or {})
 
 
 def offline_command(*command: str) -> list[str]:
-    uv = os.environ.get("UV") or shutil.which("uv") or "uv"
-    return [
-        uv,
-        "run",
-        "--isolated",
-        "--frozen",
-        "--offline",
-        "--only-group",
-        BIGQUERY_GROUP,
-        *command,
-    ]
+    """`command` in the `bigquery` group's environment: its first word that environment's own
+    executable."""
+    return group_env.command(bigquery_environment(), *command)
 
 
 def offline_run(
@@ -964,7 +972,7 @@ def offline_run(
 def group_failure(stderr: str) -> str | None:
     """Why the `bigquery` group could not run, from what the command wrote, or None when the
     failure is not the group's: its packages are not in uv's cache."""
-    if NOT_CACHED in stderr:
+    if NOT_CACHED in " ".join(stderr.split()):
         return NOT_CACHED_ADVICE
     return None
 

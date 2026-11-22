@@ -18,7 +18,7 @@ accounts:
     kind: automation
     declared: data.google_service_account.agent
     duties: The sessions' credential; builds the warehouse models, lands the verified files and acts as any persona in the tests.
-    reach: The largest concentration of access in the lab; its declared builder role reads and replaces every table of every warehouse dataset; it reads every tagged column in clear, writes the landing bucket and can act as every persona, its own owner and every other owner among them; by hand it holds no data role on the project and reads the billing export only through its cost view.
+    reach: The largest concentration of access in the lab; its declared builder role reads and replaces every table of every warehouse dataset; it reads every tagged column in clear, writes the landing bucket and can act as every persona, its own owner and every other owner among them, and as the publisher; by hand it holds no data role on the project and reads the billing export only through its cost view.
     project_roles_granted_by_hand:
       - roles/serviceusage.serviceUsageConsumer
     custom_roles_granted_by_hand:
@@ -51,10 +51,19 @@ accounts:
     limits:
       - Its declared rights reach only the warehouse datasets, the policy-tag taxonomy and its tags, the landing bucket and the persona accounts, never the project.
       - Its builder role sets no dataset or table access and deletes no dataset; setting a row access policy's grantees is its one access write.
-      - It mints tokens on the persona accounts only, so it acts as a persona and as nobody else, and acting as one it holds that persona's grants alone.
+      - It mints tokens on the persona accounts and the publisher only, so it acts as a persona or the publisher and as nobody else, and acting as one it holds that account's grants alone.
       - None of its declared roles holds a permission that moves a spend fence.
       - Its roles granted by hand run jobs, read the cost view and read the fences' configuration; the project-wide ones hold no BigQuery or Cloud Storage permission but running jobs and reading BigQuery's settings, and none of them writes data, sets anyone's access, mints a token or moves a spend fence.
       - Not limited yet, acting as the proposer and the approver it can enter an entry and approve it alone; that ends with the approval workflow, which gives the proposer and the approver identities no one account acts as both of, and refuses an approval from the identity that drafted the entry.
+  - id: publisher
+    kind: automation
+    declared: google_service_account.publisher
+    duties: Publishes each governed copy of an entity-scoped product (access/row_policies.py), replacing its rows from its mart in one transaction once its row access policies check out.
+    reach: Its row access policy grants it every row of each governed copy, and it reads every mart in the intermediate dataset, so it reads every entity's payments with their tagged columns as the marts hold them.
+    limits:
+      - It writes only the rows of the governed datasets' tables (its row publisher role reads a table and its data and writes its data), creates and deletes no table and sets no access or row access policy.
+      - Its one other dataset grant reads the intermediate dataset, which no persona reads; its one project role runs jobs.
+      - It mints no token; only the agent mints its token, so the owner's login reaches it by delegation through the agent account.
   - id: kill-switch
     kind: automation
     declared: google_service_account.kill_switch
@@ -68,7 +77,8 @@ accounts:
 # controller owns the control that each persona sees what the catalogue says, so owns the personas'
 # access, except its own, which goes to the auditor, who reads everything and changes nothing; the
 # agent operator runs the agents, so owns the agent persona and the account they run on; the group
-# controller owns the spend fences, so owns the kill switch. No identity owns itself.
+# controller owns the publisher, which writes the rows the personas' visibility rests on, and the
+# spend fences, so owns the kill switch. No identity owns itself.
 owners:
   accountant-chicago: group-controller
   accountant-uk-transport: group-controller
@@ -81,6 +91,7 @@ owners:
   agent-operator: group-controller
   proposer: agent-operator
   agent: agent-operator
+  publisher: group-controller
   kill-switch: group-controller
 
 # Pairs of duties no identity may hold together, in business words. A pair the grants can state

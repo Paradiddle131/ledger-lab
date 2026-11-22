@@ -29,6 +29,7 @@ AGENT = "serviceAccount:${data.google_service_account.agent.email}"
 KILL_SWITCH = "serviceAccount:${google_service_account.kill_switch.email}"
 PERSONA_IN_MAP = "serviceAccount:${google_service_account.persona[each.value.persona].email}"
 PERSONA_IN_SET = "serviceAccount:${google_service_account.persona[each.key].email}"
+PUBLISHER = "serviceAccount:${google_service_account.publisher.email}"
 # The model layers no persona reads, beside one dataset per data product.
 LAYERS = {"landed", "intermediate"}
 DATASET_ROLES = {"read": "roles/bigquery.dataViewer", "edit": "roles/bigquery.dataEditor"}
@@ -38,6 +39,8 @@ MASKED = "roles/bigquerydatapolicy.maskedReader"
 OWNER = "roles/bigquery.dataOwner"
 VIEWER = "roles/datacatalog.viewer"
 BUILDER = "${google_project_iam_custom_role.warehouse_builder.name}"
+QUERY_RUNNER = "${google_project_iam_custom_role.query_runner.name}"
+ROW_PUBLISHER = "${google_project_iam_custom_role.row_publisher.name}"
 # Who reads every tag in clear: the payables clerk, who pays vendors, and the auditor, who reads
 # everything; pinned here apart from the catalogue, so widening it is a reviewed change to both.
 CLEAR_READERS = {"payables-clerk", "auditor"}
@@ -173,10 +176,13 @@ def test_one_policy_tag_and_one_built_in_masking_rule_per_catalogued_tag() -> No
     assert masking["predefined_expression"] == "${local.masking_expressions[each.value.masking]}"
 
 
-def test_every_grant_goes_to_a_persona_the_agent_or_the_kill_switch() -> None:
+def test_every_grant_goes_to_a_persona_the_agent_the_publisher_or_the_kill_switch() -> None:
     for rtype, name, body in iam_members():
         member = unquote(body["member"])
-        assert member in {AGENT, KILL_SWITCH, PERSONA_IN_MAP, PERSONA_IN_SET}, (rtype, name)
+        assert member in {AGENT, KILL_SWITCH, PERSONA_IN_MAP, PERSONA_IN_SET, PUBLISHER}, (
+            rtype,
+            name,
+        )
         assert "condition" not in body, (rtype, name)
 
 
@@ -210,9 +216,20 @@ ACCESS_GRANTS = {
     ),
     ("google_project_iam_member", "persona_runs_queries"): (
         "${local.warehouse_readers}",
-        "${google_project_iam_custom_role.query_runner.name}",
+        QUERY_RUNNER,
         PERSONA_IN_SET,
     ),
+    ("google_bigquery_dataset_iam_member", "publisher_writes_governed_copies"): (
+        "${local.governed}",
+        ROW_PUBLISHER,
+        PUBLISHER,
+    ),
+    ("google_bigquery_dataset_iam_member", "publisher_reads_marts"): (
+        None,
+        "roles/bigquery.dataViewer",
+        PUBLISHER,
+    ),
+    ("google_project_iam_member", "publisher_runs_queries"): (None, QUERY_RUNNER, PUBLISHER),
 }
 
 
@@ -223,6 +240,7 @@ def test_the_access_rules_grant_exactly_these_and_the_fences_their_own() -> None
         ("google_project_iam_member", "kill_switch_receives_events"),
         ("google_project_iam_member", "kill_switch_invokes_workflows"),
         ("google_service_account_iam_member", "agent_mints_persona_tokens"),
+        ("google_service_account_iam_member", "agent_mints_publisher_token"),
         ("google_storage_bucket_iam_member", "agent_lands_objects"),
     }
     assert set(found) == set(ACCESS_GRANTS) | fences
@@ -250,6 +268,12 @@ def test_grants_land_on_the_resource_their_map_names() -> None:
         "${google_bigquery_datapolicy_data_policy.masking[each.value.tag].data_policy_id}"
     )
     assert masked["location"] == "${var.region}"
+    writes = resources["google_bigquery_dataset_iam_member", "publisher_writes_governed_copies"]
+    assert writes["dataset_id"] == "${google_bigquery_dataset.warehouse[each.key].dataset_id}"
+    reads = resources["google_bigquery_dataset_iam_member", "publisher_reads_marts"]
+    assert reads["dataset_id"] == (
+        '${google_bigquery_dataset.warehouse["intermediate"].dataset_id}'
+    )
 
 
 def test_project_roles_reach_only_the_kill_switch_and_the_personas_query_role() -> None:
@@ -262,10 +286,8 @@ def test_project_roles_reach_only_the_kill_switch_and_the_personas_query_role() 
         "kill_switch_billing": ("roles/billing.projectManager", KILL_SWITCH),
         "kill_switch_receives_events": ("roles/eventarc.eventReceiver", KILL_SWITCH),
         "kill_switch_invokes_workflows": ("roles/workflows.invoker", KILL_SWITCH),
-        "persona_runs_queries": (
-            "${google_project_iam_custom_role.query_runner.name}",
-            PERSONA_IN_SET,
-        ),
+        "persona_runs_queries": (QUERY_RUNNER, PERSONA_IN_SET),
+        "publisher_runs_queries": (QUERY_RUNNER, PUBLISHER),
     }
 
 
@@ -274,9 +296,39 @@ def custom_role(name: str) -> set[str]:
     return {unquote(p) for p in role["permissions"]}
 
 
-def test_only_the_query_and_builder_roles_are_custom() -> None:
+def test_only_the_query_builder_and_row_publisher_roles_are_custom() -> None:
     custom = {n for (t, n) in blocks("resource") if t == "google_project_iam_custom_role"}
-    assert custom == {"query_runner", "warehouse_builder"}
+    assert custom == {"query_runner", "warehouse_builder", "row_publisher"}
+
+
+def test_the_row_publisher_role_only_replaces_a_tables_rows() -> None:
+    permissions = custom_role("row_publisher")
+    assert permissions == {
+        "bigquery.tables.get",
+        "bigquery.tables.getData",
+        "bigquery.tables.updateData",
+    }
+    assert permissions.isdisjoint(FENCE_PERMISSIONS)
+
+
+GOVERNED_FROM_FILE = (
+    '${toset([for p in local.access.data_products : replace(p.id, "-", "_") '
+    'if p.scope == "entity" && length(try(p.tables, [])) > 0])}'
+)
+
+
+def expected_governed() -> set[str]:
+    """The datasets holding a governed copy: the entity-scoped products with tables, read as
+    access/row_policies.py reads them."""
+    from access.row_policies import entity_tables
+
+    return {dataset for dataset, _ in entity_tables(catalogue("personas.yaml"))}
+
+
+def test_the_publisher_writes_the_governed_datasets_only() -> None:
+    assert squash(local("governed")) == GOVERNED_FROM_FILE
+    assert expected_governed() == {"payments"}
+    assert "intermediate" not in expected_governed()
 
 
 def test_the_query_role_only_runs_jobs() -> None:
@@ -413,6 +465,11 @@ def tofu_eval(expression: str) -> Any:
 @pytest.mark.tofu
 def test_tofu_generates_one_dataset_per_product_and_layer() -> None:
     assert set(tofu_eval("keys(local.datasets)")) == expected_datasets()
+
+
+@pytest.mark.tofu
+def test_tofu_generates_the_governed_datasets() -> None:
+    assert set(tofu_eval("local.governed")) == expected_governed()
 
 
 @pytest.mark.tofu
