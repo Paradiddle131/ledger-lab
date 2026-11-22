@@ -6,12 +6,13 @@ runs; a publish that checks the copy's policies and columns before it writes a r
 copy whose policies or columns differ; its write going as the publisher, minted through the agent;
 the command refusing a session with no lab project. Live,
 on the owner's machine (`bigquery_persona`, `make bigquery-row-policies`): each human persona reads
-exactly its granted entities' rows of the published copy, and one with no row grant on it cannot
-read it.
+exactly the rows of its granted entities that the mart holds of the published copy, and one with no
+row grant on it cannot read it.
 """
 
 import copy
 import json
+import os
 import re
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -20,7 +21,7 @@ import httpx
 import pytest
 
 from access import row_policies
-from access.bigquery import PersonaQueryError, PersonaSession
+from access.bigquery import PersonaQueryError, PersonaSession, chain, mint, service_account
 from access.identities import identity
 from access.row_policies import (
     PUBLISHER,
@@ -337,6 +338,22 @@ def test_the_command_refuses_a_session_without_the_lab_project(
     assert "another-lab" not in err
 
 
+HELD: dict[str, set[str]] = {}
+
+
+def entities_with_rows(project: str) -> set[str]:
+    """The entities the payments mart holds rows of, read once as the publisher, the one account
+    that reads the mart: an entity with no payments (the Dutch government's, today) is granted but
+    has no rows to show."""
+    if project not in HELD:
+        accounts = chain(service_account(PUBLISHER, project), project, os.environ)
+        sql = f"SELECT DISTINCT entity_id FROM `{project}.intermediate.payments`"  # noqa: S608
+        with httpx.Client(timeout=60) as client:
+            answer = PersonaSession(project, mint(accounts), client).query(sql)
+        HELD[project] = {row[0] for row in answer.rows}
+    return HELD[project]
+
+
 @pytest.mark.bigquery_persona
 def test_each_human_persona_reads_only_its_entities_rows_of_payments(
     as_persona_on_bigquery: Callable[[str], PersonaSession], access: dict[str, Any], human: str
@@ -354,5 +371,8 @@ def test_each_human_persona_reads_only_its_entities_rows_of_payments(
             pytest.fail("a persona with no row grant on payments was not refused")
         return
     seen = {row[0] for row in session.query(sql).rows}
-    if seen != (set(granted) if in_clear else set()):
+    held = entities_with_rows(lab_project())
+    if not held:
+        pytest.fail("the payments mart holds no rows, so the copy proves nothing")
+    if seen != (set(granted) & held if in_clear else set()):
         pytest.fail("the persona read other entities' rows than its grants give")
