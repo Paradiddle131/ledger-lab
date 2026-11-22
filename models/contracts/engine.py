@@ -1,8 +1,9 @@
 """`make contract-test`: run `datacontract test` over the local dbt build.
 
 The CLI's DuckDB engine needs DuckDB 1.5, which conflicts with the project's 2.0 and cannot open
-the database dbt builds, so the engine runs in a throwaway environment from the lock's `contract`
-group, never fetched here (`make sync` puts it in uv's cache), over a copy of the build written in
+the database dbt builds, so the engine runs in the lock's `contract` group's one environment
+(platform/group_env.py), built from uv's cache with no network, never fetched here (`make sync`
+builds it, fetching into uv's cache what it lacks), over a copy of the build written in
 1.5's storage format: `models/target/ledger_lab.duckdb`, where the profile's local output writes by
 default, becomes `target/ledger_lab.cli.duckdb` under the repository's root, the file the contract's
 `local` server names. The test therefore runs on the older engine over a copy, not
@@ -10,17 +11,21 @@ on the project's own engine, until the CLI supports DuckDB 2.0.
 """
 
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import duckdb
 
+# The lock groups' environments (platform/group_env.py), found from this file wherever it runs.
+sys.path.append(str(Path(__file__).resolve().parents[2] / "platform"))
+import group_env  # noqa: E402
+
 REPO = Path(__file__).resolve().parents[2]
 CONTRACT = REPO / "models/contracts/payments.odcs.yaml"
 BUILD = REPO / "models/target/ledger_lab.duckdb"
 COPY = REPO / "target/ledger_lab.cli.duckdb"
+GROUP = "contract"
 
 
 def for_the_cli(database: Path, target: Path) -> Path:
@@ -37,23 +42,27 @@ def for_the_cli(database: Path, target: Path) -> Path:
 def in_engine_env(
     *command: str, env: dict[str, str] | None = None, stdin: str | None = None
 ) -> subprocess.CompletedProcess[str]:
-    """Run a command in the engine's locked environment, from uv's cache only."""
-    uv = os.environ.get("UV") or shutil.which("uv") or "uv"
+    """Run a command in the engine's locked environment, built from uv's cache only; UnbuiltError
+    when it cannot be."""
+    folder = group_env.environment(GROUP, repo=REPO)
     return subprocess.run(  # noqa: S603
-        [uv, "run", "--isolated", "--frozen", "--offline", "--only-group", "contract", *command],
+        group_env.command(folder, *command),
         input=stdin,
         capture_output=True,
         text=True,
         check=False,
         cwd=REPO,
-        env=(env or dict(os.environ)) | {"COLUMNS": "200"},
+        env=group_env.run_environment(folder, env or dict(os.environ)) | {"COLUMNS": "200"},
     )
 
 
 def unavailable() -> str | None:
     """Why the engine's environment cannot be built offline, or None when it can."""
-    probe = in_engine_env("python", "-c", "import datacontract, duckdb")
-    if probe.returncode == 0:
+    try:
+        probe = in_engine_env("python", "-c", "import datacontract, duckdb")
+    except group_env.UnbuiltError:
+        probe = None
+    if probe is not None and probe.returncode == 0:
         return None
     return (
         "the Data Contract CLI's DuckDB engine is not in uv's cache: run `make sync` with network"

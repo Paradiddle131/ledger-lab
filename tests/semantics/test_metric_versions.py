@@ -18,9 +18,11 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+import group_env
 import jinja2
 import pytest
 import yaml
@@ -31,14 +33,17 @@ from tests.semantics.metric_cli import manifest
 
 FOLDER = "semantics/metricflow"
 PROJECT_FILE = "models/dbt_project.yml"
-# The gate and what it runs from a clone of its own: the network refusal, and the lock its
-# offline BigQuery parse reads the `bigquery` group from.
+# The gate and what it runs from a clone of its own: the network refusal, the lock groups'
+# environments, and the lock and Python version its offline BigQuery parse builds the `bigquery`
+# group's environment from.
 GATE_FILES = [
     "semantics/versions.py",
     "semantics/offline/refusal.py",
     "semantics/offline/sitecustomize.py",
+    "platform/group_env.py",
     "pyproject.toml",
     "uv.lock",
+    ".python-version",
 ]
 
 
@@ -348,7 +353,9 @@ HIDDEN_BY_ATTRIBUTES: dict[str, tuple[dict[str, str], str | None]] = {
 
 
 @pytest.mark.parametrize("name", list(HIDDEN_BY_ATTRIBUTES))
-def test_git_attributes_cannot_hide_a_change_on_main(tmp_path: Path, name: str) -> None:
+def test_git_attributes_cannot_hide_a_change_on_main(
+    tmp_path: Path, name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """`origin/main` is read from git's objects as stored, so no export attribute leaves a file
     out of it or rewrites one."""
     extra, info = HIDDEN_BY_ATTRIBUTES[name]
@@ -366,10 +373,27 @@ def test_git_attributes_cannot_hide_a_change_on_main(tmp_path: Path, name: str) 
     if info is not None:
         (repo / ".git/info").mkdir(exist_ok=True)
         (repo / ".git/info/attributes").write_text(info)
-    versions._PUBLISHED.clear()  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(versions, "_PUBLISHED", {})
     ok, report = versions.check(repo)
     assert not ok, report
     assert lines(report) == still("fixed_award", "spend_against_award"), report
+
+
+@pytest.mark.parametrize("case", ["git attributes", "a tree git cannot list"])
+def test_a_case_that_empties_the_gates_cache_puts_it_back(tmp_path: Path, case: str) -> None:
+    """The cases that empty the gate's cache leave the cache other cases read as it was."""
+    planted = {"a-tree-id": {}}
+    with pytest.MonkeyPatch.context() as outer:
+        outer.setattr(versions, "_PUBLISHED", planted)
+        with pytest.MonkeyPatch.context() as inner:
+            if case == "git attributes":
+                test_git_attributes_cannot_hide_a_change_on_main(
+                    tmp_path, next(iter(HIDDEN_BY_ATTRIBUTES)), inner
+                )
+            else:
+                test_a_main_whose_tree_git_cannot_list_fails_the_gate(tmp_path, inner)
+        assert versions._PUBLISHED is planted  # pyright: ignore[reportPrivateUsage]
+        assert planted == {"a-tree-id": {}}
 
 
 VAR_EDITS: dict[str, Edit] = {
@@ -1620,14 +1644,55 @@ def meta_of(manifest_metrics: list[Block], name: str) -> Block:
 
 
 @pytest.fixture(scope="module")
-def committed(tmp_path_factory: pytest.TempPathFactory) -> Block:
-    """The semantic manifest dbt writes for the committed tree, parsed by the gate."""
+def committed_once(tmp_path_factory: pytest.TempPathFactory) -> Block:
+    """The semantic manifest dbt writes for the committed tree, parsed by the gate once per module
+    and worker."""
     work = tmp_path_factory.mktemp("committed")
     repo = git_repo(work, REAL)
     tree = work / "tree"
     tree.mkdir()
     versions.export_working(repo, tree)
     return versions.parse(tree, work, "working").manifest
+
+
+@pytest.fixture
+def committed(committed_once: Block) -> Block:
+    """A copy of the one parse of the committed tree for each case, so a case that changes it
+    leaves the next case, whatever the order or the worker, the parse dbt wrote."""
+    return copy.deepcopy(committed_once)
+
+
+def shared_containers(one: object, other: object) -> list[int]:
+    """The ids of the lists and dicts that two trees hold as the same object."""
+    seen: set[int] = set()
+    pending = [one]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict | list) and id(value) not in seen:
+            seen.add(id(value))
+            pending += list(value.values()) if isinstance(value, dict) else value
+    found: list[int] = []
+    pending = [other]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict | list):
+            if id(value) in seen:
+                found.append(id(value))
+            pending += list(value.values()) if isinstance(value, dict) else value
+    return found
+
+
+def test_each_case_gets_its_own_copy_of_the_committed_parse(
+    committed: Block, committed_once: Block
+) -> None:
+    assert committed == committed_once and committed is not committed_once
+    assert not shared_containers(committed, committed_once)
+    kept = copy.deepcopy(committed_once)
+    committed["metrics"][0]["config"]["meta"].clear()
+    committed["semantic_models"][0]["measures"].clear()
+    committed["project_configuration"].clear()
+    committed["metrics"].clear()
+    assert committed_once == kept
 
 
 CLOCK_STEP = Path(__file__).resolve().parents[1] / "models" / "clock_step.py"
@@ -2173,6 +2238,45 @@ def test_a_terminated_run_leaves_no_copy_behind(tmp_path: Path) -> None:
     gate.send_signal(signal.SIGTERM)
     assert gate.wait(timeout=60) == 128 + signal.SIGTERM
     assert list(scratch.glob("metric-versions-*")) == []
+
+
+def builds() -> set[str]:
+    """The entries of uv's `builds-v0`, hidden names included, where `uv run --isolated` makes
+    the throwaway environment it leaves behind when it is killed."""
+    folder = group_env.cache_dir() / "builds-v0"
+    return set(os.listdir(folder)) if folder.is_dir() else set()
+
+
+def test_the_gates_bigquery_parses_leave_no_environment_in_uvs_cache(tmp_path: Path) -> None:
+    """Two of the gate's BigQuery parses, one run to its end and one ended mid-parse (as the gate
+    ends both when the local read fails first), leave `builds-v0` as they found it. Another process
+    on the same cache may hold an entry there for a moment, so an entry new when the parses end
+    counts only while it stays, and one made after they end does not count."""
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    versions.export_working(versions.REPO, tree)
+    before = builds()
+    finished = tmp_path / "finished"
+    child = versions.start_bigquery(tree, finished)
+    try:
+        restart = partial(versions.start_bigquery, tree, finished)
+        assert versions.bigquery_refusals(child, finished, restart) == []
+    finally:
+        versions.end(child)
+    ended = tmp_path / "ended"
+    child = versions.start_bigquery(tree, ended)
+    deadline = time.monotonic() + 120
+    try:
+        while not (ended / "home").is_dir():
+            assert child.poll() is None and time.monotonic() < deadline, "the parse never started"
+            time.sleep(0.05)
+    finally:
+        versions.end(child)
+    grown = builds() - before
+    deadline = time.monotonic() + 60
+    while (grown := grown & builds()) and time.monotonic() < deadline:
+        time.sleep(0.5)
+    assert not grown, f"left in uv's builds-v0: {sorted(grown)}"
 
 
 def test_every_metric_carries_a_version(build: Build) -> None:

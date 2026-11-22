@@ -50,9 +50,9 @@ INVOCATION_IDS = ["test", "j8-check", "j8-k-check"]
 BRACKETED = ["cost", "pytest:own", "cost"]
 
 # The stub `uv`. It logs `sync` for `uv sync`, `decider`, `cost` and `pytest:<own|elsewhere>` (what
-# pytest's environment holds), and nothing for any other call. The decider is the real script unless
-# FAKE_DECIDER gives its output; the cost read exits with the next code of FAKE_COST_CODES (0 once
-# they run out), pytest with FAKE_PYTEST_CODE.
+# pytest's environment holds), and nothing for any other call; it keeps pytest's command line. The
+# decider is the real script unless FAKE_DECIDER gives its output; the cost read exits with the
+# next code of FAKE_COST_CODES (0 once they run out), pytest with FAKE_PYTEST_CODE.
 FAKE_UV = f"""#!{sys.executable}
 import os, subprocess, sys
 args = sys.argv[1:]
@@ -81,6 +81,8 @@ elif args[:2] == ["run", "pytest"]:
     log("pytest:" + ("own" if lab_project_or_none() is not None else "elsewhere"))
     with open(os.environ["FAKE_LOG"] + ".loadout", "w") as file:
         file.write(os.environ.get("LOADOUT", "<unset>"))
+    with open(os.environ["FAKE_LOG"] + ".args", "w") as file:
+        file.write(line)
     sys.exit(int(os.environ.get("FAKE_PYTEST_CODE", "0")))
 sys.exit(0)
 """
@@ -131,6 +133,13 @@ def run(
     assert "decider" in events, result.stdout + result.stderr
     assert "sync" in events[: events.index("decider")]
     return result, [e for e in events if e not in ("sync", "decider")]
+
+
+@pytest.mark.parametrize("lab", [OWN, *ELSEWHERE.values()], ids=["own", *ELSEWHERE.keys()])
+def test_make_test_runs_pytest_with_n_auto(tmp_path: Path, lab: dict[str, str]) -> None:
+    result, _ = run(tmp_path, lab, "test")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "uv.log.args").read_text() == "run pytest -n auto"
 
 
 @pytest.mark.parametrize("target", INVOCATIONS, ids=INVOCATION_IDS)

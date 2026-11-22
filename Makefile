@@ -9,15 +9,16 @@ GUARDS := $(LOADOUT)/cloud/githooks
 check: lint typecheck test ids portable scan contract metric-versions
 	@echo "make check: all passed"
 
-# Also puts the Data Contract CLI's DuckDB engine (the lock's `contract` group) in uv's cache, so
-# the engine tests and `make contract-test` run offline; offline with no cache, they say so. And
-# dbt-bigquery (the lock's `bigquery` group), whose offline parse the metric versions gate reads;
-# without it in the cache, the gate fails and says so.
+# Also builds the one environment of each lock group that runs apart from the project's
+# (platform/group_env.py, in uv's cache, once per lock), fetching what uv's cache lacks: the Data
+# Contract CLI's DuckDB engine (`contract`), so the engine tests and `make contract-test` run
+# offline; offline with no cache, they say so. And dbt-bigquery (`bigquery`), whose offline parse
+# the metric versions gate reads; without it, the gate fails and says so.
 sync:
 	uv sync --locked
-	@uv run --isolated --frozen --only-group contract python -c 'import datacontract' 2>/dev/null \
+	@uv run --no-sync python platform/group_env.py contract datacontract 2>/dev/null \
 		|| echo "sync: the contract engine is not cached and could not be fetched; its tests skip"
-	@uv run --isolated --frozen --only-group bigquery python -c 'import dbt.adapters.bigquery' \
+	@uv run --no-sync python platform/group_env.py bigquery dbt.adapters.bigquery \
 		2>/dev/null || echo "sync: dbt-bigquery is not cached and could not be fetched; the metric versions gate fails"
 
 lint: sync
@@ -37,6 +38,9 @@ typecheck: sync
 #   runs after a failed pytest; the line fails if either read or pytest fails.
 # - `elsewhere` (the lab variable unset or blank, or GCP_PROJECT set): pytest alone.
 # - any other output, the empty output of a failed decider included: a message, a failure, no pytest.
+# pytest runs its tests across one worker per CPU this process may use (`-n auto`, pytest-xdist);
+# `PYTEST_XDIST_AUTO_NUM_WORKERS=<n>` in the environment sets another count. A plain
+# `uv run pytest` stays in one process.
 # tests/platform/test_cost_read_around_tests.py checks these over a stub `uv`. Limits: an interrupt
 # (Ctrl-C) stops the line, the read after included; pytest runs in other targets (`stack-test`,
 # `reconcile-landed`, `bigquery-personas` and the like) have no cost read around them.
@@ -55,8 +59,8 @@ test: export LOADOUT := $(LOADOUT)
 test: sync
 	$(if $(filter-out /bin/sh,$(SHELL))$(filter-out -c -ec,$(.SHELLFLAGS)),$(error test: SHELL or .SHELLFLAGS is not make's own))
 	case "$$(uv run --no-sync python -E platform/gcp_project.py)" in \
-	own) uv run --no-sync python -E platform/cost_check.py || exit 1; tests=0; uv run pytest || tests=$$?; uv run --no-sync python -E platform/cost_check.py || exit 1; exit $$tests ;; \
-	elsewhere) uv run pytest ;; \
+	own) uv run --no-sync python -E platform/cost_check.py || exit 1; tests=0; uv run pytest -n auto || tests=$$?; uv run --no-sync python -E platform/cost_check.py || exit 1; exit $$tests ;; \
+	elsewhere) uv run pytest -n auto ;; \
 	*) echo "test: platform/gcp_project.py answered neither own nor elsewhere" >&2; exit 1 ;; \
 	esac
 

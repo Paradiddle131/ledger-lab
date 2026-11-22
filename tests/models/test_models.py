@@ -7,6 +7,7 @@ these tests never reach BigQuery whatever the session's environment holds.
 """
 
 import csv
+import importlib
 import json
 import os
 import re
@@ -101,12 +102,25 @@ IN_REGION = {"LEDGER_LAB_BQ_LOCATION": "us-central1"}
         ),
     ],
 )
-def test_an_explicit_bigquery_target_is_refused_in_another_labs_session(
+def test_the_bigquery_output_renders_the_refused_method_in_another_labs_session(
     env: dict[str, str], method: str
 ) -> None:
-    """dbt checks the method against its own list when it reads the profile, so a method outside
-    it stops `--target bigquery` before any connection."""
+    """The method the profile renders for each environment; that dbt refuses `REFUSED` is the next
+    test, where the `bigquery` group is installed."""
     assert render("method", env) == method
+
+
+def test_dbt_bigquerys_method_list_holds_the_labs_methods_and_neither_refusal() -> None:
+    """dbt-bigquery's own list of connection methods holds `oauth` and `FROM_GCLOUD`, which the
+    lab's own environment renders, and not `REFUSED` or `OUT_OF_REGION`. Skipped, and reported as
+    skipped, where the `bigquery` group is not installed; fails if the module that holds the list
+    has moved."""
+    pytest.importorskip("dbt.adapters.bigquery")
+    credentials = importlib.import_module("dbt.adapters.bigquery.credentials")
+    accepted = {m.value for m in credentials.BigQueryConnectionMethod}
+    assert {"oauth", FROM_GCLOUD} <= accepted, accepted
+    assert REFUSED not in accepted, accepted
+    assert OUT_OF_REGION not in accepted, accepted
 
 
 # Not one of dbt-bigquery's methods either: the method while the location is not a free-tier region.

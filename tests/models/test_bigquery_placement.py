@@ -105,6 +105,19 @@ def test_the_offline_environment_refuses_the_network() -> None:
     assert "offline: refused a network call" in looked_up.stderr
 
 
+def test_the_parse_runs_in_the_bigquery_group_alone() -> None:
+    """The parse's Python is the group's own environment's, which holds dbt-bigquery and none of
+    the project's `dev` group (dbt-duckdb, pytest), so the two dbt installs never mix."""
+    probe = (
+        "import importlib.util as u, sys; print(sys.prefix,"
+        " *(u.find_spec(m) is not None for m in ('dbt.adapters.bigquery', 'dbt.adapters.duckdb',"
+        " 'pytest')))"
+    )
+    found = versions.offline_run("python", "-c", probe)
+    assert found.returncode == 0, found.stderr[-500:]
+    assert found.stdout.split() == [str(versions.bigquery_environment()), "True", "False", "False"]
+
+
 def test_the_project_lands_where_the_routing_says_on_bigquery(tmp_path: Path) -> None:
     work = tmp_path / "bigquery"
     assert outcome(copy_project(tmp_path / "tree"), work) == []
