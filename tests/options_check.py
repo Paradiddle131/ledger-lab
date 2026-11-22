@@ -10,7 +10,8 @@ would prefer is refused), and those options must hold:
   `--ignore`, a second `-m`);
 - `testpaths` holding `tests` alone, no other setting that changes what is collected
   (`norecursedirs`, `python_files` and the like), and no conftest, at the repository's root or
-  under `tests/`, that assigns `collect_ignore` or `collect_ignore_glob`;
+  under `tests/`, whose code names `collect_ignore` or `collect_ignore_glob` in any form (a binding,
+  an import, a string); a comment that names them does not count;
 - `empty_parameter_set_mark = "fail_at_collect"`, so a parametrize given an empty list fails
   collection rather than skipping its test.
 What it leaves out: a test skipped by `skipif` (it is still collected, and `-ra` names it); a
@@ -60,21 +61,23 @@ def problems(repo: Path, inipath: Path | None) -> list[str]:
         found.append('empty_parameter_set_mark is not "fail_at_collect"')
     conftests = [repo / "conftest.py", *sorted((repo / "tests").rglob("conftest.py"))]
     for conftest in (c for c in conftests if c.is_file()):
-        if assigned(conftest) & IGNORES:
-            found.append(f"{conftest.relative_to(repo)} sets collect_ignore")
+        if names := sorted(assigned(conftest)):
+            found.append(f"{conftest.relative_to(repo)} sets {', '.join(names)}")
     return found
 
 
 def assigned(module: Path) -> set[str]:
-    """The names a module assigns at any level, as Python reads it (comments do not count)."""
-    names: set[str] = set()
+    """The names of IGNORES a module's code holds in any form: a name read or bound anywhere (an
+    assignment, unpacking, `:=`, a `for` target, a `global`), an import alias, or a string that
+    could name it (`globals()["collect_ignore"]`); a comment does not count."""
+    found: set[str] = set()
     for node in ast.walk(ast.parse(module.read_text())):
-        targets = (
-            node.targets
-            if isinstance(node, ast.Assign)
-            else [node.target]
-            if isinstance(node, ast.AnnAssign | ast.AugAssign)
-            else []
-        )
-        names |= {t.id for t in targets if isinstance(t, ast.Name)}
-    return names
+        if isinstance(node, ast.Name):
+            found.add(node.id)
+        elif isinstance(node, ast.alias):
+            found |= {node.name.rsplit(".", 1)[-1], node.asname or ""}
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            found.add(node.value)
+        elif isinstance(node, ast.Global | ast.Nonlocal):
+            found |= set(node.names)
+    return found & IGNORES

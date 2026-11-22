@@ -81,9 +81,28 @@ def test_another_options_file_or_a_conftests_collect_ignore_is_named(tmp_path: P
     assert problems(repo, repo / "pyproject.toml") == ["tests/conftest.py sets collect_ignore"]
     (repo / "conftest.py").write_text('collect_ignore_glob: list[str] = ["tests/semantics"]\n')
     assert problems(repo, repo / "pyproject.toml") == [
-        "conftest.py sets collect_ignore",
+        "conftest.py sets collect_ignore_glob",
         "tests/conftest.py sets collect_ignore",
     ]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'collect_ignore, _x = ["semantics"], 0',
+        '[collect_ignore] = [["semantics"]]',
+        '(collect_ignore := ["semantics"])',
+        'for collect_ignore in [["semantics"]]:\n    pass',
+        "from tests.elsewhere import collect_ignore",
+        "from os import sep as collect_ignore",
+        'globals()["collect_ignore"] = ["semantics"]',
+    ],
+    ids=["unpacking", "list unpacking", "walrus", "for", "import", "import as", "globals"],
+)
+def test_each_way_of_binding_collect_ignore_is_named(tmp_path: Path, line: str) -> None:
+    repo = copy_of_options(tmp_path)
+    (repo / "conftest.py").write_text(line + "\n")
+    assert problems(repo, repo / "pyproject.toml") == ["conftest.py sets collect_ignore"]
 
 
 def test_the_hook_stops_a_run_on_a_problem() -> None:
