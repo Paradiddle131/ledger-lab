@@ -324,6 +324,9 @@ def test_the_chain_goes_through_the_agent_account_when_it_is_named() -> None:
     assert chain(PERSONA, PROJECT, {AGENT_VARIABLE: "  "}) == [PERSONA]
 
 
+OTHER_LAB = "another-lab"
+
+
 def test_the_agent_account_may_be_named_by_its_address_in_the_lab_project() -> None:
     address = f" the-agent@{PROJECT}.iam.gserviceaccount.com "
     assert chain(PERSONA, PROJECT, {AGENT_VARIABLE: address}) == [address.strip(), PERSONA]
@@ -332,7 +335,7 @@ def test_the_agent_account_may_be_named_by_its_address_in_the_lab_project() -> N
 @pytest.mark.parametrize(
     "address",
     [
-        "the-agent@another-lab.iam.gserviceaccount.com",
+        f"the-agent@{OTHER_LAB}.iam.gserviceaccount.com",
         f"the-agent@{PROJECT}.iam.gserviceaccount.com.evil",
         f"the-agent@x@{PROJECT}.iam.gserviceaccount.com",
         f"@{PROJECT}.iam.gserviceaccount.com",
