@@ -68,11 +68,12 @@ def access() -> dict[str, Any]:
     return load_access()
 
 
-@pytest.hookimpl(tryfirst=True)
+@pytest.hookimpl(tryfirst=True, optionalhook=True)
 def pytest_xdist_auto_num_workers(config: pytest.Config) -> int | None:
     """`-n auto`'s worker count, capped by the memory available (`tests/workers.py`); with
-    `PYTEST_XDIST_AUTO_NUM_WORKERS` set, xdist's own reading of it decides."""
-    if os.environ.get(workers.VARIABLE):
+    `PYTEST_XDIST_AUTO_NUM_WORKERS` set to a count, xdist's own reading of it decides. Optional,
+    so a run without xdist does not stop on a hook it does not know."""
+    if workers.count_set(os.environ):
         return None
     return workers.auto_workers(workers.usable_cpus(), workers.available_memory())
 

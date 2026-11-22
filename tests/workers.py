@@ -4,6 +4,7 @@ little memory does not run out of it. `PYTEST_XDIST_AUTO_NUM_WORKERS` set to a c
 both, as xdist's own reading of it does."""
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 # The most one worker's processes took at once on the suite, rounded up: 28 workers peaked at
@@ -38,3 +39,13 @@ def auto_workers(cpus: int, available: int | None) -> int:
     if available is None:
         return max(1, cpus)
     return max(1, min(cpus, available // WORKER_MEMORY))
+
+
+def count_set(env: Mapping[str, str]) -> bool:
+    """Whether the environment sets a worker count xdist will use: a whole number. Any other value
+    xdist ignores, so the memory cap still applies."""
+    try:
+        int(env.get(VARIABLE, ""))
+    except ValueError:
+        return False
+    return True

@@ -38,14 +38,23 @@ def test_the_available_memory_is_read_from_meminfo(tmp_path: Path) -> None:
     assert WORKER_MEMORY == GIB
 
 
-def run_auto(env: dict[str, str]) -> str:
-    """A child pytest at `-n auto` over one trivial test, with its worker line shown."""
+def run_auto(env: dict[str, str], tmp_path: Path, memory: int | None = None) -> str:
+    """A child pytest at `-n auto` over one trivial test, with its worker line shown; with
+    `memory`, the child's read of the available memory answers that, through a plugin."""
     test = Path(__file__).with_name("test_workers.py")
+    plugin = []
+    if memory is not None:
+        (tmp_path / "fixed_memory.py").write_text(
+            f"import tests.workers\ntests.workers.available_memory = lambda *_: {memory}\n"
+        )
+        env = {**env, "PYTHONPATH": os.pathsep.join([str(tmp_path), env.get("PYTHONPATH", "")])}
+        plugin = ["-p", "fixed_memory"]
     result = subprocess.run(  # noqa: S603
         [
             sys.executable,
             "-m",
             "pytest",
+            *plugin,
             "-n",
             "auto",
             "-v",
@@ -61,16 +70,48 @@ def run_auto(env: dict[str, str]) -> str:
     return result.stdout
 
 
-def test_the_environments_count_overrides_the_cap() -> None:
+def unset() -> dict[str, str]:
+    return {k: v for k, v in os.environ.items() if k != "PYTEST_XDIST_AUTO_NUM_WORKERS"}
+
+
+def test_the_environments_count_overrides_the_cap(tmp_path: Path) -> None:
     env = {**os.environ, "PYTEST_XDIST_AUTO_NUM_WORKERS": "3"}
-    assert "created: 3/3 workers" in run_auto(env)
+    assert "created: 3/3 workers" in run_auto(env, tmp_path, memory=1 << 30)
 
 
-def test_with_no_count_set_auto_starts_the_capped_number() -> None:
-    env = {k: v for k, v in os.environ.items() if k != "PYTEST_XDIST_AUTO_NUM_WORKERS"}
+def test_with_no_count_set_auto_starts_the_count_the_memory_allows(tmp_path: Path) -> None:
     from tests.workers import usable_cpus
 
-    expected = auto_workers(usable_cpus(), available_memory())
-    out = run_auto(env)
-    # Memory moves between the two reads; the count is the cap read here or one either side.
-    assert any(f"created: {n}/{n} workers" in out for n in (expected - 1, expected, expected + 1))
+    expected = min(usable_cpus(), 2)
+    assert f"created: {expected}/{expected} workers" in run_auto(unset(), tmp_path, memory=2 * GIB)
+
+
+def test_a_count_that_is_not_a_number_keeps_the_cap(tmp_path: Path) -> None:
+    from tests.workers import count_set, usable_cpus
+
+    assert not count_set({"PYTEST_XDIST_AUTO_NUM_WORKERS": "abc"})
+    assert count_set({"PYTEST_XDIST_AUTO_NUM_WORKERS": "3"})
+    assert not count_set({})
+    env = {**unset(), "PYTEST_XDIST_AUTO_NUM_WORKERS": "abc"}
+    expected = min(usable_cpus(), 2)
+    assert f"created: {expected}/{expected} workers" in run_auto(env, tmp_path, memory=2 * GIB)
+
+
+def test_a_run_without_xdist_still_starts() -> None:
+    test = Path(__file__).with_name("test_workers.py")
+    result = subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:xdist",
+            "-p",
+            "no:cacheprovider",
+            f"{test}::test_plenty_of_memory_leaves_one_worker_per_cpu",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout[-400:]
