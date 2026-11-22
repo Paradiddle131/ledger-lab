@@ -9,12 +9,17 @@ GUARDS := $(LOADOUT)/cloud/githooks
 check: lint typecheck test ids portable scan contract metric-versions
 	@echo "make check: all passed"
 
-# Also puts the Data Contract CLI's DuckDB engine (the lock's `contract` group) in uv's cache, so
-# the engine tests and `make contract-test` run offline; offline with no cache, they say so.
+# Also builds the one environment of each lock group that runs apart from the project's
+# (platform/group_env.py, in uv's cache, once per lock), fetching what uv's cache lacks: the Data
+# Contract CLI's DuckDB engine (`contract`), so the engine tests and `make contract-test` run
+# offline; offline with no cache, they say so. And dbt-bigquery (`bigquery`), whose offline parse
+# the metric versions gate reads; without it, the gate fails and says so.
 sync:
 	uv sync --locked
-	@uv run --isolated --frozen --only-group contract python -c 'import datacontract' 2>/dev/null \
+	@uv run --no-sync python platform/group_env.py contract datacontract 2>/dev/null \
 		|| echo "sync: the contract engine is not cached and could not be fetched; its tests skip"
+	@uv run --no-sync python platform/group_env.py bigquery dbt.adapters.bigquery \
+		2>/dev/null || echo "sync: dbt-bigquery is not cached and could not be fetched; the metric versions gate fails"
 
 lint: sync
 	uv run ruff check .

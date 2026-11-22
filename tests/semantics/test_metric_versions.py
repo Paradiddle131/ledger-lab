@@ -11,15 +11,19 @@ committed tree, changed in place.
 """
 
 import copy
+import json
 import os
 import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+import group_env
+import jinja2
 import pytest
 import yaml
 
@@ -29,7 +33,18 @@ from tests.semantics.metric_cli import manifest
 
 FOLDER = "semantics/metricflow"
 PROJECT_FILE = "models/dbt_project.yml"
-GATE_FILES = ["semantics/versions.py", "semantics/offline/refusal.py"]
+# The gate and what it runs from a clone of its own: the network refusal, the lock groups'
+# environments, and the lock and Python version its offline BigQuery parse builds the `bigquery`
+# group's environment from.
+GATE_FILES = [
+    "semantics/versions.py",
+    "semantics/offline/refusal.py",
+    "semantics/offline/sitecustomize.py",
+    "platform/group_env.py",
+    "pyproject.toml",
+    "uv.lock",
+    ".python-version",
+]
 
 
 def tracked(*paths: str) -> dict[str, str]:
@@ -183,10 +198,24 @@ def still(*names: str, at: int = 1) -> list[str]:
     return [f"- metric {m}'s definition changed and its version is still {at}" for m in names]
 
 
+def all_still() -> list[str]:
+    """Every metric's line of `still`, each at its committed version."""
+    return [
+        line for m in ALL_METRICS for line in still(m, at=2 if m in GROUP_TOTALS_METRICS else 1)
+    ]
+
+
 FIXED_AWARD_EXPR = "expr: case when award_held_to > 0 then award_held_to end"
 NEW_EXPR = "expr: case when award_held_to > 1 then award_held_to end"
 PAID_AGAINST_EXPR = "expr: case when award_held_to > 0 then paid end"
 REPEATS = "{{ Dimension('payment__entity_id') }} = 'uk-transport'"
+GROUP_TOTALS_METRICS = [
+    "constant_currency_spend",
+    "spend_bases_in_periods",
+    "spend_bases_in_years",
+    "spend_in_periods",
+    "spend_in_years",
+]
 PAYMENT_METRICS = [
     "chicago_payment_amount",
     "chicago_payment_rows",
@@ -284,7 +313,7 @@ FAILS: dict[str, tuple[Edit, list[str]]] = {
         whole_file_dbtignored,
         still("fixed_award", "spend_against_award"),
     ),
-    "the time spine moved": (spine_moved, still(*ALL_METRICS)),
+    "the time spine moved": (spine_moved, all_still()),
 }
 
 
@@ -383,14 +412,15 @@ VAR_EDITS: dict[str, Edit] = {
 
 def every_version_bumped(files: dict[str, str]) -> None:
     for path in [p for p in files if p.startswith(FOLDER)]:
-        files[path] = files[path].replace("version: 1}", "version: 2}")
+        text = files[path].replace("version: 2}", "version: 3}")
+        files[path] = text.replace("version: 1}", "version: 2}")
 
 
 @pytest.mark.parametrize("name", list(VAR_EDITS))
 def test_a_project_var_is_part_of_every_definition(tmp_path: Path, name: str) -> None:
     ok, report = versions.check(working(tmp_path, VAR_EDITS[name]))
     assert not ok, report
-    assert lines(report) == still(*ALL_METRICS), report
+    assert lines(report) == all_still(), report
 
 
 def test_project_vars_changed_with_every_version_bumped_pass(tmp_path: Path) -> None:
@@ -675,6 +705,793 @@ def test_a_definition_dbt_reads_otherwise_or_cannot_read_fails_the_gate(
     for each in expected:
         assert each in report, report
     assert PROBE not in report
+
+
+SCHEMA_MACRO_FILE = "models/macros/generate_schema_name.sql"
+GROUP_TOTALS_DOCS = "models/models/marts/group_totals/group_totals.yml"
+ROUTED = "      group_totals:\n        +schema: group_totals\n"
+
+
+def schema_macro(old: str, new: str) -> Edit:
+    """The committed schema macro's text with `old` (which it holds once) replaced by `new`."""
+    return replaced(SCHEMA_MACRO_FILE, old, new)
+
+
+def node_config(path: str, name: str, config: str) -> Edit:
+    """A `config:` line of the test's own added to the model `name`'s entry in `path`."""
+    return replaced(path, f"  - name: {name}\n", f"  - name: {name}\n    config: {config}\n")
+
+
+def schema_refused(what: str) -> str:
+    return (
+        f"{what} sets a schema while the project has no generate_schema_name with the gate's own"
+        " text, so dbt would prefix it with the profile's dataset"
+    )
+
+
+def without_schema_macro(files: dict[str, str]) -> None:
+    del files[SCHEMA_MACRO_FILE]
+
+
+GROUP_TOTALS_SQL = "models/models/marts/group_totals/group_totals.sql"
+LEFT_OUT = "models/models/marts/group_totals/group_totals_left_out.sql: model group_totals_left_out"
+PAYMENTS_NODE = "models/models/marts/payments/payments.sql: model payments"
+PAYMENTS_DOCS = "models/models/marts/payments/_payments__models.yml"
+CHICAGO_DOCS = "models/models/intermediate/chicago/_chicago__models.yml"
+CHICAGO_PAYMENTS = "models/models/intermediate/chicago/int_chicago__payments.sql: model"
+CHICAGO_PAYMENTS += " int_chicago__payments"
+GROUP_TOTALS_NODE = "models/models/marts/group_totals/group_totals.sql: model group_totals"
+STORED_FAILURES = "models/tests/marts/probe_every_payment.sql"
+IN_CALL = (
+    "in a config() call (in its SQL, or a generic test's own config), which the gate does not read"
+)
+NEW_IN_FOLDER = "models/models/marts/group_totals/payment_rows.sql"
+SNAPSHOT_FILE = "models/snapshots/history.yml"
+SNAPSHOT_NODE = f"{SNAPSHOT_FILE}: snapshot period_status_history"
+BIGQUERY_NAME = (
+    "(dbt-bigquery's name for {}, which the local parse does not read), which places it outside"
+    " the gate's routing"
+)
+
+
+def snapshot_with(setting: str) -> str:
+    """A snapshot of the period statuses, invented for the test, with one config `setting`."""
+    return (
+        "snapshots:\n  - name: period_status_history\n    relation: ref('period_status')\n"
+        "    config:\n      unique_key: entity_id || fiscal_year || fiscal_period\n"
+        f"      strategy: check\n      check_cols: all\n      {setting}\n"
+    )
+
+
+NOT_THE_GATES = (
+    f"{SCHEMA_MACRO_FILE}: macro generate_schema_name decides relation names, which the gate does"
+    " not compare, other than generate_schema_name with the gate's own text"
+    " (semantics/versions.py)"
+)
+NOT_LITERAL = (
+    "sets its schema other than as the literal dbt renders (dbt Jinja, or a setting it overrides),"
+    " which the gate does not compare"
+)
+ON_BIGQUERY = "on BigQuery, "
+CONTRACT_NUMBER_TEST = (
+    f"{ON_BIGQUERY}{CHICAGO_DOCS}: test not_null_int_chicago__contract_revisions_contract_number"
+)
+TEST_HELD = "where the gate holds a data test to dbt_test__audit of the profile's project"
+ROUTE_HELD = "where the gate's routing (semantics/versions.py ROUTES) builds it in"
+ONLY_ON_BIGQUERY = "{{% if target.type == 'bigquery' %}}{{{{ config({}) }}}}{{% endif %}}"
+NO_PARSE_SHOWS = "whose writes no parse shows, which the gate refuses"
+PLACE_MACRO = "models/macros/place.sql"
+
+
+def generic_test_config(key: str, value: str) -> Edit:
+    """The contract number's `not_null` test given, in its YAML `config:`, `key` set to what
+    renders to `value` on BigQuery and to none on the local target, and stored failures."""
+    jinja = f"\"{{{{ '{value}' if target.type == 'bigquery' else none }}}}\""
+    return replaced(
+        CHICAGO_DOCS,
+        "          - not_null\n      - name: revision_number",
+        f"          - not_null:\n              config:\n                {key}: {jinja}\n"
+        "                store_failures: true\n      - name: revision_number",
+    )
+
+
+def only_on_bigquery(config: str) -> Edit:
+    """A `config()` call in the group totals' SQL that only a BigQuery target runs."""
+    return replaced(
+        GROUP_TOTALS_SQL, "\nselect", "\n" + ONLY_ON_BIGQUERY.format(config) + "\nselect"
+    )
+
+
+def project_macro(text: str) -> Edit:
+    return lambda files: files.update({PLACE_MACRO: text})
+
+
+PAYMENTS_SQL = "models/models/marts/payments/payments.sql"
+
+
+def payments_on(condition: str) -> Edit:
+    """The payments mart moved to its product's dataset by a `config()` call that runs only when
+    `condition` holds, which no local target meets."""
+    call = f"{{% if {condition} %}}{{{{ config(schema='payments') }}}}{{% endif %}}\n"
+    return lambda files: files.update({PAYMENTS_SQL: call + files[PAYMENTS_SQL]})
+
+
+PAYMENTS_MOVED = f"{ON_BIGQUERY}{PAYMENTS_NODE} lands in payments, {ROUTE_HELD} intermediate"
+
+
+def routed(path: str, route: str) -> str:
+    return (
+        f"{path}: its Jinja reaches what dbt holds by {route}, which the gate cannot follow to the"
+        " invocation and refuses"
+    )
+
+
+def reads_invocation(path: str, name: str) -> str:
+    return (
+        f"{path}: its Jinja reads {name}, which differs between the gate's parse and a real build,"
+        " which the gate refuses"
+    )
+
+
+ROUTING_REFUSED: dict[str, tuple[Edit, list[str]]] = {
+    "a function built in a product's dataset": (
+        lambda files: files.update(
+            {
+                "models/functions/probe_leak.sql": "select 1\n",
+                "models/functions/probe_leak.yml": "functions:\n  - name: probe_leak\n"
+                "    config:\n      schema: payments\n    returns:\n      data_type: int64\n",
+            }
+        ),
+        [
+            f"{ON_BIGQUERY}models/functions/probe_leak.sql: function probe_leak lands in payments,"
+            f" {ROUTE_HELD} intermediate"
+        ],
+    ),
+    "a relation name that holds a quote": (
+        node_config(PAYMENTS_DOCS, "payments", '{alias: "payments` as select 1; select `x"}'),
+        [
+            f"{ON_BIGQUERY}{PAYMENTS_NODE} names its relation 'payments` as select 1; select `x',"
+            " which holds a character other than a letter, a digit or `_`, which the gate refuses"
+        ],
+    ),
+    "a SQL header on a model": (
+        replaced(
+            GROUP_TOTALS_SQL,
+            "\nselect",
+            "\n{{ config(sql_header='create table payments.copy as select 1;') }}\nselect",
+        ),
+        [
+            f"{ON_BIGQUERY}{GROUP_TOTALS_NODE} sets sql_header, which runs SQL no parse places,"
+            " which the gate refuses"
+        ],
+    ),
+    "a post-hook on a model": (
+        replaced(
+            GROUP_TOTALS_SQL,
+            "\nselect",
+            "\n{{ config(post_hook='create table payments.copy as select 1') }}\nselect",
+        ),
+        [
+            f"{ON_BIGQUERY}{GROUP_TOTALS_NODE} sets post_hook, which runs SQL no parse places,"
+            " which the gate refuses"
+        ],
+    ),
+    "grants on a model": (
+        node_config(PAYMENTS_DOCS, "payments", "{grants: {select: [someone]}}"),
+        [
+            f"{ON_BIGQUERY}{PAYMENTS_NODE} sets grants, which runs SQL no parse places,"
+            " which the gate refuses"
+        ],
+    ),
+    "an on-run hook of the project": (
+        lambda files: files.update(
+            {
+                PROJECT_FILE: files[PROJECT_FILE]
+                + '\non-run-end: ["create table payments.copy as select 1"]\n'
+            }
+        ),
+        ["an on-run hook of the project runs SQL no parse places, which the gate refuses"],
+    ),
+    "a config() call only a command other than parse reaches": (
+        payments_on("flags.WHICH != 'parse'"),
+        [reads_invocation(PAYMENTS_SQL, "flags")],
+    ),
+    "a config() call only a full-refresh build reaches": (
+        payments_on("should_full_refresh()"),
+        [reads_invocation(PAYMENTS_SQL, "should_full_refresh")],
+    ),
+    "a config() call only a build storing failures reaches": (
+        payments_on("should_store_failures()"),
+        [reads_invocation(PAYMENTS_SQL, "should_store_failures")],
+    ),
+    "a config() call only the invocation's arguments reach": (
+        payments_on("invocation_args_dict.get('which') == 'build'"),
+        [reads_invocation(PAYMENTS_SQL, "invocation_args_dict")],
+    ),
+    "a config() call behind a quoted tag end that only a command other than parse reaches": (
+        payments_on("'%}' and flags.WHICH != 'parse'"),
+        [reads_invocation(PAYMENTS_SQL, "flags")],
+    ),
+    "a config() call behind a double-quoted tag end that only a command other than parse reaches": (
+        payments_on("\"%}\" and flags.WHICH != 'parse'"),
+        [reads_invocation(PAYMENTS_SQL, "flags")],
+    ),
+    "a config() call in a tag over two lines that only a command other than parse reaches": (
+        payments_on("\n    flags.WHICH != 'parse'\n"),
+        [reads_invocation(PAYMENTS_SQL, "flags")],
+    ),
+    "a config() call only a command other than parse reaches, read through dbt's context": (
+        payments_on("context['flags'].WHICH != 'parse'"),
+        [reads_invocation(PAYMENTS_SQL, "context"), reads_invocation(PAYMENTS_SQL, "flags")],
+    ),
+    "a config() call only the invocation's arguments reach, got from dbt's context": (
+        payments_on("context.get('invocation_args_dict', {}).get('which') == 'build'"),
+        [
+            reads_invocation(PAYMENTS_SQL, "context"),
+            reads_invocation(PAYMENTS_SQL, "invocation_args_dict"),
+        ],
+    ),
+    "a config() call only a full-refresh build reaches, the macro taken by a key": (
+        payments_on("dbt['should_full_refresh']()"),
+        [reads_invocation(PAYMENTS_SQL, "should_full_refresh")],
+    ),
+    "a config() call only a build storing failures reaches, the macro got by name": (
+        payments_on("dbt.get('should_store_failures')()"),
+        [reads_invocation(PAYMENTS_SQL, "should_store_failures")],
+    ),
+    "a config() call only a full-refresh build reaches, the macro's name built from parts": (
+        payments_on("dbt['should_' ~ 'full_refresh']()"),
+        [routed(PAYMENTS_SQL, "a key of dbt's macros")],
+    ),
+    "a config() call turning on the adapter's runtime config, whose arguments are the command's": (
+        payments_on("adapter.config.args"),
+        [routed(PAYMENTS_SQL, "the adapter's config")],
+    ),
+    "a config() call turning on a dispatch by a name built from parts": (
+        payments_on("adapter.dispatch('exact_' ~ 'decimal')"),
+        [routed(PAYMENTS_SQL, "a dispatch whose macro is not one string")],
+    ),
+    "a config() call turning on Python's internals": (
+        payments_on("''.__class__"),
+        [routed(PAYMENTS_SQL, "a name opening with __ (__class__)")],
+    ),
+    "a config() call only the selected resources reach": (
+        payments_on("selected_resources"),
+        [reads_invocation(PAYMENTS_SQL, "selected_resources")],
+    ),
+    "a generic test's schema by the command, hidden from the file's text by YAML comments": (
+        replaced(
+            CHICAGO_DOCS,
+            "          - not_null\n      - name: revision_number",
+            "          - not_null:\n              # {{ '\n              config:\n"
+            "                schema: >-\n"
+            '                  {{ "payments" if flags.WHICH == "build" else none }}\n'
+            "                store_failures: true\n              # ' }}\n"
+            "      - name: revision_number",
+        ),
+        [reads_invocation(CHICAGO_DOCS, "flags")],
+    ),
+    "a generic test's schema by the command, its quotes YAML escapes": (
+        replaced(
+            CHICAGO_DOCS,
+            "          - not_null\n      - name: revision_number",
+            "          - not_null:\n              config:\n"
+            "                schema: \"{{ 'payments' if ('\\x27 ~ flags.WHICH ~ \\x27') =="
+            " 'build' else none }}\"\n"
+            "                store_failures: true\n"
+            "      - name: revision_number",
+        ),
+        [reads_invocation(CHICAGO_DOCS, "flags")],
+    ),
+    "a generic test's schema by the command, the name a YAML escape": (
+        replaced(
+            CHICAGO_DOCS,
+            "          - not_null\n      - name: revision_number",
+            "          - not_null:\n              config:\n"
+            "                schema: \"{{ 'payments' if \\x66lags.WHICH == 'build' else none }}\"\n"
+            "                store_failures: true\n"
+            "      - name: revision_number",
+        ),
+        [reads_invocation(CHICAGO_DOCS, "flags")],
+    ),
+    "a generic test's schema that renders by the command": (
+        replaced(
+            CHICAGO_DOCS,
+            "          - not_null\n      - name: revision_number",
+            "          - not_null:\n              config:\n                schema: \"{{ 'payments'"
+            " if flags.WHICH == 'build' else none }}\"\n"
+            "      - name: revision_number",
+        ),
+        [reads_invocation(CHICAGO_DOCS, "flags")],
+    ),
+    "a project macro that reads the invocation": (
+        project_macro(
+            "{% macro place() %}{{ return('payments' if invocation_id else none) }}{% endmacro %}\n"
+        ),
+        [reads_invocation(PLACE_MACRO, "invocation_id")],
+    ),
+    "a pre-hook on a model": (
+        replaced(
+            GROUP_TOTALS_SQL,
+            "\nselect",
+            "\n{{ config(pre_hook='create table payments.copy as select 1') }}\nselect",
+        ),
+        [
+            f"{ON_BIGQUERY}{GROUP_TOTALS_NODE} sets pre_hook, which runs SQL no parse places,"
+            " which the gate refuses"
+        ],
+    ),
+    "a config() call only the BigQuery output's name reaches": (
+        payments_on("target.name == 'bigquery'"),
+        [PAYMENTS_MOVED],
+    ),
+    "a config() call only the BigQuery output's settings reach": (
+        payments_on(
+            "target.type == 'bigquery' and target.maximum_bytes_billed and target.threads > 1"
+        ),
+        [PAYMENTS_MOVED],
+    ),
+    "a config() call only another project reaches": (
+        payments_on(f"target.type == 'bigquery' and target.project != '{versions.PROBES[0][0]}'"),
+        [PAYMENTS_MOVED],
+    ),
+    "a config() call only the lab's region reaches": (
+        payments_on(f"target.location == '{versions.PROBES[0][1]}'"),
+        [PAYMENTS_MOVED],
+    ),
+    "a generic test's schema that renders to none on the local target": (
+        generic_test_config("schema", "group_totals"),
+        [f"{CONTRACT_NUMBER_TEST} is placed in group_totals, {TEST_HELD}"],
+    ),
+    "a generic test's database that renders to none on the local target": (
+        generic_test_config("database", "elsewhere"),
+        [
+            f"{CONTRACT_NUMBER_TEST} is placed in dbt_test__audit of the project elsewhere,"
+            f" {TEST_HELD}"
+        ],
+    ),
+    "a schema set in a config() call only BigQuery runs": (
+        only_on_bigquery("schema='payments'"),
+        [f"{ON_BIGQUERY}{GROUP_TOTALS_NODE} lands in payments, {ROUTE_HELD} group_totals"],
+    ),
+    "a database set in a config() call only BigQuery runs": (
+        only_on_bigquery("database='elsewhere'"),
+        [
+            f"{ON_BIGQUERY}{GROUP_TOTALS_NODE} lands in group_totals of the project elsewhere,"
+            f" {ROUTE_HELD} group_totals"
+        ],
+    ),
+    "an alias set in a config() call only BigQuery runs": (
+        only_on_bigquery("alias='elsewhere'"),
+        [
+            f"{ON_BIGQUERY}{GROUP_TOTALS_SQL}: builds elsewhere in models/marts/group_totals,"
+            " which the gate's routing (semantics/versions.py ROUTES) holds to group_totals,"
+            " group_totals_left_out"
+        ],
+    ),
+    "a materialization of the project": (
+        project_macro(
+            "{% materialization payments_table, default %}\n"
+            "{{ return({'relations': []}) }}\n{% endmaterialization %}\n"
+        ),
+        [
+            f"{ON_BIGQUERY}{PLACE_MACRO}: macro materialization_payments_table_default is a"
+            f" materialization of the project, {NO_PARSE_SHOWS}"
+        ],
+    ),
+    "a project macro named as one of dbt-bigquery's": (
+        project_macro(
+            "{% macro bigquery__create_table_as(temporary, relation, compiled_code,"
+            " language='sql') -%}\ncreate or replace table"
+            " `{{ relation.database }}`.payments.`{{ relation.identifier }}`"
+            " as {{ compiled_code }}\n{%- endmacro %}\n"
+        ),
+        [
+            f"{ON_BIGQUERY}{PLACE_MACRO}: macro bigquery__create_table_as overrides one of dbt's"
+            f" or dbt-bigquery's own macros, {NO_PARSE_SHOWS}"
+        ],
+    ),
+    "a project macro dbt's dispatch reaches by its prefix": (
+        project_macro(
+            "{% macro bigquery__get_create_table_as_sql(temporary, relation, sql) -%}\n"
+            "create table payments.copy as {{ sql }}\n{%- endmacro %}\n"
+        ),
+        [
+            f"{ON_BIGQUERY}{PLACE_MACRO}: macro bigquery__get_create_table_as_sql overrides one"
+            f" of dbt's or dbt-bigquery's own macros, {NO_PARSE_SHOWS}"
+        ],
+    ),
+    "a data test enabled only on BigQuery": (
+        lambda files: files.update(
+            {
+                STORED_FAILURES: "{{ config(enabled=(target.type == 'bigquery'),"
+                " schema='group_totals', store_failures=true) }}\n"
+                "select vendor_name from {{ ref('int_chicago__payments') }} where false\n"
+            }
+        ),
+        [
+            f"{STORED_FAILURES}: test probe_every_payment is disabled in the local parse, which"
+            " the gate does not read"
+        ],
+    ),
+    "the schema macro with a space added": (
+        schema_macro("{{ target.schema }}", "{{  target.schema }}"),
+        [NOT_THE_GATES],
+    ),
+    "the schema macro with a Jinja comment in it": (
+        schema_macro("{%- else -%}\n", "{%- else -%}\n{# a comment #}\n"),
+        [NOT_THE_GATES],
+    ),
+    "the schema macro reading the environment": (
+        schema_macro(
+            "{{ custom_schema_name | trim }}",
+            "{{ env_var('ANY', '') ~ custom_schema_name | trim }}",
+        ),
+        [NOT_THE_GATES],
+    ),
+    "the schema macro reading a var": (
+        schema_macro("{{ custom_schema_name | trim }}", "{{ var('dataset', custom_schema_name) }}"),
+        [NOT_THE_GATES],
+    ),
+    "an adapter schema macro beside the allowed one": (
+        relation_macro("bigquery__generate_schema_name", "(custom_name or target.schema)"),
+        [
+            "models/macros/relation_probe.sql: macro bigquery__generate_schema_name decides"
+            " relation names, which the gate does not compare"
+        ],
+    ),
+    "a model's schema naming a dataset outside the routing": (
+        node_config(PAYMENTS_DOCS, "payments", "{schema: scratch}"),
+        [
+            f"{PAYMENTS_NODE} sets schema 'scratch', where the gate's routing"
+            " (semantics/versions.py ROUTES) builds it in the profile's dataset"
+        ],
+    ),
+    "the payments mart routed to its product's dataset": (
+        replaced(
+            PROJECT_FILE,
+            ROUTED,
+            ROUTED + "      payments:\n        +schema: payments\n",
+        ),
+        [
+            f"{PAYMENTS_NODE} sets schema 'payments', where the gate's routing"
+            " (semantics/versions.py ROUTES) builds it in the profile's dataset"
+        ],
+    ),
+    "a group-totals model's schema unset in its entry": (
+        node_config(GROUP_TOTALS_DOCS, "group_totals_left_out", "{schema: null}"),
+        [f"{LEFT_OUT} {NOT_LITERAL}"],
+    ),
+    "a schema read from the environment": (
+        node_config(
+            GROUP_TOTALS_DOCS,
+            "group_totals_left_out",
+            "{schema: \"{{ env_var('ANY', 'group_totals') }}\"}",
+        ),
+        [f"{LEFT_OUT} {NOT_LITERAL}"],
+    ),
+    "a schema set in a model's SQL": (
+        replaced(
+            GROUP_TOTALS_SQL,
+            "\nselect",
+            "\n{{ config(schema='group_totals') }}\nselect",
+        ),
+        [f"{GROUP_TOTALS_NODE} sets its schema {IN_CALL}"],
+    ),
+    "a database set for a folder": (
+        replaced(PROJECT_FILE, ROUTED, ROUTED + "        +database: elsewhere\n"),
+        [
+            f"{LEFT_OUT} sets database, which places it outside the gate's routing",
+            "models/models/marts/group_totals/group_totals.sql: model group_totals sets"
+            " database, which places it outside the gate's routing",
+        ],
+    ),
+    "a folder's dataset, dbt-bigquery's name for its schema": (
+        replaced(PROJECT_FILE, ROUTED, ROUTED + "        +dataset: scratch\n"),
+        [f"{LEFT_OUT} sets dataset {BIGQUERY_NAME.format('schema')}"],
+    ),
+    "a folder's project, dbt-bigquery's name for its database": (
+        replaced(PROJECT_FILE, ROUTED, ROUTED + "        +project: elsewhere\n"),
+        [f"{LEFT_OUT} sets project {BIGQUERY_NAME.format('database')}"],
+    ),
+    "the payments mart given its product's dataset by dbt-bigquery's name": (
+        node_config(PAYMENTS_DOCS, "payments", "{dataset: payments}"),
+        [f"{PAYMENTS_NODE} sets dataset {BIGQUERY_NAME.format('schema')}"],
+    ),
+    "a dataset set in a model's SQL": (
+        replaced(GROUP_TOTALS_SQL, "\nselect", "\n{{ config(dataset='scratch') }}\nselect"),
+        [
+            "models/models/marts/group_totals/group_totals.sql: model group_totals sets dataset"
+            f" {BIGQUERY_NAME.format('schema')}"
+        ],
+    ),
+    "a seed folder's schema off the routing": (
+        lambda files: files.update(
+            {
+                PROJECT_FILE: files[PROJECT_FILE]
+                + "\nseeds:\n  ledger_lab:\n    calendars:\n      +schema: scratch\n"
+            }
+        ),
+        [
+            "models/seeds/calendars/fiscal_year_starts.csv: seed fiscal_year_starts sets schema"
+            " 'scratch', where the gate's routing (semantics/versions.py ROUTES) builds it in the"
+            " profile's dataset"
+        ],
+    ),
+    "a snapshot's target database": (
+        lambda files: files.update({SNAPSHOT_FILE: snapshot_with("target_database: elsewhere")}),
+        [f"{SNAPSHOT_NODE} sets target_database, which places it outside the gate's routing"],
+    ),
+    "a snapshot's target project, dbt-bigquery's name for its target database": (
+        lambda files: files.update({SNAPSHOT_FILE: snapshot_with("target_project: elsewhere")}),
+        [f"{SNAPSHOT_NODE} sets target_project {BIGQUERY_NAME.format('target_database')}"],
+    ),
+    "a schema that renders to none on the local target": (
+        node_config(
+            CHICAGO_DOCS,
+            "int_chicago__payments",
+            "{schema: \"{{ 'payments' if target.type == 'bigquery' else none }}\"}",
+        ),
+        [f"{CHICAGO_PAYMENTS} {NOT_LITERAL}"],
+    ),
+    "a literal alias set in a model's SQL": (
+        replaced(GROUP_TOTALS_SQL, "\nselect", "\n{{ config(alias='group_totals') }}\nselect"),
+        [f"{GROUP_TOTALS_NODE} sets its alias {IN_CALL}"],
+    ),
+    "an alias that depends on the target": (
+        replaced(
+            GROUP_TOTALS_SQL,
+            "\nselect",
+            "\n{{ config(alias=('group_totals' if target.type != 'bigquery' else 'elsewhere')) }}"
+            "\nselect",
+        ),
+        [f"{GROUP_TOTALS_NODE} sets its alias {IN_CALL}"],
+    ),
+    "a twin of a metric's model enabled only on BigQuery": (
+        both(
+            replaced(
+                GROUP_TOTALS_SQL,
+                "\nselect",
+                "\n{{ config(enabled=(target.type != 'bigquery')) }}\nselect",
+            ),
+            lambda files: files.update(
+                {
+                    "models/models/scratch/group_totals.sql": (
+                        "{{ config(enabled=(target.type == 'bigquery'), schema='payments') }}\n"
+                        + REAL[GROUP_TOTALS_SQL]
+                    )
+                }
+            ),
+        ),
+        [
+            "models/models/scratch/group_totals.sql: model group_totals is disabled in the local"
+            " parse, which the gate does not read",
+            f"{GROUP_TOTALS_NODE} sets its enabled {IN_CALL}",
+        ],
+    ),
+    "a model in a product's folder enabled only on BigQuery": (
+        lambda files: files.update(
+            {
+                NEW_IN_FOLDER: "{{ config(enabled=(target.type == 'bigquery')) }}\n"
+                "select * from {{ ref('payments') }}\n"
+            }
+        ),
+        [
+            f"{NEW_IN_FOLDER}: model payment_rows is disabled in the local parse, which the gate"
+            " does not read"
+        ],
+    ),
+    "a model disabled by a literal in its properties": (
+        lambda files: files.update(
+            {
+                "models/models/marts/switched_off.sql": "select 1 as a\n",
+                "models/models/marts/switched_off.yml": (
+                    "models:\n  - name: switched_off\n    config: {enabled: false}\n"
+                ),
+            }
+        ),
+        [
+            "models/models/marts/switched_off.sql: model switched_off is disabled in the local"
+            " parse, which the gate does not read"
+        ],
+    ),
+    "a data test storing its failures in a product's dataset": (
+        lambda files: files.update(
+            {
+                STORED_FAILURES: "{{ config(schema='group_totals', store_failures=true) }}\n"
+                "select vendor_name from {{ ref('int_chicago__payments') }} where false\n"
+            }
+        ),
+        [
+            f"{STORED_FAILURES}: test probe_every_payment sets its schema {IN_CALL}",
+            f"{STORED_FAILURES}: test probe_every_payment sets schema, which places it outside"
+            " the gate's routing",
+        ],
+    ),
+    "a schema for the project's data tests": (
+        lambda files: files.update(
+            {PROJECT_FILE: files[PROJECT_FILE] + "\ndata_tests:\n  ledger_lab:\n    +schema: x\n"}
+        ),
+        ["sets schema, which places it outside the gate's routing"],
+    ),
+    "a snapshot's target schema": (
+        lambda files: files.update({SNAPSHOT_FILE: snapshot_with("target_schema: scratch")}),
+        [
+            f"{SNAPSHOT_NODE} sets target_schema, which places it outside the gate's routing",
+        ],
+    ),
+    "a snapshot's target dataset, dbt-bigquery's name for its target schema": (
+        lambda files: files.update({SNAPSHOT_FILE: snapshot_with("target_dataset: scratch")}),
+        [f"{SNAPSHOT_NODE} sets target_dataset {BIGQUERY_NAME.format('target_schema')}"],
+    ),
+    "a model added to a product's folder": (
+        lambda files: files.update({NEW_IN_FOLDER: "select * from {{ ref('payments') }}\n"}),
+        [
+            f"{NEW_IN_FOLDER}: builds payment_rows in models/marts/group_totals, which the gate's"
+            " routing (semantics/versions.py ROUTES) holds to group_totals, group_totals_left_out"
+        ],
+    ),
+    "an alias on a product's table": (
+        node_config(GROUP_TOTALS_DOCS, "group_totals", "{alias: group_totals_copy}"),
+        [
+            "models/models/marts/group_totals/group_totals.sql: builds group_totals_copy in"
+            " models/marts/group_totals, which the gate's routing (semantics/versions.py ROUTES)"
+            " holds to group_totals, group_totals_left_out",
+            "models/marts/group_totals builds group_totals 0 times, where the gate's routing"
+            " (semantics/versions.py ROUTES) holds it to once",
+        ],
+    ),
+    "a product's table moved out of its folder": (
+        moved(
+            "models/models/marts/group_totals/group_totals_left_out.sql",
+            "models/models/marts/group_totals_left_out.sql",
+        ),
+        [
+            "models/marts/group_totals builds group_totals_left_out 0 times, where the gate's"
+            " routing (semantics/versions.py ROUTES) holds it to once"
+        ],
+    ),
+    "a schema without the allowed macro": (
+        without_schema_macro,
+        [schema_refused(LEFT_OUT)],
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(ROUTING_REFUSED))
+def test_a_routing_the_gate_does_not_hold_fails_the_gate(tmp_path: Path, name: str) -> None:
+    edit, expected = ROUTING_REFUSED[name]
+    ok, report = versions.check(working(tmp_path, edit))
+    assert not ok, report
+    for each in expected:
+        assert said(report, each), report
+
+
+def said(report: str, line: str) -> bool:
+    """Whether the report holds `line` as written: a local rule's line counts only where the
+    outcome check's own copy of it (the same text after `ON_BIGQUERY`) does not stand in for it."""
+    starts = [i for i in range(len(report)) if report.startswith(line, i)]
+    return any(line.startswith(ON_BIGQUERY) or not report[:i].endswith(ON_BIGQUERY) for i in starts)
+
+
+def test_a_main_with_a_routing_the_gate_cannot_read_fails_the_gate(tmp_path: Path) -> None:
+    """The rules that let the gate read a node's dataset from its parse hold on `origin/main`'s
+    tree too: there, a schema without the allowed macro is refused."""
+    main = changed_from(REAL, without_schema_macro)
+    with pytest.raises(versions.GateError, match="origin/main's metrics cannot be read") as caught:
+        versions.check(git_repo(tmp_path, main))
+    assert schema_refused(LEFT_OUT) in str(caught.value)
+
+
+def test_a_metric_models_dataset_moved_is_a_changed_definition(tmp_path: Path) -> None:
+    """The dataset a semantic model's node is built in on BigQuery (its `schema` config, which
+    the allowed macro returns) is part of the definition: against a main that builds the
+    group totals in the profile's dataset, the committed routing changes their metrics."""
+    main = changed_from(REAL, replaced(PROJECT_FILE, ROUTED, ""))
+    routed = REAL[PROJECT_FILE]
+    ok, report = versions.check(working(tmp_path, lambda f: f.update({PROJECT_FILE: routed}), main))
+    assert not ok, report
+    assert lines(report) == still(*GROUP_TOTALS_METRICS, at=2), report
+
+
+def test_a_time_spines_dataset_moved_is_a_changed_definition(tmp_path: Path) -> None:
+    """The time spine's `schema` config is part of every definition: against a main whose spine
+    names a dataset (a main the gate reads, as it holds the base tree to the routing's readable
+    rules only), the committed spine in the profile's dataset changes every metric."""
+    spine = node_config(CALENDARS, "metric_time_spine", "{schema: group_totals}")
+    main = changed_from(REAL, spine)
+    ok, report = versions.check(
+        working(tmp_path, lambda f: f.update({CALENDARS: REAL[CALENDARS]}), main)
+    )
+    assert not ok, report
+    assert lines(report) == all_still(), report
+
+
+# dbt-bigquery's config names for something other than where a relation is built.
+NOT_PLACEMENT = {"job_retries", "job_execution_timeout_seconds", "compute_region"}
+ALIASES = (
+    "import json; from dbt.adapters.bigquery.credentials import BigQueryCredentials as C;"
+    " print(json.dumps(C._ALIASES))"
+)
+
+
+def test_the_refused_bigquery_names_are_the_locked_adapters_placement_aliases() -> None:
+    """The gate's `BIGQUERY_ALIASES` are the locked dbt-bigquery's `_ALIASES` whose target is a
+    placement config, and each of its other aliases is one known not to place a relation, so an
+    alias the adapter adds fails here until it is sorted; read from the lock's `bigquery` group in
+    uv's cache, offline (semantics/versions.py `offline_run`), which `make sync` caches; when it is
+    not cached, the test fails as the gate does."""
+    found = versions.offline_run("python", "-c", ALIASES)
+    assert found.returncode == 0, versions.group_failure(found.stderr) or found.stderr[-500:]
+    aliases = json.loads(found.stdout)
+    placement = {"schema", *versions.UNROUTED}
+    assert {k: v for k, v in aliases.items() if v in placement} == versions.BIGQUERY_ALIASES
+    assert {v for v in aliases.values() if v not in placement} <= NOT_PLACEMENT
+
+
+def test_an_alias_on_a_metric_model_is_a_changed_definition(tmp_path: Path) -> None:
+    """An alias renames the relation on every target, so the local parse the gate compares sees
+    it (in a routed folder the routing's tables refuse it before; see `ROUTING_REFUSED`)."""
+    edit = node_config(
+        "models/models/reconciliations/_reconciliations__models.yml",
+        "chicago_contract_reconciliation",
+        "{alias: reconciliation_copy}",
+    )
+    ok, report = versions.check(working(tmp_path, edit))
+    assert not ok, report
+    assert lines(report) == still(*CONTRACT_METRICS), report
+
+
+def test_the_routing_names_declared_product_datasets_and_the_project_file_implements_it() -> None:
+    """Each routed dataset is one platform/gcp/warehouse.tf declares for a data product (its
+    `datasets` local: the products' ids with `_` for `-`), each route's tables are that product's
+    `tables` in access/personas.yaml, none is a product of `entity` scope (its rows wait on their
+    row access policies), the committed macro is the gate's own text, and the project file's
+    `+schema` settings are exactly the routes."""
+    personas = yaml.safe_load((versions.REPO / "access" / "personas.yaml").read_text())
+    products = {p["id"].replace("-", "_"): p for p in personas["data_products"]}
+    for route in versions.ROUTES.values():
+        assert route.dataset in products
+        assert sorted(route.tables) == sorted(products[route.dataset]["tables"])
+        # A dataset read reaches every row of a table there with no row access policies, so an
+        # entity-scoped product is routed only in the change that creates its policies.
+        assert products[route.dataset]["scope"] != "entity", route
+    macros = (versions.REPO / SCHEMA_MACRO_FILE).read_text()
+    assert macros.count(versions.SCHEMA_MACRO) == 1
+    project = yaml.safe_load((versions.REPO / PROJECT_FILE).read_text())
+
+    def schemas(block: Block, at: str) -> Iterator[tuple[str, str]]:
+        for key, value in block.items():
+            if key == "+schema":
+                yield at, value
+            elif isinstance(value, dict) and not key.startswith("+"):
+                yield from schemas(value, f"{at}/{key}")
+
+    found = dict(schemas(project["models"]["ledger_lab"], "models"))
+    assert found == {folder: route.dataset for folder, route in versions.ROUTES.items()}
+    assert not any(key in project for key in ("seeds", "snapshots"))
+
+
+@pytest.mark.parametrize(
+    ("adapter", "custom", "built_in"),
+    [
+        ("bigquery", "group_totals", "group_totals"),
+        ("bigquery", " group_totals ", "group_totals"),
+        ("bigquery", None, "intermediate"),
+        ("duckdb", "group_totals", "main"),
+        ("duckdb", None, "main"),
+    ],
+)
+def test_the_allowed_macro_routes_only_on_bigquery(
+    adapter: str, custom: str | None, built_in: str
+) -> None:
+    """The gate's copy of the macro, rendered by Jinja with the target dbt would give it: on
+    BigQuery a node's schema trimmed of surrounding whitespace, else the profile's dataset; on
+    another target the profile's schema."""
+    target = {"type": adapter, "schema": {"bigquery": "intermediate", "duckdb": "main"}[adapter]}
+    template = versions.SCHEMA_MACRO + "{{ generate_schema_name(custom, none) }}"
+    rendered = jinja2.Environment(autoescape=False).from_string(template)  # noqa: S701
+    assert rendered.render(target=target, custom=custom).strip() == built_in
 
 
 def test_a_metric_reading_a_dbt_var_fails_even_when_only_the_var_changes(tmp_path: Path) -> None:
@@ -1135,7 +1952,21 @@ PASSES: dict[str, Edit] = {
         metric("remaining_commitment", lambda b: None),
         moved(CONTRACTS, "models/macros/contracts.yml"),
     ),
+    "an invocation name as part of another name, in a comment, a raw block or plain SQL": replaced(
+        PAYMENTS_SQL,
+        "\nselect",
+        "\n-- flags.WHICH\n{# flags.WHICH #}{% raw %}{{ flags.WHICH }}{% endraw %}"
+        "{% set my_flags_col = 'an_invocation_identifier' %}{#flags#}\nselect",
+    ),
 }
+
+
+def test_jinja_the_lexer_cannot_read_is_refused() -> None:
+    """A file whose Jinja dbt's lexer cannot read is refused, since what it runs is unknown."""
+    assert versions.invocation_reads("models/seeds/odd.csv", "a,b\n{{ x },1\n") == [
+        "models/seeds/odd.csv: its Jinja does not lex (line 2), so the gate cannot read what it"
+        " runs, which the gate refuses"
+    ]
 
 
 @pytest.mark.parametrize("name", list(PASSES))
@@ -1407,6 +2238,45 @@ def test_a_terminated_run_leaves_no_copy_behind(tmp_path: Path) -> None:
     gate.send_signal(signal.SIGTERM)
     assert gate.wait(timeout=60) == 128 + signal.SIGTERM
     assert list(scratch.glob("metric-versions-*")) == []
+
+
+def builds() -> set[str]:
+    """The entries of uv's `builds-v0`, hidden names included, where `uv run --isolated` makes
+    the throwaway environment it leaves behind when it is killed."""
+    folder = group_env.cache_dir() / "builds-v0"
+    return set(os.listdir(folder)) if folder.is_dir() else set()
+
+
+def test_the_gates_bigquery_parses_leave_no_environment_in_uvs_cache(tmp_path: Path) -> None:
+    """Two of the gate's BigQuery parses, one run to its end and one ended mid-parse (as the gate
+    ends both when the local read fails first), leave `builds-v0` as they found it. Another process
+    on the same cache may hold an entry there for a moment, so an entry new when the parses end
+    counts only while it stays, and one made after they end does not count."""
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    versions.export_working(versions.REPO, tree)
+    before = builds()
+    finished = tmp_path / "finished"
+    child = versions.start_bigquery(tree, finished)
+    try:
+        restart = partial(versions.start_bigquery, tree, finished)
+        assert versions.bigquery_refusals(child, finished, restart) == []
+    finally:
+        versions.end(child)
+    ended = tmp_path / "ended"
+    child = versions.start_bigquery(tree, ended)
+    deadline = time.monotonic() + 120
+    try:
+        while not (ended / "home").is_dir():
+            assert child.poll() is None and time.monotonic() < deadline, "the parse never started"
+            time.sleep(0.05)
+    finally:
+        versions.end(child)
+    grown = builds() - before
+    deadline = time.monotonic() + 60
+    while (grown := grown & builds()) and time.monotonic() < deadline:
+        time.sleep(0.5)
+    assert not grown, f"left in uv's builds-v0: {sorted(grown)}"
 
 
 def test_every_metric_carries_a_version(build: Build) -> None:
