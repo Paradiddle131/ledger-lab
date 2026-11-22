@@ -664,7 +664,7 @@ resource "google_bigquery_dataset_access" "foreign_views" {
   dataset_id = google_bigquery_dataset.warehouse[each.value].dataset_id
   dataset {
     dataset {
-      project_id = "someone-elses-project"
+      project_id = var.another_project
       dataset_id = google_bigquery_dataset.warehouse[each.key].dataset_id
     }
     target_types = ["VIEWS"]
