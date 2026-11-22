@@ -26,5 +26,5 @@ unit_tests:
           - {payment_key: clear, entity_id: chicago, vendor_name: PV1, vendor_organisation_name: EXAMPLE A LLC}
     expect:
       rows:
-        - {payment_key: hashed, entity_id: chicago, vendor_name: "Sgk7K1yJWY5T51xG+PufTD0lRGAoSX9Q8oA3rQv24gQ=", document_number: "6Evesw1qxBN5BfUELnC1UtsEuWB0AGcQRTEv40wjsF4=", vendor_person_key: "Sgk7K1yJWY5T51xG+PufTD0lRGAoSX9Q8oA3rQv24gQ=", vendor_organisation_name: null}
-        - {payment_key: clear, entity_id: chicago, vendor_name: "6Evesw1qxBN5BfUELnC1UtsEuWB0AGcQRTEv40wjsF4=", document_number: null, vendor_person_key: null, vendor_organisation_name: EXAMPLE A LLC}
+        - {payment_key: hashed, entity_id: chicago, vendor_name: "Sgk7K1yJWY5T51xG+PufTD0lRGAoSX9Q8oA3rQv24gQ=", document_number: "6Evesw1qxBN5BfUELnC1UtsEuWB0AGcQRTEv40wjsF4=", vendor_person_key: "Sgk7K1yJWY5T51xG+PufTD0lRGAoSX9Q8oA3rQv24gQ=", vendor_organisation_name: null}  # pragma: allowlist secret (the SHA-256 mask of an invented value)
+        - {payment_key: clear, entity_id: chicago, vendor_name: "6Evesw1qxBN5BfUELnC1UtsEuWB0AGcQRTEv40wjsF4=", document_number: null, vendor_person_key: null, vendor_organisation_name: EXAMPLE A LLC}  # pragma: allowlist secret
