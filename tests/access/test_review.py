@@ -658,6 +658,35 @@ resource "google_bigquery_dataset_access" "landed_reads_marts" {
     target_types = ["VIEWS"]
   }
 }""",
+    "another project's views authorized on a source": """
+resource "google_bigquery_dataset_access" "foreign_views" {
+  for_each   = local.aggregate_sources
+  dataset_id = google_bigquery_dataset.warehouse[each.value].dataset_id
+  dataset {
+    dataset {
+      project_id = "someone-elses-project"
+      dataset_id = google_bigquery_dataset.warehouse[each.key].dataset_id
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
+    "the aggregates views authorized on a dataset that is not their source": """
+resource "google_bigquery_dataset_access" "views_read_landed" {
+  for_each   = local.aggregate_sources
+  dataset_id = google_bigquery_dataset.warehouse["landed"].dataset_id
+  dataset {
+    dataset {
+      project_id = var.project
+      dataset_id = google_bigquery_dataset.warehouse[each.key].dataset_id
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
+    "a dataset access entry with a role and no member": """
+resource "google_bigquery_dataset_access" "nobody_reads" {
+  dataset_id = google_bigquery_dataset.warehouse["landed"].dataset_id
+  role       = "READER"
+}""",
     "a dataset role the review cannot read": """
 resource "google_bigquery_dataset_access" "agent_some_role" {
   dataset_id    = google_bigquery_dataset.warehouse["payments"].dataset_id
@@ -833,6 +862,21 @@ resource "google_bigquery_datapolicy_data_policy_iam_member" "agent_masked" {{
         "| roles/bigquerydatapolicy.maskedReader | every masking rule | declared |",
     ),
 }
+
+
+def test_a_basic_role_is_reported_as_the_value_the_entry_sends(
+    docs: dict[str, Doc], config: Config
+) -> None:
+    """`local.basic_roles` maps a predefined role to the basic form an entry sends; the review
+    reports what is sent, so a map that sends OWNER for data viewer shows data owner."""
+    changed = copy.deepcopy(config)
+    for entry in changed["locals"]:
+        if "basic_roles" in entry:
+            entry["basic_roles"] = {k: '"OWNER"' for k in entry["basic_roles"]}
+    report = render(docs, review(docs, changed))
+    line = "| roles/bigquery.dataOwner | warehouse dataset payments_aggregates | declared |"
+    assert line in sections(report)["metric-owner"]
+    assert "roles/bigquery.dataViewer" not in sections(report)["metric-owner"]
 
 
 @pytest.mark.parametrize("plant", sorted(SHOWN_PLANTS))

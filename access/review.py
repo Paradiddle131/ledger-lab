@@ -376,9 +376,17 @@ def declared_grants(
     found: dict[str, list[CloudGrant]] = {i: [] for i in [*sorted(personas), *addresses.values()]}
     acts_as: dict[str, set[str]] = {i: set() for i in found}
     aggregated = {f"{p.replace('-', '_')}_aggregates" for p in docs["aggregates"]["products"]}
+    sources = {
+        i["each.key"]: i["each.value"]
+        for i in instances("${local.aggregate_sources}", docs, config)
+    }
     for address, body in sorted(resources.items()):
         rtype, _ = address.split(".", 1)
-        if rtype == DATASET_ACCESS and set(body) - {"__is_block__"} <= ROLE_ENTRY | VIEWS_ENTRY:
+        if rtype == DATASET_ACCESS and set(body) - {"__is_block__"} in (
+            ROLE_ENTRY,
+            ROLE_ENTRY - {"for_each"},
+            VIEWS_ENTRY,
+        ):
             for instance in instances(body.get("for_each"), docs, config):
                 subbed = {
                     k: substitute(unquote(v), instance)
@@ -391,13 +399,23 @@ def declared_grants(
                     (views,) = entry["dataset"]
                     of = INDEX.search(substitute(unquote(views["dataset_id"]), instance))
                     types = [unquote(t) for t in entry["target_types"]]
-                    if of is None or of[1] not in aggregated or types != ["VIEWS"]:
+                    # The views of the lab's own aggregates dataset, on the one source the
+                    # catalogues give it, and nothing else.
+                    if (
+                        of is None
+                        or of[1] not in aggregated
+                        or unquote(views.get("project_id", "")) != "${var.project}"
+                        or types != ["VIEWS"]
+                        or on != f"warehouse dataset {sources[of[1]]}"
+                    ):
                         refused.append(f"{address}: an authorization of views it cannot attribute")
                     continue
                 role = subbed["role"]
                 basic = BASIC_ROLE.fullmatch(role)
-                if basic and basic[1] in local_map(config, "basic_roles"):
-                    role = basic[1]
+                sent = local_map(config, "basic_roles").get(basic[1]) if basic else None
+                if basic and sent in BASIC:
+                    # Reported as the role the entry sends, the value, never the map's key.
+                    role = BASIC[sent]
                 elif role in BASIC:
                     role = BASIC[role]
                 elif custom := CUSTOM_ROLE.fullmatch(role):
