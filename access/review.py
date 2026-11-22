@@ -107,6 +107,9 @@ MASKED_READER = "roles/bigquerydatapolicy.maskedReader"
 KINDS = {"human": "human persona", "agent": "agent persona", "automation": "automation account"}
 INDEX = re.compile(r'\["([^"]+)"\]')
 CUSTOM_ROLE = re.compile(r"^\$\{google_project_iam_custom_role\.([a-z_]+)\.name\}$")
+# A permission as a custom role lists it, quoted as the HCL reader returns a literal string: a
+# service, then dot-separated names of letters and digits, and nothing a template could expand.
+PERMISSION_NAME = re.compile(r'^"[a-z][a-zA-Z0-9]*(\.[a-zA-Z][a-zA-Z0-9]*)+"$')
 
 Doc = dict[str, Any]
 Config = Mapping[str, list[Any]]
@@ -374,10 +377,11 @@ def declared_grants(
             acts = True
             if custom is not None and custom[1] in custom_roles:
                 listed = custom_roles[custom[1]]["permissions"]
-                # Only a list of plain names says what the role holds; any expression may hold an
-                # acting permission, so it counts as acting.
+                # Only a list of quoted permission names says what the role holds; any other
+                # form (an expression, a template, an escape) may hold an acting permission, so
+                # it counts as acting.
                 plain = isinstance(listed, list) and all(
-                    isinstance(p, str) and "${" not in p for p in listed
+                    isinstance(p, str) and PERMISSION_NAME.fullmatch(p) for p in listed
                 )
                 acts = not plain or bool({unquote(p) for p in listed} & ACTS_AS)
             role = roles.get(custom[1], role) if custom else role

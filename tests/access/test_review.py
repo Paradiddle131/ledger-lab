@@ -832,6 +832,28 @@ resource "google_service_account_iam_member" "agent_reads_and_more" {{
         "agent",
         "`kill-switch`",
     ),
+    **{
+        f"the agent holding a custom role on the kill switch written as {form}": (
+            f"""
+resource "google_project_iam_custom_role" "reads_and_hides" {{
+  role_id     = "labReadsAndHides"
+  title       = "Reads an account and hides more"
+  permissions = ["iam.serviceAccounts.get", {element}]
+}}
+resource "google_service_account_iam_member" "agent_reads_and_hides" {{
+  service_account_id = google_service_account.kill_switch.name
+  role               = google_project_iam_custom_role.reads_and_hides.name
+  member             = "{AGENT}"
+}}""",
+            "agent",
+            "`kill-switch`",
+        )
+        for form, element in {
+            "a template directive": '"%{ if true }iam.serviceAccounts.actAs%{ endif }"',
+            "a unicode escape": '"iam.serviceAccounts.act\\u0041s"',
+            "an interpolation": '"${local.acting}"',
+        }.items()
+    },
     "the kill switch minting every persona's token": (
         """
 resource "google_service_account_iam_member" "ks_mints" {
