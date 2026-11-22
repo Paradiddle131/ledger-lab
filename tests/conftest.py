@@ -20,8 +20,8 @@ from access.compile import open_persona
 from access.identities import identity
 from agent.ask import Audit
 from agent.audit import FileLog
+from tests import options_check
 from tests.models.dbt_build import SAMPLED_SOURCES, git_out
-from tests.options_check import problems
 
 if TYPE_CHECKING:
     from tests.models.dbt_build import Build
@@ -70,9 +70,12 @@ def access() -> dict[str, Any]:
 
 def pytest_configure(config: pytest.Config) -> None:
     """Stop any run whose options let a plain run select other tests than the declared markers
-    leave (`tests/options_check.py`); it runs whatever the run selects."""
-    if found := problems(REPO, config.inipath):
+    leave, and load the plugin that fails a run in which a conftest holds `collect_ignore`
+    (`tests/options_check.py`); both run whatever the run selects."""
+    if found := options_check.problems(REPO, config.inipath):
         raise pytest.UsageError("pytest's options: " + "; ".join(found))
+    if not config.pluginmanager.is_registered(options_check):
+        config.pluginmanager.register(options_check, "tests.options_check")
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
