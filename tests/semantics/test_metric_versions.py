@@ -353,7 +353,9 @@ HIDDEN_BY_ATTRIBUTES: dict[str, tuple[dict[str, str], str | None]] = {
 
 
 @pytest.mark.parametrize("name", list(HIDDEN_BY_ATTRIBUTES))
-def test_git_attributes_cannot_hide_a_change_on_main(tmp_path: Path, name: str) -> None:
+def test_git_attributes_cannot_hide_a_change_on_main(
+    tmp_path: Path, name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """`origin/main` is read from git's objects as stored, so no export attribute leaves a file
     out of it or rewrites one."""
     extra, info = HIDDEN_BY_ATTRIBUTES[name]
@@ -371,10 +373,27 @@ def test_git_attributes_cannot_hide_a_change_on_main(tmp_path: Path, name: str) 
     if info is not None:
         (repo / ".git/info").mkdir(exist_ok=True)
         (repo / ".git/info/attributes").write_text(info)
-    versions._PUBLISHED.clear()  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(versions, "_PUBLISHED", {})
     ok, report = versions.check(repo)
     assert not ok, report
     assert lines(report) == still("fixed_award", "spend_against_award"), report
+
+
+@pytest.mark.parametrize("case", ["git attributes", "a tree git cannot list"])
+def test_a_case_that_empties_the_gates_cache_puts_it_back(tmp_path: Path, case: str) -> None:
+    """The cases that empty the gate's cache leave the cache other cases read as it was."""
+    planted = {"a-tree-id": {}}
+    with pytest.MonkeyPatch.context() as outer:
+        outer.setattr(versions, "_PUBLISHED", planted)
+        with pytest.MonkeyPatch.context() as inner:
+            if case == "git attributes":
+                test_git_attributes_cannot_hide_a_change_on_main(
+                    tmp_path, next(iter(HIDDEN_BY_ATTRIBUTES)), inner
+                )
+            else:
+                test_a_main_whose_tree_git_cannot_list_fails_the_gate(tmp_path, inner)
+        assert versions._PUBLISHED is planted  # pyright: ignore[reportPrivateUsage]
+        assert planted == {"a-tree-id": {}}
 
 
 VAR_EDITS: dict[str, Edit] = {
@@ -1643,13 +1662,35 @@ def committed(committed_once: Block) -> Block:
     return copy.deepcopy(committed_once)
 
 
+def shared_containers(one: object, other: object) -> list[int]:
+    """The ids of the lists and dicts that two trees hold as the same object."""
+    seen: set[int] = set()
+    pending = [one]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict | list) and id(value) not in seen:
+            seen.add(id(value))
+            pending += list(value.values()) if isinstance(value, dict) else value
+    found: list[int] = []
+    pending = [other]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict | list):
+            if id(value) in seen:
+                found.append(id(value))
+            pending += list(value.values()) if isinstance(value, dict) else value
+    return found
+
+
 def test_each_case_gets_its_own_copy_of_the_committed_parse(
     committed: Block, committed_once: Block
 ) -> None:
     assert committed == committed_once and committed is not committed_once
+    assert not shared_containers(committed, committed_once)
     kept = copy.deepcopy(committed_once)
     committed["metrics"][0]["config"]["meta"].clear()
     committed["semantic_models"][0]["measures"].clear()
+    committed["project_configuration"].clear()
     committed["metrics"].clear()
     assert committed_once == kept
 
