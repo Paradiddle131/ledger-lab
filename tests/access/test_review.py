@@ -799,6 +799,39 @@ resource "google_service_account_iam_member" "agent_acts_as_ks" {{
         "agent",
         "`kill-switch`",
     ),
+    "the agent holding a custom acting role on the kill switch": (
+        f"""
+resource "google_project_iam_custom_role" "reads_and_acts" {{
+  role_id     = "labReadsAndActs"
+  title       = "Reads and acts as an account"
+  permissions = ["iam.serviceAccounts.get", "iam.serviceAccounts.actAs"]
+}}
+resource "google_service_account_iam_member" "agent_reads_and_acts" {{
+  service_account_id = google_service_account.kill_switch.name
+  role               = google_project_iam_custom_role.reads_and_acts.name
+  member             = "{AGENT}"
+}}""",
+        "agent",
+        "`kill-switch`",
+    ),
+    "the agent holding a custom role on the kill switch whose permissions are an expression": (
+        f"""
+locals {{
+  more = ["iam.serviceAccounts.actAs"]
+}}
+resource "google_project_iam_custom_role" "reads_and_more" {{
+  role_id     = "labReadsAndMore"
+  title       = "Reads an account and more"
+  permissions = concat(["iam.serviceAccounts.get"], local.more)
+}}
+resource "google_service_account_iam_member" "agent_reads_and_more" {{
+  service_account_id = google_service_account.kill_switch.name
+  role               = google_project_iam_custom_role.reads_and_more.name
+  member             = "{AGENT}"
+}}""",
+        "agent",
+        "`kill-switch`",
+    ),
     "the kill switch minting every persona's token": (
         """
 resource "google_service_account_iam_member" "ks_mints" {

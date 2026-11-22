@@ -371,11 +371,15 @@ def declared_grants(
             role = unquote(substitute(unquote(body["role"]), instance))
             role = role[3:-2] if role.startswith('${"') else role
             custom = CUSTOM_ROLE.fullmatch(role)
-            acts = (
-                custom is None
-                or custom[1] not in custom_roles
-                or bool({unquote(p) for p in custom_roles[custom[1]]["permissions"]} & ACTS_AS)
-            )
+            acts = custom is None or custom[1] not in custom_roles
+            if not acts:
+                listed = custom_roles[custom[1]]["permissions"]
+                # Only a list of plain names says what the role holds; any expression may hold an
+                # acting permission, so it counts as acting.
+                plain = isinstance(listed, list) and all(
+                    isinstance(p, str) and "${" not in p for p in listed
+                )
+                acts = not plain or bool({unquote(p) for p in listed} & ACTS_AS)
             role = roles.get(custom[1], role) if custom else role
             subbed = {
                 k: substitute(unquote(v), instance) for k, v in body.items() if k != "for_each"
