@@ -35,6 +35,8 @@ def test_the_repositorys_options_pass() -> None:
         ('"-ra", "-m",', '"-ra", "-k", "not x", "-m",', "addopts"),
         ('"-ra", "-m",', '"-ra", "--deselect=tests/test_glossary.py", "-m",', "addopts"),
         ('"-ra", "-m",', '"-ra", "-mnot stack", "-m",', "addopts"),
+        ('"-ra", "-m",', '"-ra", "-k",', "addopts"),
+        ('testpaths = ["tests"]', 'testpaths = ["tests/platform"]', "testpaths"),
         (
             'testpaths = ["tests"]',
             'testpaths = ["tests"]\nnorecursedirs = ["semantics"]',
@@ -48,6 +50,8 @@ def test_the_repositorys_options_pass() -> None:
         "-k",
         "--deselect",
         "a second -m",
+        "-k for -m",
+        "testpaths narrowed",
         "norecursedirs",
         "no empty mark",
     ],
@@ -70,8 +74,16 @@ def test_another_options_file_or_a_conftests_collect_ignore_is_named(tmp_path: P
         f"pytest read its options from {repo / 'pytest.ini'}, not from {repo / 'pyproject.toml'}"
     ]
     with (repo / "tests" / "conftest.py").open("a") as file:
-        file.write('\ncollect_ignore = ["x"]\n')
+        file.write("\n# collect_ignore named in a comment only\n")
+    assert problems(repo, repo / "pyproject.toml") == []
+    with (repo / "tests" / "conftest.py").open("a") as file:
+        file.write('collect_ignore = ["x"]\n')
     assert problems(repo, repo / "pyproject.toml") == ["tests/conftest.py sets collect_ignore"]
+    (repo / "conftest.py").write_text('collect_ignore_glob: list[str] = ["tests/semantics"]\n')
+    assert problems(repo, repo / "pyproject.toml") == [
+        "conftest.py sets collect_ignore",
+        "tests/conftest.py sets collect_ignore",
+    ]
 
 
 def test_the_hook_stops_a_run_on_a_problem() -> None:

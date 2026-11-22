@@ -8,18 +8,24 @@ would prefer is refused), and those options must hold:
 - one marker expression that leaves out exactly the declared markers, each as a `not <marker>`
   term, in any order, and no other option that selects or drops tests (`-k`, `--deselect`,
   `--ignore`, a second `-m`);
-- no setting that changes what is collected (`norecursedirs`, `python_files`, `collect_ignore`
-  and the like), and no `collect_ignore` in a conftest;
+- `testpaths` holding `tests` alone, no other setting that changes what is collected
+  (`norecursedirs`, `python_files` and the like), and no conftest, at the repository's root or
+  under `tests/`, that assigns `collect_ignore` or `collect_ignore_glob`;
 - `empty_parameter_set_mark = "fail_at_collect"`, so a parametrize given an empty list fails
   collection rather than skipping its test.
-What it leaves out: a test skipped by `skipif` (it is still collected, and `-ra` names it), and
-a run given its own options on the command line (`-m`, `-k`, `-o`, `-c`), the caller's choice.
+What it leaves out: a test skipped by `skipif` (it is still collected, and `-ra` names it); a
+conftest's or plugin's collection hooks (`pytest_ignore_collect`, `pytest_collection_modifyitems`,
+a module `pytest_plugins` names), which only a reading of the code shows; and options given on
+the command line or in `PYTEST_ADDOPTS` (`-m`, `-k`, `-o`), the caller's choice. A `-c` naming
+another file is refused like any other options file.
 """
 
+import ast
 import tomllib
 from pathlib import Path
 
 PLAIN = ["-q", "--strict-markers", "--strict-config", "-ra"]
+IGNORES = {"collect_ignore", "collect_ignore_glob"}
 SETTINGS = {
     "addopts",
     "markers",
@@ -48,9 +54,27 @@ def problems(repo: Path, inipath: Path | None) -> list[str]:
             found.append("the -m expression does not leave out exactly the declared markers")
     if unknown := sorted(set(options) - SETTINGS):
         found.append(f"settings that may change what is collected: {', '.join(unknown)}")
+    if options.get("testpaths") != ["tests"]:
+        found.append(f'testpaths must be ["tests"], not {options.get("testpaths")}')
     if options.get("empty_parameter_set_mark") != "fail_at_collect":
         found.append('empty_parameter_set_mark is not "fail_at_collect"')
-    for conftest in sorted((repo / "tests").rglob("conftest.py")):
-        if "collect_ignore" in conftest.read_text():
+    conftests = [repo / "conftest.py", *sorted((repo / "tests").rglob("conftest.py"))]
+    for conftest in (c for c in conftests if c.is_file()):
+        if assigned(conftest) & IGNORES:
             found.append(f"{conftest.relative_to(repo)} sets collect_ignore")
     return found
+
+
+def assigned(module: Path) -> set[str]:
+    """The names a module assigns at any level, as Python reads it (comments do not count)."""
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(module.read_text())):
+        targets = (
+            node.targets
+            if isinstance(node, ast.Assign)
+            else [node.target]
+            if isinstance(node, ast.AnnAssign | ast.AugAssign)
+            else []
+        )
+        names |= {t.id for t in targets if isinstance(t, ast.Name)}
+    return names

@@ -350,15 +350,19 @@ def test_git_attributes_cannot_hide_a_change_on_main(
     assert lines(report) == still("fixed_award", "spend_against_award"), report
 
 
-def test_a_case_that_empties_the_gates_cache_puts_it_back(tmp_path: Path) -> None:
-    """The cases above parse `origin/main` afresh, and the cache other cases read survives them."""
+@pytest.mark.parametrize("case", ["git attributes", "a tree git cannot list"])
+def test_a_case_that_empties_the_gates_cache_puts_it_back(tmp_path: Path, case: str) -> None:
+    """The cases that empty the gate's cache leave the cache other cases read as it was."""
     planted = {"a-tree-id": {}}
     with pytest.MonkeyPatch.context() as outer:
         outer.setattr(versions, "_PUBLISHED", planted)
         with pytest.MonkeyPatch.context() as inner:
-            test_git_attributes_cannot_hide_a_change_on_main(
-                tmp_path, next(iter(HIDDEN_BY_ATTRIBUTES)), inner
-            )
+            if case == "git attributes":
+                test_git_attributes_cannot_hide_a_change_on_main(
+                    tmp_path, next(iter(HIDDEN_BY_ATTRIBUTES)), inner
+                )
+            else:
+                test_a_main_whose_tree_git_cannot_list_fails_the_gate(tmp_path, inner)
         assert versions._PUBLISHED is planted  # pyright: ignore[reportPrivateUsage]
         assert planted == {"a-tree-id": {}}
 
