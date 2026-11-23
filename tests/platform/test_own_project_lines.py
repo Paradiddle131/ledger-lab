@@ -24,10 +24,11 @@ Checked, by those cases only:
 - the line starting OWN_ANCHOR holds OWN_BEFORE once, and the condition right after it, up to
   the next `;`, read the same way, is true exactly on those cases;
 - each word of WORDS answers WORD_CASES as listed;
-- the own-environment paragraph, from the `;` after its condition to its end, is OWN_TAIL
-  exactly (what blank means, and which answer the decider prints where);
-- the paragraph starting GIVEBACK_ANCHOR holds the line WAKE_COMMENT (a wake's comment starts
-  with `🤖` and is by an author in OWNER_INPUT) and each of GIVEBACK_CONDITIONS once, and
+- the own-environment paragraph (from the one line starting OWN_ANCHOR to the next blank line)
+  is one line: OWN_ANCHOR, a space, OWN_BEFORE, that condition, then OWN_TAIL (what blank means,
+  and which answer the decider prints where);
+- the paragraph starting GIVEBACK_ANCHOR is GIVEBACK_PARAGRAPH line for line (its second line,
+  WAKE_COMMENT, says a wake's comment starts with `🤖` and is by an author in OWNER_INPUT), and
   OWNER_INPUT is the owner, member and collaborator set;
 - the reader refuses the clauses in REFUSED_CLAUSES, and SHELL_CHECK refuses the checks in
   REFUSED_CHECKS; the run helper refuses one of them before bash starts, leaving no file behind;
@@ -37,8 +38,9 @@ Checked, by those cases only:
 Not checked:
 - the wording on those lines outside the pinned phrases and the extracted condition, and the rest
   of the guardrail line's prose;
-- the give-back paragraph outside those pinned phrases, and that a wake follows it when it reads
-  an issue's comments: the rule is prose, and no code gives an item back;
+- text about the own environment or the give-back rule outside those two paragraphs;
+- that a wake follows the give-back paragraph when it reads an issue's comments: the rule is
+  prose, and no code gives an item back;
 - a `needs-gcp` label put back with no comment, which the give-back rule does not read;
 - whitespace beyond the ASCII cases above, where Python's `str.strip` and bash's `[[:space:]]`
   may differ;
@@ -76,9 +78,17 @@ WAKE_COMMENT = (
     " or a collaborator (`author_association` `OWNER`, `MEMBER` or `COLLABORATOR`, the set"
     " `platform/next_item.py` reads as owner input); a `🤖` comment by anyone else is not a wake's."
 )
-GIVEBACK_CONDITIONS = (
-    "only when both hold: the newest comment that parked it is a wake's comment and gives only",
-    "and every comment after it is a wake's comment and gives no other reason;",
+GIVEBACK_PARAGRAPH = (
+    f"{GIVEBACK_ANCHOR} at orient, a wake in the lab's own environment whose Digest says"
+    " `Mode: full` (or has no `Mode` line) lists the open `needs-gcp` issues.",
+    WAKE_COMMENT,
+    "An issue gets `ready` back in place of `needs-gcp`, with a comment saying this wake's"
+    " environment can run its GCP step, only when both hold: the newest comment that parked it is"
+    " a wake's comment and gives only the session's environment or `Mode: offline` as the reason,"
+    " and every comment after it is a wake's comment and gives no other reason; the picker can"
+    " then take it.",
+    "Any other issue keeps `needs-gcp`, one parked because the lab's own project is missing or by"
+    " a comment that is not a wake's among them, and the owner lifts it.",
 )
 NEVER_BEFORE = "- Call GCP outside this lab's own environment: while "
 NEVER_AFTER = ", where"
@@ -166,6 +176,13 @@ def line_starting(lines: list[str], anchor: str, where: str) -> str:
     found = [line for line in lines if line.startswith(anchor)]
     assert len(found) == 1, f"{where}: expected one line starting {anchor!r}, found {len(found)}"
     return found[0]
+
+
+def paragraph_at(lines: list[str], anchor: str, where: str) -> list[str]:
+    """The lines from the one line starting `anchor` up to the next blank line."""
+    start = lines.index(line_starting(lines, anchor, where))
+    end = next((i for i in range(start, len(lines)) if not lines[i].strip()), len(lines))
+    return lines[start:end]
 
 
 def between(line: str, before: str, after: str) -> str:
@@ -305,19 +322,21 @@ def test_each_word_means_what_it_says(word: str) -> None:
         assert WORDS[word](env, "X") is expected, (word, value)
 
 
-def test_the_own_environment_paragraph_ends_as_written() -> None:
-    """After its condition, the definition says what blank means and how the decider answers."""
-    line = line_starting(AUTOPILOT.read_text().splitlines(), OWN_ANCHOR, "autopilot.md")
-    rest = line.split(OWN_BEFORE, 1)[1]
-    assert rest[rest.index(";") :] == OWN_TAIL, f"expected the paragraph to end {OWN_TAIL!r}"
+def test_the_own_environment_paragraph_is_its_condition_between_pinned_words() -> None:
+    """The definition is one line: OWN_ANCHOR, OWN_BEFORE, the condition the reader checks, then
+    OWN_TAIL (what blank means and which answer the decider prints where), and nothing else."""
+    lines = paragraph_at(AUTOPILOT.read_text().splitlines(), OWN_ANCHOR, "autopilot.md")
+    assert len(lines) == 1, f"expected the own-environment paragraph on one line: {lines}"
+    line = lines[0]
+    head = f"{OWN_ANCHOR} {OWN_BEFORE}"
+    assert line.startswith(head), f"expected the paragraph to start {head!r}"
+    condition = between(line, OWN_BEFORE, ";")
+    assert line == f"{head}{condition}{OWN_TAIL}", f"expected the paragraph to end {OWN_TAIL!r}"
 
 
-def test_the_give_back_counts_only_an_owner_input_robot_comment_as_a_wake_s() -> None:
-    """The give-back rule names who writes a wake's comment, and both conditions use that term."""
-    lines = AUTOPILOT.read_text().splitlines()
-    start = lines.index(line_starting(lines, GIVEBACK_ANCHOR, "autopilot.md"))
-    paragraph = "\n".join(lines[start : lines.index("", start)])
-    assert WAKE_COMMENT in paragraph.splitlines(), f"expected the line {WAKE_COMMENT!r}"
-    for condition in GIVEBACK_CONDITIONS:
-        assert paragraph.count(condition) == 1, f"expected {condition!r} once"
+def test_the_give_back_paragraph_is_as_written() -> None:
+    """The give-back rule, a wake's comment's author set included, is GIVEBACK_PARAGRAPH line for
+    line, and the set it names is the one the picker reads as owner input."""
+    lines = paragraph_at(AUTOPILOT.read_text().splitlines(), GIVEBACK_ANCHOR, "autopilot.md")
+    assert lines == list(GIVEBACK_PARAGRAPH), "the give-back paragraph differs from the pin"
     assert frozenset({"OWNER", "MEMBER", "COLLABORATOR"}) == OWNER_INPUT
