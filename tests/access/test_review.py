@@ -171,7 +171,7 @@ def test_the_agent_account_shows_its_roles_its_reach_and_the_conflict_it_holds(
         (CLEAR, "every policy tag"),
         ("roles/datacatalog.viewer", "the policy-tag taxonomy"),
         ("roles/storage.objectUser", "the landing bucket"),
-        *{(TOKENS, f"account {p}") for p in personas},
+        *{(TOKENS, f"account {p}") for p in [*personas, "publisher"]},
     }
     assert {k for k, source in rows.items() if source == "granted by hand, not declared"} == {
         *((role, "the lab project") for role in HAND_GRANTED),
@@ -179,7 +179,7 @@ def test_the_agent_account_shows_its_roles_its_reach_and_the_conflict_it_holds(
         ("Reads the lab's spend fences (custom role)", "the lab project"),
         *HAND_GRANTED_TABLES,
     }
-    acts = ", ".join(f"`{p}`" for p in sorted(personas))
+    acts = ", ".join(f"`{p}`" for p in sorted([*personas, "publisher"]))
     assert f"- Acts as: {acts}, holding each one's grants in turn\n" in section
     assert (
         "- Acts as its own owner, `agent-operator`, and every other owner "
@@ -197,6 +197,19 @@ def test_the_agent_account_shows_its_roles_its_reach_and_the_conflict_it_holds(
         "draft ledger as `proposer`; post ledger as `approver`\n"
     ) in section
     assert "- Conflicts: none" not in section
+
+
+def test_the_publisher_writes_the_governed_copies_reads_the_marts_and_acts_as_nobody(
+    written: str,
+) -> None:
+    section = sections(written)["publisher"]
+    assert {k for k, source in roles(section).items() if source == "declared"} == {
+        ("Publishes the governed copies (custom role)", "warehouse dataset payments"),
+        ("Runs BigQuery queries (custom role)", "the lab project"),
+        ("roles/bigquery.dataViewer", "warehouse dataset intermediate"),
+    }
+    assert "- Acts as: nobody\n" in section
+    assert "- Owner: `group-controller`\n" in section
 
 
 def test_the_kill_switch_shows_its_project_roles_and_reads_nothing(written: str) -> None:
