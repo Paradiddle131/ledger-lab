@@ -49,9 +49,10 @@ them does not excuse them:
   empty part, a table of more than two parts or under a schema no server names, a column with a
   dot); two schema entries whose names are equal ignoring case; two properties of one schema whose
   names are equal ignoring case, or over one column; a property holding `properties` or `items`,
-  since the gate reads one level; two quality rules of one schema entry, or of one property, with
-  one text `id` (compared exactly), or a schema entry named `<schema>.<property>` whose rules
-  share an id with that property's, since the gate compares rules by place and id;
+  since the gate reads one level; two quality rules anywhere in the contract that the gate reads
+  under one key: one place (`<schema>` or `<schema>.<property>`, by logical names) and one `id`
+  (compared exactly), or, for rules with no id, one place and one position in their lists, since
+  the gate compares rules by that key;
 - two schema entries over one table, in one contract or across the working tree;
 - a property over a column `origin/main` classifies `personal` whose `classification` is not
   `personal`;
@@ -190,9 +191,15 @@ def parsed(path: str, text: str) -> Contract | str:
     return contract
 
 
+def rule_key(place: str, n: int, rule: dict[str, Any]) -> str:
+    """The key the gate compares a quality rule by: `<place>/<id>`, or `<place>/#<n> (no id)`
+    for the rule at position `n` of its list when it has no id."""
+    return f"{place}/{rule.get('id') or f'#{n} (no id)'}"
+
+
 def rules(contract: Contract) -> dict[str, dict[str, Any]]:
-    """Every quality rule of a schema or of one of its properties, by logical names and id:
-    `<schema>/<id>` or `<schema>.<property>/<id>`, its position when it has no id."""
+    """Every quality rule of a schema or of one of its properties, by `rule_key`, its place
+    `<schema>` or `<schema>.<property>` by logical names."""
     found: dict[str, dict[str, Any]] = {}
     for schema in contract.get("schema") or []:
         places = [(schema["name"], schema)] + [
@@ -200,7 +207,7 @@ def rules(contract: Contract) -> dict[str, dict[str, Any]]:
         ]
         for place, owner in places:
             for n, rule in enumerate(owner.get("quality") or []):
-                found[f"{place}/{rule.get('id') or f'#{n} (no id)'}"] = rule
+                found[rule_key(place, n, rule)] = rule
     return found
 
 
@@ -371,10 +378,10 @@ def normalised(contract: Contract, strict: bool) -> tuple[list[Described], list[
 
 
 def repeated_rule_keys(contract: Contract) -> list[str]:
-    """A line for each key `rules()` gives to more than one quality rule of the contract with a
-    text id: of two rules under one key only the last is compared. Two rules of one schema entry
-    or one property with one id share a key, and so do a schema entry named `<s>.<p>` and
-    property `<p>` of schema entry `<s>` holding rules with one id."""
+    """A line for each key `rule_key` gives to more than one quality rule of the contract, as
+    `rules()` reads it: of two rules under one key only the last is compared. Rules whose place
+    is not a named schema entry or property, and rules that are not mappings, are left to the
+    shape checks and the CLI's lint."""
     seen: set[str] = set()
     twice: list[str] = []
     for schema in contract.get("schema") or []:
@@ -387,17 +394,16 @@ def repeated_rule_keys(contract: Contract) -> list[str]:
         ]
         for place, owner in places:
             quality = owner.get("quality")
-            for rule in quality if isinstance(quality, list) else []:
-                rid = rule.get("id") if isinstance(rule, dict) else None
-                if not rid or not isinstance(rid, str):
+            for n, rule in enumerate(quality if isinstance(quality, list) else []):
+                if not isinstance(rule, dict):
                     continue
-                key = f"{place}/{rid}"
+                key = rule_key(place, n, rule)
                 if key in seen and key not in twice:
                     twice.append(key)
                 seen.add(key)
     return [
         f"two quality rules are both read as {key}, {NEVER}: the gate compares rules by place"
-        " and id"
+        " and id, or by place and position when a rule has no id"
         for key in twice
     ]
 
