@@ -54,7 +54,6 @@ accounts:
         view: the billing export's cost view
         permissions:
           - bigquery.tables.get
-          - bigquery.tables.getData
     # Each limit is held by a test, of the access rules in tests/platform or of the hand-granted
     # roles in tests/access/test_review.py, except the last, which says what nothing limits.
     limits:
