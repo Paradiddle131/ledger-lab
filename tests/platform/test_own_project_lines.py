@@ -24,6 +24,11 @@ Checked, by those cases only:
 - the line starting OWN_ANCHOR holds OWN_BEFORE once, and the condition right after it, up to
   the next `;`, read the same way, is true exactly on those cases;
 - each word of WORDS answers WORD_CASES as listed;
+- the own-environment paragraph, from the `;` after its condition to its end, is OWN_TAIL
+  exactly (what blank means, and which answer the decider prints where);
+- the paragraph starting GIVEBACK_ANCHOR holds the line WAKE_COMMENT (a wake's comment starts
+  with `🤖` and is by an author in OWNER_INPUT) and each of GIVEBACK_CONDITIONS once, and
+  OWNER_INPUT is the owner, member and collaborator set;
 - the reader refuses the clauses in REFUSED_CLAUSES, and SHELL_CHECK refuses the checks in
   REFUSED_CHECKS; the run helper refuses one of them before bash starts, leaving no file behind;
 - `AGENTS.md` has, under `## Guardrails`, a line starting `- **Own project only:**` holding each
@@ -32,8 +37,9 @@ Checked, by those cases only:
 Not checked:
 - the wording on those lines outside the pinned phrases and the extracted condition, and the rest
   of the guardrail line's prose;
-- the own-environment paragraph past its condition, and the paragraph that gives a `needs-gcp`
-  item back, a rule a wake follows by reading an issue's comments;
+- the give-back paragraph outside those pinned phrases, and that a wake follows it when it reads
+  an issue's comments: the rule is prose, and no code gives an item back;
+- a `needs-gcp` label put back with no comment, which the give-back rule does not read;
 - whitespace beyond the ASCII cases above, where Python's `str.strip` and bash's `[[:space:]]`
   may differ;
 - that the shell check is run, or run as the line says, by an agent or hook.
@@ -48,6 +54,7 @@ from pathlib import Path
 
 import pytest
 from gcp_project import FOREIGN, VARIABLE, lab_project_or_none
+from next_item import OWNER_INPUT
 
 REPO = Path(__file__).resolve().parents[2]
 AUTOPILOT = REPO / "docs" / "agents" / "autopilot.md"
@@ -58,6 +65,21 @@ QUEUE_ANCHOR = "**An item that turns out to need GCP or the owner:**"
 QUEUE_BEFORE = "swap `ready` and `agent:claimed` for `needs-gcp` (the step calls GCP while "
 OWN_ANCHOR = "**The lab's own environment**"
 OWN_BEFORE = "is a session where none of these holds: "
+OWN_TAIL = (
+    "; blank means empty or only whitespace, as `platform/gcp_project.py` strips it, and"
+    " `uv run python platform/gcp_project.py` prints `own` there and `elsewhere` in any other"
+    " session, never the project."
+)
+GIVEBACK_ANCHOR = "**Giving a `needs-gcp` item back:**"
+WAKE_COMMENT = (
+    "A wake's comment, here, is one that starts with `🤖` and whose author is the owner, a member"
+    " or a collaborator (`author_association` `OWNER`, `MEMBER` or `COLLABORATOR`, the set"
+    " `platform/next_item.py` reads as owner input); a `🤖` comment by anyone else is not a wake's."
+)
+GIVEBACK_CONDITIONS = (
+    "only when both hold: the newest comment that parked it is a wake's comment and gives only",
+    "and every comment after it is a wake's comment and gives no other reason;",
+)
 NEVER_BEFORE = "- Call GCP outside this lab's own environment: while "
 NEVER_AFTER = ", where"
 NEVER_INSTRUCTION = "label the item `needs-gcp` instead."
@@ -281,3 +303,21 @@ def test_each_word_means_what_it_says(word: str) -> None:
     for value, expected in WORD_CASES[word]:
         env = {} if value is None else {"X": value}
         assert WORDS[word](env, "X") is expected, (word, value)
+
+
+def test_the_own_environment_paragraph_ends_as_written() -> None:
+    """After its condition, the definition says what blank means and how the decider answers."""
+    line = line_starting(AUTOPILOT.read_text().splitlines(), OWN_ANCHOR, "autopilot.md")
+    rest = line.split(OWN_BEFORE, 1)[1]
+    assert rest[rest.index(";") :] == OWN_TAIL, f"expected the paragraph to end {OWN_TAIL!r}"
+
+
+def test_the_give_back_counts_only_an_owner_input_robot_comment_as_a_wake_s() -> None:
+    """The give-back rule names who writes a wake's comment, and both conditions use that term."""
+    lines = AUTOPILOT.read_text().splitlines()
+    start = lines.index(line_starting(lines, GIVEBACK_ANCHOR, "autopilot.md"))
+    paragraph = "\n".join(lines[start : lines.index("", start)])
+    assert WAKE_COMMENT in paragraph.splitlines(), f"expected the line {WAKE_COMMENT!r}"
+    for condition in GIVEBACK_CONDITIONS:
+        assert paragraph.count(condition) == 1, f"expected {condition!r} once"
+    assert frozenset({"OWNER", "MEMBER", "COLLABORATOR"}) == OWNER_INPUT
