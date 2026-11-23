@@ -145,6 +145,7 @@ PASSING = {
     "the table named with its server schema and in capitals": lambda c: c["schema"][0].update(
         physicalName="MAIN.Payments"
     ),
+    "two rules with no id added to one list": lambda c: two_idless_rules(c),
 }
 
 
@@ -403,10 +404,13 @@ def duplicate_rule(rule_id: str, on: str | None = None, **settings: object) -> C
     return change
 
 
-def rule_key_twin(c: Contract) -> None:
+def rule_key_twin(c: Contract, with_id: bool = True) -> None:
     """A property holding a copy of a schema rule, and a second schema entry, over a table of
-    its own, named `<schema>.<property>` and holding a copy under the same id."""
+    its own, named `<schema>.<property>` and holding a copy under the same id, or both copies
+    first in their lists with no id when `with_id` is false."""
     rule = copy.deepcopy(next(q for q in schema_of(c)["quality"] if q["id"] == HASHED))
+    if not with_id:
+        del rule["id"]
     column(c, "vendor_name")["quality"] = [copy.deepcopy(rule)]
     c["schema"].append(
         {
@@ -416,6 +420,24 @@ def rule_key_twin(c: Contract) -> None:
             "quality": [rule],
         }
     )
+
+
+def idless_twin_second(c: Contract) -> None:
+    """`rule_key_twin` with no id, each copy second in its list, after a rule with an id of its
+    own: both are read at position 1."""
+    own = copy.deepcopy(next(q for q in schema_of(c)["quality"] if q["id"] == HASHED))
+    vendor_name = column(c, "vendor_name")
+    rule_key_twin(c, with_id=False)
+    vendor_name["quality"].insert(0, {**copy.deepcopy(own), "id": "on-the-column"})
+    c["schema"][-1]["quality"].insert(0, {**own, "id": "on-the-twin"})
+
+
+def two_idless_rules(c: Contract) -> None:
+    """Two copies of a schema rule with no id added to the schema's own list, read at two
+    positions."""
+    rule = copy.deepcopy(next(q for q in schema_of(c)["quality"] if q["id"] == HASHED))
+    del rule["id"]
+    schema_of(c)["quality"] += [copy.deepcopy(rule), rule]
 
 
 def weaken_first(rule_id: str) -> Change:
@@ -511,6 +533,16 @@ REFUSED_BY_VERSION: dict[str, tuple[Change, str, list[str]]] = {
     "a schema named as a property's place, sharing a rule id with it": (
         rule_key_twin,
         f"two quality rules are both read as payments.vendor_name/{HASHED}",
+        ["2.0.0"],
+    ),
+    "a schema named as a property's place, each holding a first rule with no id": (
+        lambda c: rule_key_twin(c, with_id=False),
+        "two quality rules are both read as payments.vendor_name/#0 (no id)",
+        ["2.0.0"],
+    ),
+    "a schema named as a property's place, each holding a second rule with no id": (
+        idless_twin_second,
+        "two quality rules are both read as payments.vendor_name/#1 (no id)",
         ["2.0.0"],
     ),
     "a field nested in a column's properties": (
