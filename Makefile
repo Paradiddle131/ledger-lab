@@ -36,7 +36,7 @@ typecheck: sync
 # - `own`: the cost read (`platform/cost_check.py`), pytest, then the cost read again, in that
 #   order on one shell line. A failed read before stops pytest from running; the read after also
 #   runs after a failed pytest; the line fails if either read or pytest fails.
-# - `elsewhere` (the lab variable unset or blank, or GCP_PROJECT set): pytest alone.
+# - `elsewhere` (the lab variable unset or blank, or GCP_PROJECT non-empty): pytest alone.
 # - any other output, the empty output of a failed decider included: a message, a failure, no pytest.
 # pytest runs its tests across one worker per CPU this process may use (`-n auto`, pytest-xdist),
 # capped at one per gibibyte of available memory (tests/workers.py);

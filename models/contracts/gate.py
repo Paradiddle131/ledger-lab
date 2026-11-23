@@ -49,8 +49,10 @@ them does not excuse them:
   empty part, a table of more than two parts or under a schema no server names, a column with a
   dot); two schema entries whose names are equal ignoring case; two properties of one schema whose
   names are equal ignoring case, or over one column; a property holding `properties` or `items`,
-  since the gate reads one level; two quality rules of one schema entry, or of one property, with
-  one text `id` (compared exactly), since the gate compares rules by id;
+  since the gate reads one level; two quality rules anywhere in the contract that the gate reads
+  under one key: one place (`<schema>` or `<schema>.<property>`, by logical names) and one `id`
+  (compared exactly), or, for rules with no id, one place and one position in their lists, since
+  the gate compares rules by that key;
 - two schema entries over one table, in one contract or across the working tree;
 - a property over a column `origin/main` classifies `personal` whose `classification` is not
   `personal`;
@@ -189,9 +191,15 @@ def parsed(path: str, text: str) -> Contract | str:
     return contract
 
 
+def rule_key(place: str, n: int, rule: dict[str, Any]) -> str:
+    """The key the gate compares a quality rule by: `<place>/<id>`, or `<place>/#<n> (no id)`
+    for the rule at position `n` of its list when it has no id."""
+    return f"{place}/{rule.get('id') or f'#{n} (no id)'}"
+
+
 def rules(contract: Contract) -> dict[str, dict[str, Any]]:
-    """Every quality rule of a schema or of one of its properties, by logical names and id:
-    `<schema>/<id>` or `<schema>.<property>/<id>`, its position when it has no id."""
+    """Every quality rule of a schema or of one of its properties, by `rule_key`, its place
+    `<schema>` or `<schema>.<property>` by logical names."""
     found: dict[str, dict[str, Any]] = {}
     for schema in contract.get("schema") or []:
         places = [(schema["name"], schema)] + [
@@ -199,7 +207,7 @@ def rules(contract: Contract) -> dict[str, dict[str, Any]]:
         ]
         for place, owner in places:
             for n, rule in enumerate(owner.get("quality") or []):
-                found[f"{place}/{rule.get('id') or f'#{n} (no id)'}"] = rule
+                found[rule_key(place, n, rule)] = rule
     return found
 
 
@@ -343,7 +351,6 @@ def normalised(contract: Contract, strict: bool) -> tuple[list[Described], list[
         if sname.lower() in names:
             wrong.append(f"two schema entries are named {sname}, {NEVER}")
         names.add(sname.lower())
-        wrong += repeated_rule_ids(f"schema {sname}", schema)
         props: set[str] = set()
         columns: set[str] = set()
         for prop in schema.get("properties") or []:
@@ -363,27 +370,42 @@ def normalised(contract: Contract, strict: bool) -> tuple[list[Described], list[
                 wrong.append(f"schema {sname} has two properties named {pname}, {NEVER}")
             if column in columns:
                 wrong.append(f"schema {sname} has two properties over column {column}, {NEVER}")
-            wrong += repeated_rule_ids(f"{sname}.{pname}", prop)
             props.add(pname.lower())
             columns.add(column)
             found.append(Described(cid, sname, pname, table, column, prop.get("classification")))
+    wrong += repeated_rule_keys(contract)
     return found, wrong if strict else []
 
 
-def repeated_rule_ids(place: str, owner: dict[str, Any]) -> list[str]:
-    """A line for each quality rule id that `owner` (a schema entry or a property) holds more
-    than once: `rules()` keys rules by id, so of two rules sharing one only the last is compared."""
-    seen: set[object] = set()
-    twice: list[object] = []
-    quality = owner.get("quality")
-    for rule in quality if isinstance(quality, list) else []:
-        rid = rule.get("id") if isinstance(rule, dict) else None
-        if not rid or not isinstance(rid, str):
+def repeated_rule_keys(contract: Contract) -> list[str]:
+    """A line for each key `rule_key` gives to more than one quality rule of the contract, as
+    `rules()` reads it: of two rules under one key only the last is compared. Rules whose place
+    is not a named schema entry or property, and rules that are not mappings, are left to the
+    shape checks and the CLI's lint."""
+    seen: set[str] = set()
+    twice: list[str] = []
+    for schema in contract.get("schema") or []:
+        if not isinstance(schema, dict) or not isinstance(schema.get("name"), str):
             continue
-        if rid in seen and rid not in twice:
-            twice.append(rid)
-        seen.add(rid)
-    return [f"{place} has two quality rules with id {rid}, {NEVER}" for rid in twice]
+        places = [(schema["name"], schema)] + [
+            (f"{schema['name']}.{p['name']}", p)
+            for p in schema.get("properties") or []
+            if isinstance(p, dict) and isinstance(p.get("name"), str)
+        ]
+        for place, owner in places:
+            quality = owner.get("quality")
+            for n, rule in enumerate(quality if isinstance(quality, list) else []):
+                if not isinstance(rule, dict):
+                    continue
+                key = rule_key(place, n, rule)
+                if key in seen and key not in twice:
+                    twice.append(key)
+                seen.add(key)
+    return [
+        f"two quality rules are both read as {key}, {NEVER}: the gate compares rules by place"
+        " and id, or by place and position when a rule has no id"
+        for key in twice
+    ]
 
 
 def refusals(before: dict[str, Contract], after: dict[str, Contract]) -> dict[str, list[str]]:
