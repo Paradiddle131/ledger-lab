@@ -173,12 +173,31 @@ class ScriptedModel:
 
 
 def _said(result: Citation | Refusal) -> str:
+    """A result as the scripted model writes it: each cell as `column = value`, the cells of a row
+    joined by `, ` and the rows by `; `, each figure written plainly (`agent/integrity.py`)."""
     if isinstance(result, Citation):
+        rows = "; ".join(
+            ", ".join(
+                f"{column} = {_written(cell)}"
+                for column, cell in zip(result.columns, row, strict=True)
+            )
+            for row in result.rows
+        )
         return (
-            f"{result.metric} (version {result.version}), by the verified query {result.query}: "
-            f"{', '.join(result.columns)} = {list(result.rows)}"
+            f"{result.metric} version {result.version}, by the verified query {result.query}: "
+            f"{rows or 'no rows'}"
         )
     return f"The verified query {result.query} gave no answer: {result.reason}"
+
+
+def _written(cell: object) -> str:
+    """A cell as the scripted reply writes it: a float by its `repr`, a bool or a null as a word,
+    anything else by its `str`."""
+    if cell is None:
+        return "null"
+    if isinstance(cell, bool):
+        return "true" if cell else "false"
+    return repr(cell) if isinstance(cell, float) else str(cell)
 
 
 def model_from_config(environ: Mapping[str, str], queries: Mapping[str, VerifiedQuery]) -> Model:

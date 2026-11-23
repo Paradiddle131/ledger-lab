@@ -157,7 +157,7 @@ def test_each_number_of_a_many_row_answer_is_caught_with_a_digit_appended(
         text = perturbed(answer.text, index)
         start, end = numbers(text)[index]
         failures = trace(text, answer.citations).failures
-        assert [f.number for f in failures] == [text[start:end]], text
+        assert text[start:end] in [f.number for f in failures], text
 
 
 def test_a_perturbed_number_in_a_scripted_answer_is_caught(
@@ -322,15 +322,87 @@ def test_a_reply_the_check_cannot_read_is_withheld_and_recorded(
     assert (record["outcome"], len(record["runs"])) == ("abstained", 1)
 
 
-@pytest.mark.parametrize("form", ["\u2212{}", "-${}", "(${})", "\u2212\u20ac{}", "- {}", "USD-{}"])
+# Signs written otherwise than as an ASCII minus touching the digits: each review of the sign rule
+# found some of these, and none is read as a sign.
+UNREAD = [
+    "\u2212{}",
+    "\u2010{}",
+    "\u2013{}",
+    "\u2014{}",
+    "\u02d7{}",
+    "\u2796{}",
+    "\u2e3a{}",
+    "\u2212\u2060{}",
+    "{}-",
+    "{}\u2212",
+    "({})",
+    "( {} )",
+    "( {}",
+    "(\u200b{})",
+    "(\u2212{})",
+    "\ufe59{}\ufe5a",
+    "\uff08{}\uff09",
+    "-${}",
+    "(${})",
+    "($ {})",
+    "\u2212\u20ac{}",
+    "- {}",
+    "-\xa0{}",
+    "- USD {}",
+    "USD-{}",
+    "(USD {})",
+    "(USDEUR {})",
+    "{} USD-",
+    "-US${}",
+    "-A${}",
+    "-HK${}",
+    "-R$ {}",
+    "-Rs {}",
+    "-usd {}",
+    "-ABCDEF {}",
+    "-'{}'",
+    "-**{}**",
+    "(**{}**)",
+    "({} million)",
+    "({}%)",
+    "({}k)",
+    "minus {}",
+    "negative {}",
+    "Negative: {}",
+    "down {}",
+    "down by {}",
+    "a loss of {}",
+    "a deficit of {}",
+    "{} CR",
+    "{} DR",
+    "{} negative",
+]
+# Forms that fold (NFKC, format characters dropped) to an ASCII minus touching the digits, so are
+# read as that minus.
+FOLDED_MINUS = ["\ufe63{}", "\uff0d{}", "-\u200b{}", "-\xad{}", "-\u2060{}", "-\ufeff{}"]
+
+
+@pytest.mark.parametrize("form", UNREAD + FOLDED_MINUS)
 def test_a_sign_flipped_figure_is_withheld(as_persona: AsPersona, audit: Audit, form: str) -> None:
-    """The cited positive share written as a negative, the minus touching the digits or parted
-    from them by a currency sign, a space or a code: withheld, not answered."""
+    """The cited positive share written with a sign the check does not read, or a minus it folds
+    to: withheld, not answered."""
     share = share_of_chicago(as_persona, audit)
-    model = Saying("duplicate-payment-rate", f"The share fell to {form.format(repr(share))}.")
+    model = Saying("duplicate-payment-rate", f"The share is {form.format(repr(share))}.")
     answer = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=model)
     assert answer.text == WITHHELD
     assert records(audit)[-1]["outcome"] == "abstained"
+
+
+@pytest.mark.parametrize("form", ["{}", "{},", '"{}"', "\u2018{}\u2019", "{}!"])
+def test_a_figure_written_plainly_is_shown(as_persona: AsPersona, audit: Audit, form: str) -> None:
+    """The cited share written plainly, in quotes or before closing punctuation, is shown and the
+    turn answered."""
+    share = share_of_chicago(as_persona, audit)
+    text = f"The share is {form.format(repr(share))}."
+    model = Saying("duplicate-payment-rate", text)
+    answer = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=model)
+    assert answer.text == text
+    assert records(audit)[-1]["outcome"] == "answered"
 
 
 class TwoQueries:
@@ -446,59 +518,51 @@ def test_a_number_that_is_not_a_cell_as_written_is_reported(text: str) -> None:
 
 def test_a_version_counts_only_after_the_word_and_only_when_cited() -> None:
     citation = cited(((0.5,),), version=3)
-    assert failed_numbers("metric (version 3): 0.5", citation) == []
-    assert failed_numbers("metric (version 4): 0.5", citation) == ["4"]
+    assert failed_numbers("metric version 3: 0.5", citation) == []
+    assert failed_numbers("metric version 4: 0.5", citation) == ["4"]
     assert failed_numbers("metric 3: 0.5", citation) == ["3"]
     # The word must come right before the number, and be a word of its own.
     assert failed_numbers("version 3, then 3", citation) == ["3"]
     assert failed_numbers("subversion 3", citation) == ["3"]
 
 
-DASHES = ["-", "\u2212", "\u2010", "\u2012", "\u2013", "\u2014", "\ufe63", "\uff0d"]
+def test_an_ascii_minus_touching_the_digits_is_the_sign() -> None:
+    assert failed_numbers("it fell to -12.25", cited(((12.25,),))) == ["-12.25"]
+    assert failed_numbers("it fell to -12.25", cited(((-12.25,),))) == []
+    assert failed_numbers("it is 12.25", cited(((-12.25,),))) == ["12.25"]
 
 
-@pytest.mark.parametrize("dash", DASHES)
-def test_a_dash_before_a_number_is_its_minus(dash: str) -> None:
-    assert failed_numbers(f"it fell to {dash}12.25", cited(((12.25,),))) == [f"{dash}12.25"]
-    assert failed_numbers(f"it fell to {dash}12.25", cited(((-12.25,),))) == []
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "(12.25)",
-        "12.25-",
-        "12.25\u2212",
-        "(\u221212.25)",
-        "-$12.25",
-        "($12.25)",
-        "\u2212\u20ac12.25",
-        "- 12.25",
-        "( 12.25 )",
-        "($ 12.25)",
-        "-\xa012.25",
-        "USD-12.25",
-        "(USD 12.25)",
-        "12.25 USD-",
-        "( 12.25",
-    ],
-)
-def test_a_number_with_an_ambiguous_sign_is_reported(text: str) -> None:
-    """A dash or parenthesis parted from the digits by white space, a currency sign or code, or
-    a dash with a letter before it, is not read as a sign: the number is reported whichever sign
-    its cell has."""
+@pytest.mark.parametrize("form", UNREAD)
+def test_a_sign_the_check_does_not_read_is_reported_whichever_sign_the_cell_has(form: str) -> None:
+    """A dash other than the ASCII minus, a minus parted from the digits, a parenthesis, a
+    currency sign or code, Markdown, a suffix or a sign word: reported for either cell."""
     for cell in (12.25, -12.25):
-        (failure,) = trace(text, (cited(((cell,),)),)).failures
-        assert failure.number in ("12.25", "\u221212.25")
-        assert "sign" in failure.reason
+        assert trace(form.format("12.25"), (cited(((cell,),)),)).failures, (form, cell)
+
+
+@pytest.mark.parametrize("form", FOLDED_MINUS)
+def test_a_minus_that_folds_to_ascii_is_read_as_the_sign(form: str) -> None:
+    assert trace(form.format("12.25"), (cited(((12.25,),)),)).failures
+    assert trace(form.format("12.25"), (cited(((-12.25,),)),)).failures == ()
+
+
+def test_fullwidth_digits_fold_to_the_number() -> None:
+    assert failed_numbers("\uff11\uff12.\uff12\uff15", cited(((12.25,),))) == []
+
+
+def test_a_hyphen_is_read_only_between_two_letters() -> None:
+    assert failed_numbers("the year-to-date share is 12.25", cited(((12.25,),))) == []
+    assert failed_numbers("x -y 12.25", cited(((12.25,),))) == ["-"]
 
 
 def test_a_range_is_reported_not_matched() -> None:
-    assert failed_numbers("10-12", cited(((10, 12),))) == ["10", "12"]
+    assert failed_numbers("10-12", cited(((10, 12),))) == ["-", "12"]
 
 
-def test_a_tuple_of_figures_is_no_parenthesis_sign() -> None:
-    assert failed_numbers("[(12.25,), (2026, 3)]", cited(((12.25, 2026, 3),))) == []
+def test_a_tuple_of_figures_is_reported_for_its_parentheses() -> None:
+    """The cost of reading only plain figures: a tuple's brackets are reported too."""
+    failed = failed_numbers("[(12.25,), (2026, 3)]", cited(((12.25, 2026, 3),)))
+    assert set(failed) == {"[", "(", ")", "]"}
 
 
 def test_thousands_are_read_only_in_groups_of_three() -> None:
@@ -507,7 +571,7 @@ def test_thousands_are_read_only_in_groups_of_three() -> None:
 
 @pytest.mark.parametrize("numeral", ["\u2075\u2070", "\u00bd", "\u2460", "\u216b"])
 def test_a_numeral_that_is_no_decimal_digit_is_reported(numeral: str) -> None:
-    assert failed_numbers(f"paid {numeral}", cited(((5.0,),))) == list(numeral)
+    assert set(numeral) <= set(failed_numbers(f"paid {numeral}", cited(((5.0,),))))
 
 
 def test_a_bool_cell_is_no_number() -> None:
@@ -519,15 +583,19 @@ def test_a_text_cell_is_set_aside_only_where_it_is_written_whole() -> None:
     # Not as the whole or the fraction of a decimal number.
     assert failed_numbers("the total was 12.25", cited((("12", 25),))) == ["12.25"]
     assert failed_numbers("the total was 0.12", cited((("12", 0),))) == ["0.12"]
+    # A minus before a text cell's whole text is not dropped with it.
+    assert failed_numbers("the total was -12.25", cited((("12.25",),))) == ["-"]
 
 
 def test_a_cell_that_is_not_a_number_covers_only_its_own_text() -> None:
     when = datetime(2026, 10, 1, 0, 0)  # noqa: DTZ001 - the engine's naive timestamp
     citation = cited((("payments-over-25k", when, 0.0),))
-    assert failed_numbers(f"payments-over-25k {when} {when!r} 0", citation) == []
-    assert failed_numbers("payments-over-26k", citation) == ["26"]
+    assert failed_numbers(f"payments-over-25k {when} 0", citation) == []
+    # Its `repr` is not set aside, and its parentheses are reported.
+    assert "(" in failed_numbers(f"{when!r}", citation)
+    assert failed_numbers("payments-over-26k", citation) == ["-", "26"]
     # The zeros of the time are the cell 0.0; the date is no cell's text.
-    assert failed_numbers("2026-10-02 00:00:00", citation) == ["2026", "10", "02"]
+    assert failed_numbers("2026-10-02 00:00:00", citation) == ["-", "-", "2026", "10", "02"]
 
 
 def test_a_run_without_freshness_traces_no_number() -> None:
@@ -536,9 +604,10 @@ def test_a_run_without_freshness_traces_no_number() -> None:
     assert (failure.number, failure.query) == ("0.5", "invented")
     assert "freshness" in failure.reason
     assert failed_numbers("payments-over-25k", cited((("payments-over-25k",),), fresh=None)) == [
-        "25"
+        "-",
+        "25",
     ]
-    assert failed_numbers("(version 3)", cited(((0.5,),), fresh=None)) == ["3"]
+    assert failed_numbers("version 3", cited(((0.5,),), fresh=None)) == ["3"]
 
 
 def test_no_citation_traces_no_number() -> None:
