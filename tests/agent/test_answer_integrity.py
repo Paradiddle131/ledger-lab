@@ -376,6 +376,11 @@ UNREAD = [
     "{} CR",
     "{} DR",
     "{} negative",
+    "{} million",
+    "{} bn",
+    "{}k",
+    "{} percent",
+    "{} per cent",
 ]
 # Forms that fold (NFKC, format characters dropped) to an ASCII minus touching the digits, so are
 # read as that minus.

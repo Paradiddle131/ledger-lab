@@ -38,6 +38,8 @@ What `trace` reads and checks: it accepts only figures written plainly, and repo
   or after such a word and one of `LINKS` (`a loss of`), or right before a word of `SIGN_AFTER`
   (`CR`, `DR`), is reported; words are compared casefolded, their quotes and closing punctuation
   stripped;
+- a number right before a word of `SCALE_AFTER` (`million`, `bn`, `k`, `percent`, `per`, `bps`,
+  `times`) is reported, since its cell carries no such scale or unit;
 - a number whose value cannot be read (an exponent past the decimal context's range) is reported;
 - a number written right after the word `version` and white space is traced when it equals the
   version of a cited run;
@@ -66,7 +68,8 @@ Stated limits:
 - plain figures only: an honest reply that writes a figure with a currency sign, in parentheses or
   a tuple, in Markdown, or beside any character outside the allowed set is withheld too;
 - a sign or a direction written in words other than the sign words (`fell by`, `a decrease of`,
-  `the opposite of`) is not read;
+  `the opposite of`), and a scale or unit written in words other than the scale words (`lakh`,
+  `crore`, `dozen`), are not read;
 - a number written in words (`forty-two million`) is not read, and passes on a turn whose reply
   is not withheld for another reason;
 - the question must be a verified question's own wording, as `same` compares it: a paraphrase is
@@ -133,8 +136,34 @@ SIGN_BEFORE = frozenset(
     }
 )
 LINKS = frozenset({"of", "by", "at"})
-# Words that give the number before them a sign.
+# Words that give the number before them a sign, or a scale or unit its cell does not carry.
 SIGN_AFTER = frozenset({"cr", "dr", "negative", "debit", "deficit", "overdrawn", "owed"})
+SCALE_AFTER = frozenset(
+    {
+        "hundred",
+        "hundreds",
+        "thousand",
+        "thousands",
+        "million",
+        "millions",
+        "billion",
+        "billions",
+        "trillion",
+        "trillions",
+        "k",
+        "m",
+        "mm",
+        "mn",
+        "b",
+        "bn",
+        "percent",
+        "pct",
+        "per",
+        "bp",
+        "bps",
+        "times",
+    }
+)
 # The schema names `agent/ask.py`'s tool sets on the search path, and no other.
 SCHEMA = re.compile(r"[a-z_][a-z0-9_]*")
 # What stands in for each character of a cell's own text once it is set aside.
@@ -257,6 +286,12 @@ def _signed(folded: str, start: int, end: int) -> bool:
     return bool(after) and after[0] in SIGN_AFTER
 
 
+def _scaled(folded: str, end: int) -> bool:
+    """Whether a word of `SCALE_AFTER` comes right after the number ending at `folded[end]`."""
+    after = _words(folded[end:])
+    return bool(after) and after[0] in SCALE_AFTER
+
+
 def _joined(text: str, start: int, end: int) -> bool:
     """Whether the number at `text[start:end]` is joined to a letter, digit or `_`, or follows a
     `.` or `,` with no space."""
@@ -296,6 +331,10 @@ def trace(text: str, citations: Sequence[Citation]) -> Trace:
             continue
         if _signed(folded, start, end):
             reason = "a word beside the number gives it a sign the check does not read"
+            failures.append(Failure(number, None, reason))
+            continue
+        if _scaled(folded, end):
+            reason = "a word after the number gives it a scale or unit the check does not read"
             failures.append(Failure(number, None, reason))
             continue
         try:
