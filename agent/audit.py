@@ -38,6 +38,13 @@ in this order, holding an exclusive `flock` on the log file:
   the `fsync` raises, it truncates the log back to its length before the append, removes the
   position's file of kept values, tries to `fsync` the folder and raises.
 
+`FileLog.purge(before)`, under the same `flock`, refuses a missing log file, a log whose chain
+does not verify and, once the log holds a record, a missing folder of kept values or one that is a
+link or open to others, and removes the file of kept values of every record whose `at` is before
+`before`, and of every approval naming a proposal so removed, then `fsync`s the folder; the record
+lines stay, so the chain and the links verify as before, and no seal of a removed position can be
+opened any more (`agent/sessions.py`'s `purge` calls it with the transcripts' retention).
+
 Stated limits of the writer: the lock is advisory, so it keeps one writer at a time only among
 writers that take it; the folder's `fsync` after a removal is tried and its failure not raised, so
 the removal may not survive a crash; when a clean-up step itself raises (the truncation, its
@@ -58,7 +65,8 @@ import os
 import re
 import secrets
 import stat
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -363,6 +371,15 @@ class AuditLog(Protocol):
         salt and value of each of its seals by field path; return the record, or raise."""
         ...
 
+    def records(self) -> list[dict[str, Any]]:
+        """The log's records in order, its chain verified; raise when it cannot be read."""
+        ...
+
+    def turn(self, persona: str) -> AbstractContextManager[None]:
+        """Held for the whole of one of `persona`'s turns, so the persona's turns run one at a
+        time and each counts the records of those before it; raise when it cannot be held."""
+        ...
+
 
 def _read_all(fd: int, size: int) -> bytes:
     chunks, offset = [], 0
@@ -430,6 +447,36 @@ class FileLog:
         finally:
             os.close(fd)
 
+    def records(self) -> list[dict[str, Any]]:
+        """The log's records under a shared `flock`, refusing a torn last line or a chain that does
+        not verify; a log not yet written holds none."""
+        try:
+            fd = os.open(self.path, os.O_RDONLY)
+        except FileNotFoundError:
+            return []
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            records = read_log(_read_all(fd, os.fstat(fd).st_size))
+            verify_chain(records)
+            return records
+        finally:
+            os.close(fd)
+
+    @contextlib.contextmanager
+    def turn(self, persona: str) -> Iterator[None]:
+        """An exclusive `flock` on the persona's lock file, held while the block runs: one file per
+        persona, named by the SHA-256 of its id, in an owner-only folder beside the log."""
+        folder = self.path.with_name(f"{self.path.name}.turns")
+        with contextlib.suppress(FileExistsError):
+            folder.mkdir(mode=0o700)
+        name = hashlib.sha256(persona.encode("utf-8")).hexdigest()
+        fd = os.open(folder / name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
     def _folder(self) -> None:
         """Create the folder of kept values owner-only, or refuse one that is a link or whose mode
         grants anything to group or others."""
@@ -468,6 +515,44 @@ class FileLog:
             finally:
                 self._forget(seq)
             raise
+
+    def purge(self, before: datetime) -> list[int]:
+        """Remove the kept values and salts of every record written before `before`, and of every
+        approval naming a proposal so removed, since its `seen` holds that proposal's draft salt;
+        the record lines stay, so the chain and the links still verify. Holds the log's `flock`,
+        and returns the positions whose file it removed.
+
+        It refuses, removing nothing: a log file that does not exist (`FileNotFoundError`, and it
+        creates none), a log whose chain does not verify, and, for a log holding a record, a
+        folder of kept values that does not exist, is a link or is open to group or others. A
+        folder that exists but belongs to another log is not told apart: its files are removed by
+        position.
+        """
+        fd = os.open(self.path, os.O_RDWR | os.O_APPEND)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            records = read_log(_read_all(fd, os.fstat(fd).st_size))
+            verify_chain(records)
+            if records:
+                mode = os.lstat(self.kept).st_mode
+                if not stat.S_ISDIR(mode) or stat.S_IMODE(mode) & 0o077:
+                    raise KeptFolderRefused("the folder of kept values is a link or open to others")
+            expired = {r["seq"] for r in records if instant(r["at"]) < before}
+            expired |= {
+                r["seq"]
+                for r in records
+                if r["kind"] == "approval" and r["proposal"]["seq"] in expired
+            }
+            removed = []
+            for seq in sorted(expired):
+                with contextlib.suppress(FileNotFoundError):
+                    (self.kept / f"{seq}.json").unlink()
+                    removed.append(seq)
+            if removed:
+                self._sync_folder()
+            return removed
+        finally:
+            os.close(fd)
 
     def _forget(self, seq: int) -> None:
         """Remove the kept values of a position whose record was not written, then try to `fsync`

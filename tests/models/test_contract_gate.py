@@ -9,6 +9,7 @@ Every contract here is the committed one changed inside the test, in a throwaway
 import copy
 import re
 import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -387,6 +388,45 @@ def duplicate_schema(name: str) -> Change:
     return change
 
 
+def duplicate_rule(rule_id: str, on: str | None = None, **settings: object) -> Change:
+    """A copy of the schema's quality rule `rule_id`, changed by `settings`, added under the
+    same id to the schema, or to property `on` beside a copy of its own."""
+
+    def change(c: Contract) -> None:
+        copied = copy.deepcopy(next(q for q in schema_of(c)["quality"] if q["id"] == rule_id))
+        copied.update(settings)
+        if on is None:
+            schema_of(c)["quality"].append(copied)
+        else:
+            column(c, on)["quality"] = [copy.deepcopy(copied), copied]
+
+    return change
+
+
+def rule_key_twin(c: Contract) -> None:
+    """A property holding a copy of a schema rule, and a second schema entry, over a table of
+    its own, named `<schema>.<property>` and holding a copy under the same id."""
+    rule = copy.deepcopy(next(q for q in schema_of(c)["quality"] if q["id"] == HASHED))
+    column(c, "vendor_name")["quality"] = [copy.deepcopy(rule)]
+    c["schema"].append(
+        {
+            "name": "payments.vendor_name",
+            "physicalName": "payee_rules",
+            "properties": [{"name": "k", "logicalType": "string", "physicalType": "VARCHAR"}],
+            "quality": [rule],
+        }
+    )
+
+
+def weaken_first(rule_id: str) -> Change:
+    """The first of the schema's quality rules with id `rule_id` weakened to `select 0`."""
+
+    def change(c: Contract) -> None:
+        next(q for q in schema_of(c)["quality"] if q["id"] == rule_id)["query"] = "select 0"
+
+    return change
+
+
 IN = "origin/main"
 SWAPPED = "payments's payments.payee (payments.vendor_name)"
 REFUSED_BY_VERSION: dict[str, tuple[Change, str, list[str]]] = {
@@ -457,6 +497,21 @@ REFUSED_BY_VERSION: dict[str, tuple[Change, str, list[str]]] = {
         duplicate("amount", physicalType="FLOAT64", required=False),
         "schema payments has two properties named amount",
         ["1.0.0"],
+    ),
+    "a second quality rule with a rule's id": (
+        duplicate_rule(HASHED),
+        f"two quality rules are both read as payments/{HASHED}",
+        ["1.0.0", "2.0.0"],
+    ),
+    "two quality rules with one id on a property": (
+        duplicate_rule(HASHED, on="vendor_name"),
+        f"two quality rules are both read as payments.vendor_name/{HASHED}",
+        ["1.0.0", "2.0.0"],
+    ),
+    "a schema named as a property's place, sharing a rule id with it": (
+        rule_key_twin,
+        f"two quality rules are both read as payments.vendor_name/{HASHED}",
+        ["2.0.0"],
     ),
     "a field nested in a column's properties": (
         nest("properties"),
@@ -730,6 +785,7 @@ def with_id(text: str, cid: object) -> str:
 
 NO_TEXT_ID: dict[str, tuple[object, str]] = {
     "no id": (None, "is unreadable: no contract id"),
+    "an empty id": ("", "is unreadable: no contract id"),
     "a number as id": (42, "is unreadable: its contract id 42 is not text"),
     "a list as id": (["x"], "is unreadable: its contract id ['x'] is not text"),
 }
@@ -770,15 +826,33 @@ def test_a_schema_rename_hides_no_break_and_in_place_each_needs_its_line(
 ) -> None:
     retyped = found(bigquery_types)
     assert len(retyped) == 16
-    ok, report = gate_on(
-        published_repo, both(bigquery_types, declaring("2.0.0", listed(retyped[1:])))
-    )
-    assert not ok
-    assert f"payments: {retyped[0]} (not listed in {gate.DECLARED})" in report
+    for n, left_out in enumerate(retyped):
+        others = retyped[:n] + retyped[n + 1 :]
+        ok, report = gate_on(
+            published_repo, both(bigquery_types, declaring("2.0.0", listed(others)))
+        )
+        assert not ok, left_out
+        assert f"payments: {left_out} (not listed in {gate.DECLARED})" in report, report
+        assert report.count("not listed in") == 1, report
     renamed = both(rename_schema("payments_v2"), bigquery_types)
     ok, report = gate.check(with_files(published_repo, {PATH: declared(renamed, "2.0.0")}))
     assert not ok
     assert "schema payments is gone or renamed, which no version can declare" in report
+
+
+def test_a_rule_copied_under_its_id_then_the_original_weakened_fails_the_gate(
+    tmp_path: Path,
+) -> None:
+    """Of two rules sharing an id only the last is compared, so with a copy appended on
+    origin/main, weakening the original, the earlier of the two, changes no compared rule; the
+    copy is refused in the working tree while origin/main holds a contract."""
+    original = next(q for q in schema_of(committed())["quality"] if q["id"] == HASHED)
+    repo = git_repo(tmp_path, {PATH: changed(duplicate_rule(HASHED))})
+    weakened = both(duplicate_rule(HASHED), weaken_first(HASHED))
+    ok, report = gate.check(with_files(repo, {PATH: changed(weakened)}))
+    assert original["query"] != "select 0"
+    assert not ok, report
+    assert f"payments: two quality rules are both read as payments/{HASHED}" in report, report
 
 
 @pytest.fixture(scope="module")
@@ -825,6 +899,42 @@ def test_a_merged_major_versions_list_excuses_no_later_break(merged_repo: Path, 
     change, passes = AFTER_MERGE[name]
     ok, report = gate.check(with_files(merged_repo, {PATH: changed(change)}))
     assert ok == passes, report
+
+
+def test_main_returns_failure_on_a_break_or_when_it_cannot_compare(
+    published_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`main` returns 1 on a break or when the gate cannot compare, 0 on a pass."""
+    check = gate.check
+    with_files(published_repo, {PATH: CONTRACT.read_text()})
+    monkeypatch.setattr(gate, "check", lambda: check(published_repo))
+    assert gate.main() == 0
+    assert "no change breaks a consumer" in capsys.readouterr().out
+    with_files(published_repo, {PATH: changed(drop("amount"))})
+    assert gate.main() == 1
+    assert "break consumers" in capsys.readouterr().err
+
+    def cannot() -> tuple[bool, str]:
+        raise gate.GateError("origin/main is not fetched")
+
+    monkeypatch.setattr(gate, "check", cannot)
+    assert gate.main() == 1
+    assert "contract: origin/main is not fetched" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("change", "status"), [(None, 0), (drop("amount"), 1)])
+def test_the_gate_script_exits_with_failure_on_a_break(
+    tmp_path: Path, change: Change | None, status: int
+) -> None:
+    """`python models/contracts/gate.py`, what `make contract` runs, exits with `main`'s status:
+    the script, copied from this tree into a clone, run against that clone's origin/main."""
+    repo = git_repo(tmp_path, {PATH: CONTRACT.read_text()})
+    script = repo / "models/contracts/gate.py"
+    script.write_text(Path(gate.__file__).read_text())
+    with_files(repo, {PATH: CONTRACT.read_text() if change is None else changed(change)})
+    run = subprocess.run([sys.executable, str(script)], cwd=repo, capture_output=True, text=True)
+    assert run.returncode == status, run.stdout + run.stderr
+    assert ("break consumers" in run.stderr) == bool(status), run.stdout + run.stderr
 
 
 GIT = ["git"]

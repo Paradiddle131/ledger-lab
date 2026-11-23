@@ -5,8 +5,9 @@
 # project (a build does; `dbt debug` does not).
 # `bigquery`: chosen when LEDGER_LAB_GCP_PROJECT is set and the session carries no GCP_PROJECT,
 # whose credential is another lab's (`platform/gcp_project.py`); needs `uv sync --group bigquery`;
-# every job is capped by maximum_bytes_billed; every model and seed is built in one dataset,
-# `intermediate`, which platform/gcp/warehouse.tf declares. In such a session an explicit
+# every job is capped by maximum_bytes_billed; a model or seed is built in the dataset
+# `intermediate`, which platform/gcp/warehouse.tf declares, unless dbt_project.yml routes its
+# folder to another. In such a session an explicit
 # `--target bigquery` names a method dbt refuses when it reads the profile, before any
 # connection. Outside such a session, while LEDGER_LAB_BQ_LOCATION, with surrounding whitespace
 # trimmed, is not exactly one of the free-tier regions listed in the method line (lower case; unset

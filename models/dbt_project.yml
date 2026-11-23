@@ -34,11 +34,13 @@ vars:
     reporting_currency: EUR
     constant_rates_on: "2023-12-29"
 
-# On BigQuery every model and seed is built in the profile's dataset, `intermediate` (declared in
-# platform/gcp/warehouse.tf), the data products' marts among them: the entity-scoped `payments`
-# dataset takes its table only with its row access policies, which the models do not create yet,
-# and routing a node to another dataset needs a schema-name macro, which the metric versions gate
-# (semantics/versions.py) refuses.
+# On BigQuery a model or seed is built in the profile's dataset, `intermediate`, unless its folder
+# sets `+schema` below: the group totals' folder builds in the `group_totals` dataset (both declared
+# in platform/gcp/warehouse.tf). The project's `generate_schema_name` macro takes that schema on
+# BigQuery and keeps the profile's schema on the local engine; the metric versions gate
+# (semantics/versions.py) allows the macro only as its own copy, and each `+schema` only as its
+# `ROUTES` give it. The payments mart stays in `intermediate`: its dataset takes the table only with
+# its row access policies, which the models do not create yet.
 models:
   ledger_lab:
     +materialized: view
@@ -50,5 +52,7 @@ models:
       +materialized: table
     marts:
       +materialized: table
+      group_totals:
+        +schema: group_totals
     reconciliations:
       +materialized: table

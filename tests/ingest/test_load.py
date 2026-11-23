@@ -878,7 +878,7 @@ def test_a_one_row_query_answered_with_another_number_of_rows_is_refused(
 def test_a_query_outside_the_lab_project_is_refused_before_any_call(env: dict[str, str]) -> None:
     bq = Bq()
     for ask in (counts, digest, lambda n, e, r: distinct_values(n, "vendor_name", e, r)):
-        with pytest.raises(LoadError, match="belongs to another lab"):
+        with pytest.raises(LoadError, match="may belong to another lab"):
             ask("chicago-contracts", env, bq)
     assert bq.calls == []
 
@@ -1158,6 +1158,19 @@ def test_a_loaded_table_matches_its_local_file_only_when_it_holds_the_same_rows(
     bq = Bq()
     bq.tables["chicago_contracts"] = landed_table(tmp_path, mutate(list(ROWS)), "loaded")
     assert check_table("chicago-contracts", local, ENV, bq) == why
+
+
+def test_the_live_comparison_in_another_labs_session_makes_no_call(tmp_path: Path) -> None:
+    """With both project variables set, the live comparison's first read, the table's metadata,
+    is refused through `lab`, so `check_table` answers not loaded and `bq` is never called."""
+    bq = Bq()
+    bq.tables["chicago_contracts"] = landed_table(tmp_path, ROWS, "loaded")
+    env = {**ENV, "GCP_PROJECT": "another-lab"}
+    why = check_table("chicago-contracts", landed_table(tmp_path, ROWS), env, bq)
+    assert why is not None
+    assert why.startswith("not loaded: LoadError"), why
+    assert "another lab" in why, why
+    assert bq.calls == []
 
 
 def test_a_digest_tells_a_cell_from_its_neighbour_and_a_null_from_text(tmp_path: Path) -> None:

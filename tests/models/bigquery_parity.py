@@ -1,7 +1,8 @@
 """The BigQuery build against a local build on the same landing, relation by relation.
 
-For each relation in the local DuckDB file's `main` schema or in the BigQuery dataset the profile
-builds every model and seed in (`intermediate`), each engine is asked, by one query apiece, for the
+For each relation in the local DuckDB file's `main` schema or in one of the BigQuery datasets the
+build writes (the profile's `intermediate`, and each dataset of the metric versions gate's
+routing, `ROUTES` in semantics/versions.py), each engine is asked, by one query apiece, for the
 row count and a digest: the MD5 of every row's canonical text, sorted and joined, then hashed
 again, so two relations with the same digest hold the same multiset of canonical rows whatever
 their order, short of an MD5 collision. The column names, in order, and each column's pair of type
@@ -21,8 +22,10 @@ engine and type. A text cell that is U+001E alone has the same text as a null, a
 a text cell can shift where one cell ends and the next begins, so rows that differ only so can
 share a digest; the comparison does not look for either character.
 
-A relation matches when it is on both sides, its column names are the same in the same order,
-every column's pair of families is one of `SAME_FAMILY`, and its row count and digest are equal.
+A BigQuery relation is matched to the local one of its name, whichever of those datasets holds it;
+a name listed in more than one of them differs. A relation matches when it is on both sides, its
+column names are the same in the same order, every column's pair of families is one of
+`SAME_FAMILY`, and its row count and digest are equal.
 So types are compared by family, not by width, precision or scale (DuckDB `DECIMAL(28,6)` and
 BigQuery `NUMERIC` match), and floats are compared to six decimal places. The run fails when any
 relation differs or is on one side only, and when no relation is on both sides.
@@ -51,9 +54,12 @@ import duckdb
 
 from ingest.bucket import lab_project
 from ingest.load import location
+from semantics.versions import ROUTES
 
-# The one dataset models/profiles.yml builds every model and seed in on BigQuery.
+# The dataset models/profiles.yml builds a model or seed in on BigQuery when no route names another.
 DATASET = "intermediate"
+# Every dataset the BigQuery build writes models and seeds in.
+DATASETS = (DATASET, *sorted({route.dataset for route in ROUTES.values()}))
 # The pairs of cell families (local, BigQuery) a column may have and still match: the same family,
 # and DuckDB's TIMESTAMP against BigQuery's TIMESTAMP, the two spellings the build produces for the
 # UK files' publication times, whose local value holds the time in UTC. Any other pair, a DuckDB
@@ -185,19 +191,24 @@ def bq(project: str, where: str, *command: str) -> str:
     return run.stdout
 
 
-def bigquery_relations(project: str, where: str) -> list[str]:
-    """The relations `bq ls` lists in the dataset the profile builds in."""
-    answer = bq(project, where, "--format=json", "ls", "--max_results=1000", DATASET)
-    return [str(table["tableReference"]["tableId"]) for table in json.loads(answer or "[]")]
+def bigquery_relations(project: str, where: str) -> dict[str, list[str]]:
+    """Each relation `bq ls` lists in the datasets the build writes, with the datasets that
+    hold one of its name."""
+    found: dict[str, list[str]] = {}
+    for dataset in DATASETS:
+        answer = bq(project, where, "--format=json", "ls", "--max_results=1000", dataset)
+        for table in json.loads(answer or "[]"):
+            found.setdefault(str(table["tableReference"]["tableId"]), []).append(dataset)
+    return found
 
 
-def bigquery_columns(project: str, where: str, relation: str) -> list[Column]:
-    shown = json.loads(bq(project, where, "--format=json", "show", f"{DATASET}.{relation}"))
+def bigquery_columns(project: str, where: str, dataset: str, relation: str) -> list[Column]:
+    shown = json.loads(bq(project, where, "--format=json", "show", f"{dataset}.{relation}"))
     return [Column(str(f["name"]), str(f["type"])) for f in shown["schema"]["fields"]]
 
 
 def bigquery_digest(
-    project: str, where: str, relation: str, columns: Sequence[Column]
+    project: str, where: str, dataset: str, relation: str, columns: Sequence[Column]
 ) -> tuple[int, str]:
     answer = bq(
         project,
@@ -207,7 +218,7 @@ def bigquery_digest(
         "query",
         "--use_legacy_sql=false",
         f"--maximum_bytes_billed={CAP}",
-        bigquery_digest_sql(DATASET, relation, columns),
+        bigquery_digest_sql(dataset, relation, columns),
     )
     row = json.loads(answer)[0]
     return int(row["n"]), str(row["d"])
@@ -247,8 +258,12 @@ def main(argv: Sequence[str]) -> int:
         for name in sorted(set(local) ^ set(remote)):
             differ += 1
             print(f"{name}: only {'local' if name in local else 'on BigQuery'}; DIFFER")
-        for name in sorted(set(local) & set(remote)):
-            columns = bigquery_columns(project, where, name)
+        for name in sorted(n for n in set(local) & set(remote) if len(remote[n]) > 1):
+            differ += 1
+            print(f"{name}: in {', '.join(remote[name])} on BigQuery; DIFFER")
+        for name in sorted(n for n in set(local) & set(remote) if len(remote[n]) == 1):
+            (dataset,) = remote[name]
+            columns = bigquery_columns(project, where, dataset, name)
             reasons = []
             if [c.name for c in columns] != [c.name for c in local[name]]:
                 reasons.append("column names or their order")
@@ -257,7 +272,7 @@ def main(argv: Sequence[str]) -> int:
             here = db.execute(duckdb_digest_sql(name, local[name])).fetchone()
             assert here is not None
             mine = (int(here[0]), str(here[1]))
-            there = bigquery_digest(project, where, name, columns) if not reasons else None
+            there = bigquery_digest(project, where, dataset, name, columns) if not reasons else None
             if there is not None and mine[0] != there[0]:
                 reasons.append("row count")
             if there is not None and mine[1] != there[1]:
@@ -268,7 +283,7 @@ def main(argv: Sequence[str]) -> int:
                 {f"{a.type}~{b.type}" for a, b in zip(local[name], columns, strict=False)}
             )
             print(
-                f"{DATASET}.{name}: rows {mine[0]} local, {there[0] if there else '-'} BigQuery;"
+                f"{dataset}.{name}: rows {mine[0]} local, {there[0] if there else '-'} BigQuery;"
                 f" digest {mine[1]} local, {there[1] if there else '-'} BigQuery;"
                 f" {'DIFFER (' + '; '.join(reasons) + ')' if reasons else 'MATCH'}"
                 f" (types {', '.join(types)})"
