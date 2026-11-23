@@ -2,8 +2,8 @@
 
 With no lab project the lab spends nothing by construction: the check says so and calls no GCP
 tool. In a session that carries another lab's `GCP_PROJECT` it calls no GCP tool either, since the
-credential is that lab's, and fails, since it has read nothing that shows the lab's cost is $0.00.
-With `LEDGER_LAB_GCP_PROJECT` set and no `GCP_PROJECT` it
+credential may be that lab's, and fails, since it has read nothing that shows the lab's cost is
+$0.00. With `LEDGER_LAB_GCP_PROJECT` set and no `GCP_PROJECT` it
 - reads this month's cost, credits included, and the newest export time from the Cloud Billing
   export through the view `LEDGER_LAB_BILLING_EXPORT` names (`dataset.table` in the lab project;
   the agent account reads the export only through it) through `bq`:
