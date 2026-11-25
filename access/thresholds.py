@@ -97,12 +97,14 @@ class View:
                 f" options(privacy_policy = '{json.dumps(rule, sort_keys=True)}')"
                 f" as select {shown} from {source}{where}"
             )
+        # BigQuery's HAVING reads a bare name as the select list's alias first, so `max(payees)`
+        # beside `max(payees) as payees` is an aggregate of an aggregate: the name is the source's.
         keys = ", ".join(self.group_by)
         sums = "".join(f", sum({c}) as {c}" for c in self.sums)
         return (
             f"create or replace view {view} as select {keys}{sums},"  # noqa: S608
-            f" max({self.units_of}) as {self.units} from {source}{where}"
-            f" group by {keys} having max({self.units_of}) >= {self.minimum}"
+            f" max({self.units_of}) as {self.units} from {source} as source{where}"
+            f" group by {keys} having max(source.{self.units_of}) >= {self.minimum}"
         )
 
 
