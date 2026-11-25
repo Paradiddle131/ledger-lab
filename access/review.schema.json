@@ -70,6 +70,30 @@
               }
             }
           },
+          "custom_table_roles_granted_by_hand": {
+            "description": "The lab project's custom roles granted on one table or view outside platform/gcp, each with the permissions it holds and naming what the table is.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "title", "created", "view", "permissions"],
+              "properties": {
+                "id": {"type": "string", "pattern": "^[a-z][A-Za-z]+$"},
+                "title": {"$ref": "#/$defs/text"},
+                "created": {"enum": ["declared", "by hand"]},
+                "view": {
+                  "description": "The table or view, by what it is, not its configured name, which comes from the environment.",
+                  "$ref": "#/$defs/text"
+                },
+                "permissions": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {"type": "string", "pattern": "^[a-z]+\\.[A-Za-z.]+$"}
+                }
+              }
+            }
+          },
           "limits": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/text"}}
         }
       }
