@@ -16,7 +16,14 @@ from typing import Any
 
 import pytest
 import yaml
-from cost_check import BILLING_PERMISSIONS, KILL_SWITCH_ACCOUNT_PERMISSIONS, PROJECT_PERMISSIONS
+from cost_check import (
+    BILLING_PERMISSIONS,
+    KILL_SWITCH_ACCOUNT_PERMISSIONS,
+    PROJECT_PERMISSIONS,
+)
+from cost_check import (
+    READS as COST_READS,
+)
 from fences import GCP, blocks, local, one, unquote
 
 from access.identities import READS
@@ -269,6 +276,8 @@ def test_the_access_rules_grant_exactly_these_and_the_fences_their_own() -> None
         ("google_project_iam_member", "kill_switch_invokes_workflows"),
         ("google_service_account_iam_member", "agent_mints_persona_tokens"),
         ("google_service_account_iam_member", "agent_mints_publisher_token"),
+        ("google_service_account_iam_member", "agent_reads_kill_switch_account"),
+        ("google_pubsub_topic_iam_member", "agent_reads_budget_topic"),
         ("google_storage_bucket_iam_member", "agent_lands_objects"),
     }
     assert set(found) == set(ACCESS_GRANTS) | fences
@@ -380,9 +389,53 @@ def custom_role(name: str) -> set[str]:
     return {unquote(p) for p in role["permissions"]}
 
 
-def test_only_the_query_builder_and_row_publisher_roles_are_custom() -> None:
+def test_only_the_query_builder_row_publisher_and_fence_item_reader_roles_are_custom() -> None:
     custom = {n for (t, n) in blocks("resource") if t == "google_project_iam_custom_role"}
-    assert custom == {"query_runner", "warehouse_builder", "row_publisher"}
+    assert custom == {
+        "query_runner",
+        "warehouse_builder",
+        "row_publisher",
+        "topic_reader",
+        "account_reader",
+    }
+
+
+# The cost check's reads held on one resource alone, by where its READS table says they are held:
+# the custom role that carries each and the binding that grants it to the agent on that resource.
+HELD_ON = {
+    "budget topic": (
+        "topic_reader",
+        ("google_pubsub_topic_iam_member", "agent_reads_budget_topic"),
+        "topic",
+        "${google_pubsub_topic.budget.name}",
+    ),
+    "kill switch account": (
+        "account_reader",
+        ("google_service_account_iam_member", "agent_reads_kill_switch_account"),
+        "service_account_id",
+        "${google_service_account.kill_switch.name}",
+    ),
+}
+
+
+def test_each_cost_check_read_held_on_one_resource_is_granted_there_alone() -> None:
+    """A READS row held on one resource names a declared role holding exactly that read, bound to
+    the agent on that resource and nowhere else; no other read is held off the project."""
+    held = {scope: p for _, p, scope in COST_READS if scope in HELD_ON}
+    assert set(held) == set(HELD_ON)
+    assert {scope for _, _, scope in COST_READS} <= {*HELD_ON, "project", "billing account", "none"}
+    resources = blocks("resource")
+    for scope, (role, binding, attribute, on) in HELD_ON.items():
+        assert custom_role(role) == {held[scope]}, scope
+        assert custom_role(role).isdisjoint(FENCE_PERMISSIONS), scope
+        body = resources[binding]
+        assert body[attribute] == on, scope
+        assert unquote(body["role"]) == f"${{google_project_iam_custom_role.{role}.name}}", scope
+        assert unquote(body["member"]) == AGENT, scope
+        bound = [
+            k for k, b in resources.items() if f"google_project_iam_custom_role.{role}." in str(b)
+        ]
+        assert bound == [binding], scope
 
 
 def test_the_row_publisher_role_only_replaces_a_tables_rows() -> None:
