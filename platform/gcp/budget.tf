@@ -65,3 +65,18 @@ resource "google_billing_budget" "lab" {
     schema_version = "1.0"
   }
 }
+
+# The cost check reads this topic (`make cost-check`): the agent gets that one read on this topic
+# alone, not on the project.
+resource "google_project_iam_custom_role" "topic_reader" {
+  role_id     = "labTopicReader"
+  title       = "Reads one Pub/Sub topic"
+  description = "Granted on one topic: reads its configuration, nothing else."
+  permissions = ["pubsub.topics.get"]
+}
+
+resource "google_pubsub_topic_iam_member" "agent_reads_budget_topic" {
+  topic  = google_pubsub_topic.budget.name
+  role   = google_project_iam_custom_role.topic_reader.name
+  member = "serviceAccount:${data.google_service_account.agent.email}"
+}

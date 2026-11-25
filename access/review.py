@@ -83,13 +83,33 @@ TARGETS = {
     "google_data_catalog_taxonomy": ("policy-tag taxonomy", None),
     "google_storage_bucket": ("landing bucket", None),
     "google_service_account": ("account", "service_account_id"),
+    "google_pubsub_topic": ("Pub/Sub topic", "topic"),
 }
+# The permissions that let a holder on a service account act as it: take its tokens or keys, sign
+# as it, attach it, or grant itself any of these. A role on an account holding none of them, a
+# declared custom role whose permissions say so, only reads the account; any predefined role on an
+# account is taken to act as it.
+ACTS_AS = frozenset(
+    {
+        "iam.serviceAccounts.actAs",
+        "iam.serviceAccounts.getAccessToken",
+        "iam.serviceAccounts.getOpenIdToken",
+        "iam.serviceAccounts.implicitDelegation",
+        "iam.serviceAccounts.setIamPolicy",
+        "iam.serviceAccounts.signBlob",
+        "iam.serviceAccounts.signJwt",
+        "iam.serviceAccountKeys.create",
+    }
+)
 PERSONA_ACCOUNTS = "google_service_account.persona"
 CLEAR_READER = "roles/datacatalog.categoryFineGrainedReader"
 MASKED_READER = "roles/bigquerydatapolicy.maskedReader"
 KINDS = {"human": "human persona", "agent": "agent persona", "automation": "automation account"}
 INDEX = re.compile(r'\["([^"]+)"\]')
 CUSTOM_ROLE = re.compile(r"^\$\{google_project_iam_custom_role\.([a-z_]+)\.name\}$")
+# A permission as a custom role lists it, quoted as the HCL reader returns a literal string: a
+# service, then dot-separated names of letters and digits, and nothing a template could expand.
+PERMISSION_NAME = re.compile(r'^"[a-z][a-zA-Z0-9]*(\.[a-zA-Z][a-zA-Z0-9]*)+"$')
 
 Doc = dict[str, Any]
 Config = Mapping[str, list[Any]]
@@ -292,6 +312,9 @@ def target(rtype: str, body: Mapping[str, Any], every: bool, addresses: Mapping[
         for address, identity in addresses.items():
             if expression in (f"${{{address}.name}}", f"${{{address}.id}}"):
                 return f"account {identity}"
+    named = re.fullmatch(r"\$\{google_pubsub_topic\.([a-z_]+)\.(?:name|id)\}", expression)
+    if rtype == "google_pubsub_topic" and named:
+        return f"{noun} {named[1]}"
     index = INDEX.search(expression)
     if index is None:
         raise ValueError(f"cannot tell which {noun} {expression} names")
@@ -322,11 +345,12 @@ def declared_grants(
             f"access/review.yaml lists undeclared accounts: {listed - service_accounts}"
         )
     addresses = {a["declared"]: a["id"] for a in accounts}
-    roles = {
-        address.split(".")[1]: f"{unquote(body['title'])} (custom role)"
+    custom_roles = {
+        address.split(".")[1]: body
         for address, body in resources.items()
         if address.startswith("google_project_iam_custom_role.")
     }
+    roles = {k: f"{unquote(b['title'])} (custom role)" for k, b in custom_roles.items()}
     refused: list[str] = []
     for address, body in sorted({**resources, **data}.items()):
         rtype = address.rsplit(".", 1)[0]
@@ -350,6 +374,16 @@ def declared_grants(
             role = unquote(substitute(unquote(body["role"]), instance))
             role = role[3:-2] if role.startswith('${"') else role
             custom = CUSTOM_ROLE.fullmatch(role)
+            acts = True
+            if custom is not None and custom[1] in custom_roles:
+                listed = custom_roles[custom[1]]["permissions"]
+                # Only a list of quoted permission names says what the role holds; any other
+                # form (an expression, a template, an escape) may hold an acting permission, so
+                # it counts as acting.
+                plain = isinstance(listed, list) and all(
+                    isinstance(p, str) and PERMISSION_NAME.fullmatch(p) for p in listed
+                )
+                acts = not plain or bool({unquote(p) for p in listed} & ACTS_AS)
             role = roles.get(custom[1], role) if custom else role
             subbed = {
                 k: substitute(unquote(v), instance) for k, v in body.items() if k != "for_each"
@@ -361,7 +395,7 @@ def declared_grants(
                     refused.append(f"{address}: a member the review cannot attribute")
                     continue
                 found[who].append(CloudGrant(role, on, True))
-                if base == "google_service_account":
+                if base == "google_service_account" and acts:
                     if "every" in instance:
                         refused.append(f"{address}: a role on every account of a collection")
                     else:
@@ -435,6 +469,10 @@ def review(docs: Mapping[str, Doc], config: Config) -> list[Reviewed]:
         by_hand += [
             CloudGrant(grant["role"], grant["view"], False)
             for grant in entry.get("table_roles_granted_by_hand", [])
+        ]
+        by_hand += [
+            CloudGrant(f"{role['title']} (custom role)", role["view"], False)
+            for role in entry.get("custom_table_roles_granted_by_hand", [])
         ]
         rows = sorted(cloud[entry["id"]]) + by_hand
         acting = reachable(acts_as, entry["id"])
