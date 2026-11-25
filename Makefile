@@ -38,7 +38,8 @@ typecheck: sync
 #   runs after a failed pytest; the line fails if either read or pytest fails.
 # - `elsewhere` (the lab variable unset or blank, or GCP_PROJECT non-empty): pytest alone.
 # - any other output, the empty output of a failed decider included: a message, a failure, no pytest.
-# pytest runs its tests across one worker per CPU this process may use (`-n auto`, pytest-xdist);
+# pytest runs its tests across one worker per CPU this process may use (`-n auto`, pytest-xdist),
+# capped at one per gibibyte of available memory (tests/workers.py);
 # `PYTEST_XDIST_AUTO_NUM_WORKERS=<n>` in the environment sets another count. A plain
 # `uv run pytest` stays in one process.
 # tests/platform/test_cost_read_around_tests.py checks these over a stub `uv`. Limits: an interrupt
