@@ -27,10 +27,11 @@ accounts:
           - bigquery.config.get
           - bigquery.jobs.create
       # The project permissions the fence reads of `make cost-check` need (its READS table): the
-      # project and its IAM policy, the BigQuery quota, the budget topic, its subscription, the
-      # kill switch's workflow, trigger and account, and billing a read to the project (service
-      # usage's use, which replaced the predefined service usage consumer role and its 17 other
-      # permissions on 2026-11-22); the budget is read on the billing account.
+      # project and its IAM policy, the BigQuery quota, the budget topic's subscription, the
+      # kill switch's workflow and trigger, and billing a read to the project (service usage's
+      # use, which replaced the predefined service usage consumer role and its 17 other
+      # permissions on 2026-11-22); the budget is read on the billing account, and the budget
+      # topic and the kill switch account on themselves alone, granted in platform/gcp.
       # serviceusage.quotas.get is at Google's TESTING support level for custom roles.
       - id: labFenceReader
         title: Reads the lab's spend fences
@@ -38,11 +39,9 @@ accounts:
         permissions:
           - resourcemanager.projects.get
           - resourcemanager.projects.getIamPolicy
-          - pubsub.topics.get
           - pubsub.subscriptions.get
           - workflows.workflows.get
           - eventarc.triggers.get
-          - iam.serviceAccounts.get
           - serviceusage.quotas.get
           - serviceusage.services.use
     # The cost query's read of its view: the view and its rows, in place of the predefined data

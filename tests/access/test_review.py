@@ -177,6 +177,8 @@ def test_the_agent_account_shows_its_roles_its_reach_and_the_conflict_it_holds(
         ("roles/datacatalog.viewer", "the policy-tag taxonomy"),
         ("roles/storage.objectUser", "the landing bucket"),
         *{(TOKENS, f"account {p}") for p in [*personas, "publisher"]},
+        ("Reads one Pub/Sub topic (custom role)", "Pub/Sub topic budget"),
+        ("Reads one service account (custom role)", "account kill-switch"),
     }
     assert {k for k, source in rows.items() if source == "granted by hand, not declared"} == {
         ("Runs BigQuery queries (custom role)", "the lab project"),
@@ -719,10 +721,10 @@ resource "google_bigquery_dataset" "side" {
   }
 }""",
     "a grant on a resource the review has no words for": f"""
-resource "google_pubsub_topic_iam_member" "agent_publishes" {{
-  topic  = google_pubsub_topic.budget.name
-  role   = "roles/pubsub.publisher"
-  member = "{AGENT}"
+resource "google_workflows_workflow_iam_member" "agent_invokes" {{
+  workflow = google_workflows_workflow.kill_switch.name
+  role     = "roles/workflows.invoker"
+  member   = "{AGENT}"
 }}""",
 }
 
@@ -797,6 +799,61 @@ resource "google_service_account_iam_member" "agent_acts_as_ks" {{
         "agent",
         "`kill-switch`",
     ),
+    "the agent holding a custom acting role on the kill switch": (
+        f"""
+resource "google_project_iam_custom_role" "reads_and_acts" {{
+  role_id     = "labReadsAndActs"
+  title       = "Reads and acts as an account"
+  permissions = ["iam.serviceAccounts.get", "iam.serviceAccounts.actAs"]
+}}
+resource "google_service_account_iam_member" "agent_reads_and_acts" {{
+  service_account_id = google_service_account.kill_switch.name
+  role               = google_project_iam_custom_role.reads_and_acts.name
+  member             = "{AGENT}"
+}}""",
+        "agent",
+        "`kill-switch`",
+    ),
+    "the agent holding a custom role on the kill switch whose permissions are an expression": (
+        f"""
+locals {{
+  more = ["iam.serviceAccounts.actAs"]
+}}
+resource "google_project_iam_custom_role" "reads_and_more" {{
+  role_id     = "labReadsAndMore"
+  title       = "Reads an account and more"
+  permissions = concat(["iam.serviceAccounts.get"], local.more)
+}}
+resource "google_service_account_iam_member" "agent_reads_and_more" {{
+  service_account_id = google_service_account.kill_switch.name
+  role               = google_project_iam_custom_role.reads_and_more.name
+  member             = "{AGENT}"
+}}""",
+        "agent",
+        "`kill-switch`",
+    ),
+    **{
+        f"the agent holding a custom role on the kill switch written as {form}": (
+            f"""
+resource "google_project_iam_custom_role" "reads_and_hides" {{
+  role_id     = "labReadsAndHides"
+  title       = "Reads an account and hides more"
+  permissions = ["iam.serviceAccounts.get", {element}]
+}}
+resource "google_service_account_iam_member" "agent_reads_and_hides" {{
+  service_account_id = google_service_account.kill_switch.name
+  role               = google_project_iam_custom_role.reads_and_hides.name
+  member             = "{AGENT}"
+}}""",
+            "agent",
+            "`kill-switch`",
+        )
+        for form, element in {
+            "a template directive": '"%{ if true }iam.serviceAccounts.actAs%{ endif }"',
+            "a unicode escape": '"iam.serviceAccounts.act\\u0041s"',
+            "an interpolation": '"${local.acting}"',
+        }.items()
+    },
     "the kill switch minting every persona's token": (
         """
 resource "google_service_account_iam_member" "ks_mints" {
