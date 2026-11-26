@@ -106,7 +106,15 @@ PERSONA_ACCOUNTS = "google_service_account.persona"
 CLEAR_READER = "roles/datacatalog.categoryFineGrainedReader"
 MASKED_READER = "roles/bigquerydatapolicy.maskedReader"
 KINDS = {"human": "human persona", "agent": "agent persona", "automation": "automation account"}
-INDEX = re.compile(r'\["([^"]+)"\]')
+# The one declared collection of each target type a grant may name by key, and the attribute it
+# reads: `${<type>.<collection>["<key>"].<attribute>}`, whole, is the only form read as that key,
+# so another resource whose key is the same is never taken for the lab's own.
+COLLECTIONS = {
+    "google_bigquery_dataset": ("warehouse", "dataset_id"),
+    "google_data_catalog_policy_tag": ("sensitive", "name"),
+    "google_bigquery_datapolicy_data_policy": ("masking", "data_policy_id"),
+    "google_service_account": ("persona", "name"),
+}
 CUSTOM_ROLE = re.compile(r"^\$\{google_project_iam_custom_role\.([a-z_]+)\.name\}$")
 # A dataset access entry's role named through the basic form `platform/gcp` maps it to.
 BASIC_ROLE = re.compile(r'^\$\{local\.basic_roles\["([^"]+)"\]\}$')
@@ -333,6 +341,17 @@ def attribute(member: str, addresses: Mapping[str, str], personas: set[str]) -> 
     return persona if persona in personas else None
 
 
+def keyed(rtype: str, expression: str) -> str | None:
+    """The key an expression names in the declared collection of `rtype`, or None."""
+    if rtype not in COLLECTIONS:
+        return None
+    collection, attribute_name = COLLECTIONS[rtype]
+    named = re.fullmatch(
+        rf'\$\{{{re.escape(rtype)}\.{collection}\["([^"]+)"\]\.{attribute_name}\}}', expression
+    )
+    return named[1] if named else None
+
+
 def target(rtype: str, body: Mapping[str, Any], every: bool, addresses: Mapping[str, str]) -> str:
     noun, attribute_name = TARGETS[rtype]
     if every:
@@ -347,10 +366,10 @@ def target(rtype: str, body: Mapping[str, Any], every: bool, addresses: Mapping[
     named = re.fullmatch(r"\$\{google_pubsub_topic\.([a-z_]+)\.(?:name|id)\}", expression)
     if rtype == "google_pubsub_topic" and named:
         return f"{noun} {named[1]}"
-    index = INDEX.search(expression)
-    if index is None:
+    key = keyed(rtype, expression)
+    if key is None:
         raise ValueError(f"cannot tell which {noun} {expression} names")
-    return f"{noun} {index[1]}"
+    return f"{noun} {key}"
 
 
 def declared_grants(
@@ -417,20 +436,26 @@ def declared_grants(
                     for k, v in body.items()
                     if isinstance(v, str) and k != "for_each"
                 }
-                on = target("google_bigquery_dataset", subbed, False, addresses)
+                try:
+                    on = target("google_bigquery_dataset", subbed, False, addresses)
+                except ValueError as unread:
+                    refused.append(f"{address}: {unread}")
+                    continue
                 if "dataset" in body:
                     (entry,) = body["dataset"]
                     (views,) = entry["dataset"]
-                    of = INDEX.search(substitute(unquote(views["dataset_id"]), instance))
+                    of = keyed(
+                        "google_bigquery_dataset",
+                        substitute(unquote(views["dataset_id"]), instance),
+                    )
                     types = [unquote(t) for t in entry["target_types"]]
                     # The views of the lab's own aggregates dataset, on the one source the
                     # catalogues give it, and nothing else.
                     if (
-                        of is None
-                        or of[1] not in aggregated
+                        of not in aggregated
                         or unquote(views.get("project_id", "")) != "${var.project}"
                         or types != ["VIEWS"]
-                        or on != f"warehouse dataset {sources[of[1]]}"
+                        or on != f"warehouse dataset {sources[of]}"
                     ):
                         refused.append(f"{address}: an authorization of views it cannot attribute")
                     continue
@@ -476,7 +501,11 @@ def declared_grants(
             subbed = {
                 k: substitute(unquote(v), instance) for k, v in body.items() if k != "for_each"
             }
-            on = target(base, subbed, "every" in instance, addresses)
+            try:
+                on = target(base, subbed, "every" in instance, addresses)
+            except ValueError as unread:
+                refused.append(f"{address}: {unread}")
+                continue
             for member in members:
                 who = attribute(substitute(unquote(member), instance), addresses, personas)
                 if who is None:

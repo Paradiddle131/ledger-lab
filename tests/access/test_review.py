@@ -747,6 +747,79 @@ resource "google_bigquery_dataset_access" "views_read_landed" {
     target_types = ["VIEWS"]
   }
 }""",
+    "another dataset's views keyed by an aggregates name, authorized on a source": """
+resource "google_bigquery_dataset" "shadow" {
+  for_each   = local.aggregate_sources
+  dataset_id = "shadow_${each.key}"
+}
+resource "google_bigquery_dataset_access" "shadow_views" {
+  for_each   = local.aggregate_sources
+  dataset_id = google_bigquery_dataset.warehouse[each.value].dataset_id
+  dataset {
+    dataset {
+      project_id = var.project
+      dataset_id = google_bigquery_dataset.shadow[each.key].dataset_id
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
+    "a role on another dataset keyed by a warehouse name": """
+resource "google_bigquery_dataset" "shadow" {
+  for_each   = local.aggregate_sources
+  dataset_id = "shadow_${each.key}"
+}
+resource "google_bigquery_dataset_access" "approver_reads_shadow" {
+  dataset_id    = google_bigquery_dataset.shadow["payments_aggregates"].dataset_id
+  role          = "READER"
+  user_by_email = google_service_account.persona["approver"].email
+}""",
+    "the aggregates routines authorized on a source": """
+resource "google_bigquery_dataset_access" "aggregates_routines" {
+  for_each   = local.aggregate_sources
+  dataset_id = google_bigquery_dataset.warehouse[each.value].dataset_id
+  dataset {
+    dataset {
+      project_id = var.project
+      dataset_id = google_bigquery_dataset.warehouse[each.key].dataset_id
+    }
+    target_types = ["ROUTINES"]
+  }
+}""",
+    "a dataset that is no aggregates authorized on a source by a for_each": """
+resource "google_bigquery_dataset_access" "landed_views_on_sources" {
+  for_each   = local.aggregate_sources
+  dataset_id = google_bigquery_dataset.warehouse[each.value].dataset_id
+  dataset {
+    dataset {
+      project_id = var.project
+      dataset_id = google_bigquery_dataset.warehouse["landed"].dataset_id
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
+    "the aggregates views authorized with no project": """
+resource "google_bigquery_dataset_access" "views_no_project" {
+  for_each   = local.aggregate_sources
+  dataset_id = google_bigquery_dataset.warehouse[each.value].dataset_id
+  dataset {
+    dataset {
+      dataset_id = google_bigquery_dataset.warehouse[each.key].dataset_id
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
+    "views of a dataset named by a plain string authorized on a source": """
+resource "google_bigquery_dataset_access" "views_by_name" {
+  for_each   = local.aggregate_sources
+  dataset_id = google_bigquery_dataset.warehouse[each.value].dataset_id
+  dataset {
+    dataset {
+      project_id = var.project
+      dataset_id = "some_dataset"
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
     "a dataset access entry with a role and no member": """
 resource "google_bigquery_dataset_access" "nobody_reads" {
   dataset_id = google_bigquery_dataset.warehouse["landed"].dataset_id
@@ -997,6 +1070,19 @@ def test_a_basic_role_is_reported_as_the_value_the_entry_sends(
     line = "| roles/bigquery.dataOwner | warehouse dataset payments_aggregates | declared |"
     assert line in sections(report)["metric-owner"]
     assert "roles/bigquery.dataViewer" not in sections(report)["metric-owner"]
+
+
+def test_a_basic_role_whose_value_is_no_basic_role_stops_the_report(
+    docs: dict[str, Doc], config: Config
+) -> None:
+    """A `local.basic_roles` value BigQuery would not read as a basic role is refused, never
+    reported as the map's key."""
+    changed = copy.deepcopy(config)
+    for entry in changed["locals"]:
+        if "basic_roles" in entry:
+            entry["basic_roles"] = {k: '"roles/bigquery.dataOwner"' for k in entry["basic_roles"]}
+    with pytest.raises(ValueError, match="a dataset role the review cannot read"):
+        review(docs, changed)
 
 
 @pytest.mark.parametrize("plant", sorted(SHOWN_PLANTS))
