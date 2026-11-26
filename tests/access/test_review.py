@@ -820,6 +820,28 @@ resource "google_bigquery_dataset_access" "views_by_name" {
     target_types = ["VIEWS"]
   }
 }""",
+    "a role on another dataset keyed by a warehouse name, granted as an IAM member": """
+resource "google_bigquery_dataset" "shadow" {
+  for_each   = local.aggregate_sources
+  dataset_id = "shadow_${each.key}"
+}
+resource "google_bigquery_dataset_iam_member" "approver_reads_shadow" {
+  dataset_id = google_bigquery_dataset.shadow["payments_aggregates"].dataset_id
+  role       = "roles/bigquery.dataViewer"
+  member     = "serviceAccount:${google_service_account.persona["approver"].email}"
+}""",
+    "a role on an account of another collection keyed by a persona's name": """
+resource "google_service_account_iam_member" "proposer_on_other" {
+  service_account_id = google_service_account.other["approver"].name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${google_service_account.persona["proposer"].email}"
+}""",
+    "a dataset named by another of the warehouse dataset's attributes": """
+resource "google_bigquery_dataset_access" "approver_reads_by_friendly_name" {
+  dataset_id    = google_bigquery_dataset.warehouse["landed"].friendly_name
+  role          = "READER"
+  user_by_email = google_service_account.persona["approver"].email
+}""",
     "a dataset access entry with a role and no member": """
 resource "google_bigquery_dataset_access" "nobody_reads" {
   dataset_id = google_bigquery_dataset.warehouse["landed"].dataset_id
