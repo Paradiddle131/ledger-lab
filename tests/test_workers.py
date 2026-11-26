@@ -38,14 +38,24 @@ def test_the_available_memory_is_read_from_meminfo(tmp_path: Path) -> None:
     assert WORKER_MEMORY == GIB
 
 
+# The CPUs the child's hook is told it may use: more than either memory below holds workers for,
+# so the count the hook starts is the memory's alone, whatever this machine's CPUs.
+CPUS = 8
+# Two memories whose caps differ: xdist's own count, which a disabled hook leaves, is this
+# machine's CPUs at both, so it cannot match both caps.
+CAPS = {2 * GIB: 2, 3 * GIB: 3}
+
+
 def run_auto(env: dict[str, str], tmp_path: Path, memory: int | None = None) -> str:
     """A child pytest at `-n auto` over one trivial test, with its worker line shown; with
-    `memory`, the child's read of the available memory answers that, through a plugin."""
+    `memory`, the child's hook reads that memory available and `CPUS` CPUs, through a plugin."""
     test = Path(__file__).with_name("test_workers.py")
     plugin = []
     if memory is not None:
         (tmp_path / "fixed_memory.py").write_text(
-            f"import tests.workers\ntests.workers.available_memory = lambda *_: {memory}\n"
+            "import tests.workers\n"
+            f"tests.workers.available_memory = lambda *_: {memory}\n"
+            f"tests.workers.usable_cpus = lambda: {CPUS}\n"
         )
         env = {**env, "PYTHONPATH": os.pathsep.join([str(tmp_path), env.get("PYTHONPATH", "")])}
         plugin = ["-p", "fixed_memory"]
@@ -80,21 +90,20 @@ def test_the_environments_count_overrides_the_cap(tmp_path: Path) -> None:
 
 
 def test_with_no_count_set_auto_starts_the_count_the_memory_allows(tmp_path: Path) -> None:
-    from tests.workers import usable_cpus
-
-    expected = min(usable_cpus(), 2)
-    assert f"created: {expected}/{expected} workers" in run_auto(unset(), tmp_path, memory=2 * GIB)
+    for memory, expected in CAPS.items():
+        shown = run_auto(unset(), tmp_path, memory=memory)
+        assert f"created: {expected}/{expected} workers" in shown
 
 
 def test_a_count_that_is_not_a_number_keeps_the_cap(tmp_path: Path) -> None:
-    from tests.workers import count_set, usable_cpus
+    from tests.workers import count_set
 
     assert not count_set({"PYTEST_XDIST_AUTO_NUM_WORKERS": "abc"})
     assert count_set({"PYTEST_XDIST_AUTO_NUM_WORKERS": "3"})
     assert not count_set({})
     env = {**unset(), "PYTEST_XDIST_AUTO_NUM_WORKERS": "abc"}
-    expected = min(usable_cpus(), 2)
-    assert f"created: {expected}/{expected} workers" in run_auto(env, tmp_path, memory=2 * GIB)
+    for memory, expected in CAPS.items():
+        assert f"created: {expected}/{expected} workers" in run_auto(env, tmp_path, memory=memory)
 
 
 def test_a_run_without_xdist_still_starts() -> None:
