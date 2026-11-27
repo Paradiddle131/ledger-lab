@@ -870,6 +870,7 @@ resource "google_bigquery_dataset_access" "purposes_read_marts" {
 }""",
     "one purpose's views authorized on a source only another purpose reads": """
 resource "google_bigquery_dataset_access" "payment_review_reads_group_totals" {
+  for_each   = local.purpose_sources
   dataset_id = google_bigquery_dataset.warehouse["group_totals"].dataset_id
   dataset {
     dataset {
@@ -881,6 +882,7 @@ resource "google_bigquery_dataset_access" "payment_review_reads_group_totals" {
 }""",
     "a product dataset's views authorized on a purpose's source": """
 resource "google_bigquery_dataset_access" "group_totals_views_read_payments" {
+  for_each   = local.purpose_sources
   dataset_id = google_bigquery_dataset.warehouse["payments"].dataset_id
   dataset {
     dataset {
