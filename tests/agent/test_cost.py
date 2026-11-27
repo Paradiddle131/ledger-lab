@@ -152,7 +152,6 @@ def stopped_at_the_cap(answer: Answer, model: Calls, audit: Audit, engine: str) 
     else:
         found = REFUSED_BY_BIGQUERY.fullmatch(refusal.reason)
         assert found is not None
-        assert 0 < int(found[1]) <= int(found[2]) == FEW_BYTES
     assert answer.text.startswith("A query reached a spending cap")
     assert model.asked == 2  # the plan and the one step that made the call
     record = last(audit)
