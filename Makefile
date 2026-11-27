@@ -4,7 +4,7 @@
 LOADOUT ?= $(or $(shell sed -n 's/^The collection .* is cloned at `\([^`]*\)`.*/\1/p' $(HOME)/.claude/CLAUDE.md 2>/dev/null),../loadout)
 GUARDS := $(LOADOUT)/cloud/githooks
 
-.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test warehouse-parity bigquery-personas bigquery-row-policies bigquery-thresholds stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
+.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test warehouse-parity bigquery-personas bigquery-row-policies bigquery-thresholds bigquery-purposes stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
 
 check: lint typecheck test ids portable scan contract metric-versions
 	@echo "make check: all passed"
@@ -119,6 +119,15 @@ bigquery-row-policies: sync
 # the grant (access/thresholds.py).
 bigquery-thresholds: sync
 	uv run pytest -m bigquery_persona tests/access/test_thresholds.py
+
+# Each human persona's read of its purposes' views on BigQuery, as the persona: through each view
+# exactly its entities' rows of the copy its tags give it, by count and digest, and none of the
+# other copy; a refusal of every other purpose's views and, once the product grants are removed,
+# of the views' sources; and each purpose dataset holding exactly its generated views, each with
+# its generated query (access/purpose_views.py). `LEDGER_LAB_PRODUCT_GRANTS=kept` skips the
+# sources' case while the product grants are still applied.
+bigquery-purposes: sync
+	uv run pytest -m bigquery_persona tests/access/test_purpose_views.py
 
 # The container stack: the shared database always, one more service per PROFILE=<name>.
 # Each checkout is its own Compose project (containers, network, volume) and the database takes a

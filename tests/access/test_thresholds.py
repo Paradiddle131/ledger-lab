@@ -288,7 +288,9 @@ def test_each_group_totals_view_returns_exactly_the_rows_of_at_least_the_minimum
     aggregates: dict[str, Any],
     name: str,
 ) -> None:
-    """Checked against the table as the auditor, who reads the group totals by rows."""
+    """Checked against the table as the auditor reads it, through its audit purpose's view of it
+    (`access/purpose_views.py`), which lists every column of both tables and holds exactly the
+    table's rows (`make bigquery-purposes`); the session's typed rows on both sides."""
     from gcp_project import lab_project
 
     project = lab_project()
@@ -298,7 +300,7 @@ def test_each_group_totals_view_returns_exactly_the_rows_of_at_least_the_minimum
     source = (
         as_persona_on_bigquery("auditor")
         .query(
-            f"SELECT {keys}, MAX(payees) FROM `{project}.group_totals.{table['from']}`"  # noqa: S608
+            f"SELECT {keys}, MAX(payees) FROM `{project}.audit.{table['from']}`"  # noqa: S608
             f" GROUP BY {keys}"
         )
         .rows

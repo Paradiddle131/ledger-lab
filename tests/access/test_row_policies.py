@@ -7,7 +7,9 @@ policies and columns before it writes a row, and refuses a copy whose policies o
 its writes going as the publisher, minted through the agent; the command refusing a session with no
 lab project. Live, on the owner's machine (`bigquery_persona`, `make bigquery-row-policies`): each
 human persona reads, of its own copy, only its granted entities and every one of them the copy
-holds rows of, and none of the other copy; one with no row grant on payments cannot read either.
+holds rows of, and none of the other copy, through each view of its purposes over the copy
+(`access/purpose_views.py`), which is where a persona reads the copy; one with no row grant on
+payments cannot read either copy.
 """
 
 import copy
@@ -23,6 +25,7 @@ import pytest
 from access import row_policies
 from access.bigquery import PersonaQueryError, PersonaSession, chain, mint, service_account
 from access.identities import identity
+from access.purpose_views import views
 from access.row_policies import (
     PUBLISHER,
     PUBLISHER_POLICY,
@@ -35,7 +38,7 @@ from access.row_policies import (
     publish,
     publish_sql,
 )
-from tests.conftest import load_columns
+from tests.conftest import load_aggregates, load_columns, load_purposes
 
 PROJECT = "the-lab"
 WHERE = "us-central1"
@@ -421,19 +424,31 @@ def test_each_human_persona_reads_only_its_entities_rows_of_its_copy(
 ) -> None:
     from gcp_project import lab_project
 
+    project = lab_project()
     granted = identity(access, human).reads.get("payments")
-    ours = (human in clear(load_columns(), "payments")) == (table == "payments")
-    sql = f"SELECT DISTINCT entity_id FROM `{lab_project()}.payments.{table}`"  # noqa: S608
+    columns = load_columns()
+    ours = (human in clear(columns, "payments")) == (table == "payments")
     session = as_persona_on_bigquery(human)
     if granted is None:
         with pytest.raises(PersonaQueryError) as refused:
-            session.query(sql)
+            session.query(f"SELECT DISTINCT entity_id FROM `{project}.payments.{table}`")  # noqa: S608
         if refused.value.status != 403:
             pytest.fail("a persona with no row grant on payments was not refused")
         return
-    seen = {row[0] for row in session.query(sql).rows}
-    held = entities_with_rows(lab_project(), table)
+    purposes = load_purposes()
+    mine = {p["id"] for p in purposes["purposes"] if human in p["personas"]}
+    places = [
+        f"{v.dataset}.{v.name}"
+        for v in views(access, columns, purposes, load_aggregates())
+        if v.purpose in mine and (v.source_dataset, v.source) == ("payments", table)
+    ]
+    if not places:
+        pytest.fail("no view of the persona's purposes reads this copy")
+    held = entities_with_rows(project, table)
     if not held:
         pytest.fail("the published copy holds no rows, so it proves nothing")
-    if seen != (set(granted) & held if ours else set()):
-        pytest.fail("the persona read other entities' rows of this copy than its grants give")
+    for place in places:
+        sql = f"SELECT DISTINCT entity_id FROM `{project}.{place}`"  # noqa: S608
+        seen = {row[0] for row in session.query(sql).rows}
+        if seen != (set(granted) & held if ours else set()):
+            pytest.fail("the persona read other entities' rows of this copy than its grants give")

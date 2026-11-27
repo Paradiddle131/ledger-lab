@@ -2,8 +2,9 @@
 grants that produce it.
 
 The matrix is the outcome the access tests act out as each persona; the grants in
-`access/personas.yaml`, the tag readers in `access/columns.yaml` and the BigQuery grants
-`platform/gcp` generates from both are the mechanism. The matrix must state one cell for every
+`access/personas.yaml`, the tag readers in `access/columns.yaml`, the purposes in
+`access/purposes.yaml` and the BigQuery grants `platform/gcp` generates from them are the
+mechanism. The matrix must state one cell for every
 persona, product, entity and tag of the catalogues, every cell must be what the mechanism gives,
 and the cells must keep the personas' duties, so a change made to a catalogue and the matrix
 together still fails when it breaks a duty. The planted failures act on an invented catalogue
@@ -27,7 +28,9 @@ from tests.platform.test_access_rules import (
     DATASET_ROLES,
     dataset_id,
     expected_dataset_grants,
+    expected_purpose_grants,
     expected_readers,
+    table_products,
     tofu_eval,
 )
 
@@ -210,23 +213,52 @@ def duty_breaches(
     return found
 
 
+# A product read through purposes: by persona, the datasets of its purposes that read the product.
+Routes = Mapping[str, Mapping[str, set[str]]]
+
+
+def purpose_routes(purposes: Doc, tables: Mapping[str, str]) -> dict[str, dict[str, set[str]]]:
+    """Each product a purpose reads a table of, by persona, the datasets of its purposes there."""
+    routes: dict[str, dict[str, set[str]]] = {}
+    for purpose in purposes["purposes"]:
+        for table in purpose["tables"]:
+            for persona in purpose["personas"]:
+                by = routes.setdefault(tables[table], {})
+                by.setdefault(persona, set()).add(dataset_id(purpose["id"]))
+    return routes
+
+
 def bigquery_contradictions(
     matrix: Doc,
     dataset_grants: set[tuple[str, str, str]],
     readers: Mapping[str, set[tuple[str, str]]],
+    routes: Routes | None = None,
 ) -> list[str]:
     """Where the BigQuery grants differ from what the matrix needs.
 
     A product cell of clear or edit on any entity needs its dataset role (the row rule within the
-    dataset is the table's row access policies), every other cell no role; a column cell needs the
-    reader role `reader_role` names, and a denied one none.
+    dataset is the table's row access policies), every other cell no role; on a product read
+    through purposes (`routes`) a clear cell needs data viewer on each of the persona's purposes'
+    datasets that read it instead, an edit cell there has no grant that writes, and a clear cell
+    no purpose of the persona reads is reported; a column cell needs the reader role
+    `reader_role` names, and a denied one none.
     """
-    needed = {
-        (persona, dataset_id(product), DATASET_ROLE[cell])
-        for (persona, product, _), cell in product_cells(matrix)
-        if cell in DATASET_ROLE
-    }
-    found = [
+    routes = routes or {}
+    needed: set[tuple[str, str, str]] = set()
+    unserved: list[str] = []
+    for (persona, product, entity), cell in product_cells(matrix):
+        if cell not in DATASET_ROLE:
+            continue
+        if product not in routes:
+            needed.add((persona, dataset_id(product), DATASET_ROLE[cell]))
+        elif cell != "clear":
+            unserved.append(f"{where((persona, product, entity))}: {cell} through purposes")
+        elif persona not in routes[product]:
+            unserved.append(f"{where((persona, product, entity))}: clear, and no purpose reads it")
+        else:
+            needed |= {(persona, d, DATASET_ROLE["clear"]) for d in routes[product][persona]}
+    found = sorted(set(unserved))
+    found += [
         f"{' '.join(g)}: the matrix needs it, BigQuery lacks it"
         for g in sorted(needed - dataset_grants)
     ]
@@ -292,24 +324,36 @@ def test_the_matrix_keeps_the_personas_duties(visibility: Doc, access: Doc) -> N
 
 
 def test_the_matrix_agrees_with_the_bigquery_grants_as_the_access_rules_tests_derive_them(
-    visibility: Doc,
+    visibility: Doc, purposes: Doc
 ) -> None:
     # `tests/platform/test_access_rules.py` derives these from the catalogues and pins the HCL's
     # generating expressions to the same rule; the tofu twin below reads what OpenTofu evaluates.
     readers = {kind: expected_readers(kind) for kind in KINDS}
-    assert bigquery_contradictions(visibility, expected_dataset_grants(), readers) == []
+    grants = expected_dataset_grants() | {
+        (p, d, DATASET_ROLES["read"]) for p, d in expected_purpose_grants()
+    }
+    routes = purpose_routes(purposes, table_products())
+    assert set(routes) == {"payments", "group-totals"}
+    assert bigquery_contradictions(visibility, grants, readers, routes) == []
 
 
 @pytest.mark.tofu
-def test_the_matrix_agrees_with_the_bigquery_grants_tofu_evaluates(visibility: Doc) -> None:
+def test_the_matrix_agrees_with_the_bigquery_grants_tofu_evaluates(
+    visibility: Doc, purposes: Doc
+) -> None:
     grants = {
         (g["persona"], g["dataset"], g["role"]) for g in tofu_eval("values(local.dataset_grants)")
+    }
+    grants |= {
+        (g["persona"], g["dataset"], DATASET_ROLES["read"])
+        for g in tofu_eval("values(local.purpose_grants)")
     }
     readers = {
         kind: {(r["tag"], r["persona"]) for r in tofu_eval(f"values(local.{kind}_readers)")}
         for kind in KINDS
     }
-    assert bigquery_contradictions(visibility, grants, readers) == []
+    routes = purpose_routes(purposes, table_products())
+    assert bigquery_contradictions(visibility, grants, readers, routes) == []
 
 
 # An invented catalogue, tag list and matrix, in the shapes of the real ones, that the planted
@@ -762,6 +806,50 @@ def test_a_bigquery_grant_the_matrix_needs_and_lacks_or_does_not_need_is_reporte
         f"metric-owner metric_definitions {VIEWER}: the matrix needs it, BigQuery lacks it",
         f"group-controller totals {VIEWER}: BigQuery grants it, no matrix cell needs it",
         f"metric-owner metric_definitions {EDITOR}: BigQuery grants it, no matrix cell needs it",
+    ]
+
+
+# The invented catalogue's payments read through two purposes, as the purposes' datasets.
+FIXTURE_ROUTES = {
+    "payments": {
+        "payables-clerk": {"review"},
+        "approver": {"review"},
+        "auditor": {"audit"},
+        "group-controller": {"close"},
+    }
+}
+FIXTURE_PURPOSE_GRANTS = {
+    *((g[0], g[1], g[2]) for g in FIXTURE_DATASET_GRANTS if g[1] != "payments"),
+    ("payables-clerk", "review", VIEWER),
+    ("approver", "review", VIEWER),
+    ("auditor", "audit", VIEWER),
+    ("group-controller", "close", VIEWER),
+}
+
+
+def test_a_product_read_through_purposes_needs_its_purposes_datasets_in_place_of_its_own() -> None:
+    matrix, _, _ = fixture()
+    readers = fixture_readers()
+    assert bigquery_contradictions(matrix, FIXTURE_PURPOSE_GRANTS, readers, FIXTURE_ROUTES) == []
+    # The product's own role left beside the purposes', a purpose grant lost, and one given to a
+    # persona whose cells read nothing there.
+    grants = {
+        *FIXTURE_PURPOSE_GRANTS,
+        ("auditor", "payments", VIEWER),
+        ("metric-owner", "review", VIEWER),
+    } - {("approver", "review", VIEWER)}
+    assert bigquery_contradictions(matrix, grants, readers, FIXTURE_ROUTES) == [
+        f"approver review {VIEWER}: the matrix needs it, BigQuery lacks it",
+        f"auditor payments {VIEWER}: BigQuery grants it, no matrix cell needs it",
+        f"metric-owner review {VIEWER}: BigQuery grants it, no matrix cell needs it",
+    ]
+    # A clear cell no purpose of the persona serves, and an edit cell, which no view writes.
+    routes = {"payments": {p: d for p, d in FIXTURE_ROUTES["payments"].items() if p != "approver"}}
+    set_cell(matrix, "auditor", "payments", "west", "edit")
+    assert bigquery_contradictions(matrix, FIXTURE_PURPOSE_GRANTS, readers, routes) == [
+        "approver payments east: clear, and no purpose reads it",
+        "auditor payments west: edit through purposes",
+        f"approver review {VIEWER}: BigQuery grants it, no matrix cell needs it",
     ]
 
 
