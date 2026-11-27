@@ -496,6 +496,32 @@ def digested(view: View, columns: Doc) -> tuple[str, ...]:
     return tuple(c for c in view.columns if c not in tags)
 
 
+# BigQuery's reason for a query refused by its bytes-billed cap, which it refuses before running.
+OVER_CAP = "bytesBilledLimitExceeded"
+
+
+def split_summary(
+    warehouse: Warehouse, dataset: str, table: str, digest: Sequence[str]
+) -> list[tuple[tuple[str, ...], list[tuple[Any, ...]]]]:
+    """The summary of every row the warehouse shows of the columns, in parts of columns, each
+    part keeping `entity_id`: a part BigQuery refuses as over the persona's bytes-billed cap (a
+    query reads every row of each column it names, whatever the row policies leave) is split in
+    two, so the cap stays as it is and no part bills more than it allows."""
+    columns = tuple(digest)
+    try:
+        return [(columns, warehouse.summary(dataset, table, columns, None))]
+    except PersonaQueryError as error:
+        key = tuple(c for c in columns if c == "entity_id")
+        rest = [c for c in columns if c != "entity_id"]
+        if error.reason != OVER_CAP or len(rest) < 2:
+            raise
+        half = len(rest) // 2
+        return [
+            *split_summary(warehouse, dataset, table, (*key, *rest[:half])),
+            *split_summary(warehouse, dataset, table, (*key, *rest[half:])),
+        ]
+
+
 def ours(view: View, columns: Doc, persona: str) -> bool:
     """Whether the persona's tag treatment gives it the view's source copy."""
     if view.audience == "all":
@@ -526,16 +552,19 @@ def reads_through_purposes(
             failures.append(f"{where}: its source holds no rows, so the view proves nothing")
             continue
         try:
-            seen = as_persona.summary(view.dataset, view.name, digest, None)
+            parts = split_summary(as_persona, view.dataset, view.name, digest)
         except PersonaQueryError as error:
             failures.append(f"{where}: {error}")
             continue
         if not ours(view, columns, persona):
-            if seen:
+            if any(seen for _, seen in parts):
                 failures.append(f"{where}: returned rows of the copy its tags do not give it")
             continue
-        want = source.summary(view.source_dataset, view.source, digest, reads[view.product])
-        if seen != want:
+        entities = reads[view.product]
+        if any(
+            seen != source.summary(view.source_dataset, view.source, part, entities)
+            for part, seen in parts
+        ):
             failures.append(f"{where}: returned other rows than its source holds for it")
     return failures
 
@@ -581,7 +610,10 @@ class Simulated:
     leak: bool = False
     granted: dict[str, set[str]] = field(default_factory=dict)
     same_copy: bool = False
+    # The most columns one summary may name before it is refused as over the bytes-billed cap.
+    cap: int | None = None
     tables: dict[tuple[str, str], list[dict[str, str]]] = field(init=False)
+    summaries: list[tuple[str, ...]] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
         payments = [
@@ -642,6 +674,9 @@ class Simulated:
                 columns: Sequence[str],
                 entities: frozenset[str] | None,
             ) -> list[tuple[Any, ...]]:
+                if simulated.cap is not None and len(columns) > simulated.cap:
+                    raise PersonaQueryError("over the cap", 400, OVER_CAP)
+                simulated.summaries.append(tuple(columns))
                 rows = [
                     r
                     for r in self.read(dataset, table)
@@ -683,6 +718,45 @@ def test_the_live_checks_pass_over_a_warehouse_set_up_as_the_catalogues_say(
 ) -> None:
     found = views(access, columns, purposes, aggregates)
     assert offline_run(Simulated(access, columns, found, purposes), access, columns, purposes) == []
+
+
+def test_a_summary_over_the_bytes_cap_is_compared_in_parts_and_still_finds_a_leak(
+    access: Doc, columns: Doc, purposes: Doc, aggregates: Doc
+) -> None:
+    found = views(access, columns, purposes, aggregates)
+    capped = Simulated(access, columns, found, purposes, cap=3)
+    assert offline_run(capped, access, columns, purposes) == []
+    assert capped.summaries
+    assert all(len(part) <= 3 and "entity_id" in part for part in capped.summaries)
+    leaked = offline_run(
+        Simulated(access, columns, found, purposes, cap=3, leak=True), access, columns, purposes
+    )
+    assert (
+        "accountant-chicago: payment_review.payments_masked: "
+        "returned other rows than its source holds for it"
+    ) in leaked
+
+
+def test_a_refusal_other_than_the_cap_is_reported_not_split() -> None:
+    class Refusing:
+        calls = 0
+
+        def summary(
+            self,
+            dataset: str,
+            table: str,
+            columns: Sequence[str],
+            entities: frozenset[str] | None,
+        ) -> list[tuple[Any, ...]]:
+            Refusing.calls += 1
+            raise PersonaQueryError("refused", 403, "accessDenied")
+
+        def count(self, dataset: str, table: str) -> int:
+            return 0
+
+    with pytest.raises(PersonaQueryError):
+        split_summary(Refusing(), "d", "t", ("entity_id", "a", "b", "c"))
+    assert Refusing.calls == 1
 
 
 def test_the_live_checks_report_each_kind_of_fault_in_one_line(
