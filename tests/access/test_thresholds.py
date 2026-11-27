@@ -24,8 +24,7 @@ import pytest
 
 from access import thresholds
 from access.bigquery import PersonaQueryError, PersonaSession, chain, mint, service_account
-from access.row_policies import PUBLISHER, RowPolicyError, query, run_tool
-from access.row_policies import rows as rows_of
+from access.row_policies import PUBLISHER, RowPolicyError
 from access.thresholds import ThresholdError, View, aggregates_dataset, main, plan, views
 from tests.conftest import load_aggregates
 from tests.platform.test_access_rules import expected_aggregate_datasets
@@ -289,28 +288,23 @@ def test_each_group_totals_view_returns_exactly_the_rows_of_at_least_the_minimum
     aggregates: dict[str, Any],
     name: str,
 ) -> None:
-    """Checked against the table as the login running the test, the project's owner: a persona
-    reads the group totals' rows only through its purposes' views (`access/purpose_views.py`), and
-    the publisher not at all."""
-    from ingest.load import lab
+    """Checked against the table as the auditor reads it, through its audit purpose's view of it
+    (`access/purpose_views.py`), which lists every column of both tables and holds exactly the
+    table's rows (`make bigquery-purposes`); the session's typed rows on both sides."""
+    from gcp_project import lab_project
 
-    project, where = lab(os.environ)
+    project = lab_project()
     minimum = aggregates["minimum_group"]
     (table,) = [t for t in aggregates["products"]["group-totals"]["tables"] if t["name"] == name]
     keys = ", ".join([*table["group_by"], *table["entity_group_by"]])
-    source = [
-        tuple(row.values())
-        for row in rows_of(
-            run_tool(
-                query(
-                    project,
-                    where,
-                    f"SELECT {keys}, MAX(payees) AS payees"  # noqa: S608
-                    f" FROM `{project}.group_totals.{table['from']}` GROUP BY {keys}",
-                )
-            )
+    source = (
+        as_persona_on_bigquery("auditor")
+        .query(
+            f"SELECT {keys}, MAX(payees) FROM `{project}.audit.{table['from']}`"  # noqa: S608
+            f" GROUP BY {keys}"
         )
-    ]
+        .rows
+    )
     kept = {row[:-1] for row in source if int(row[-1]) >= minimum}
     # The left-out table holds no row under the minimum in today's build, so only the group totals
     # show the filter at work; both views are still held to exactly the kept rows.
