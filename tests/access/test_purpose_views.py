@@ -255,6 +255,8 @@ class Bq:
             dataset = command[-1].removeprefix(f"{PROJECT}:")
             entries = self.held.get(dataset, [])
             if "--routines" in command:
+                # BigQuery refuses a routine listing of more than 1000.
+                assert purpose_views.LISTED <= 1000, "the routine listing asks for more than 1000"
                 return json.dumps(
                     [{"routineReference": {"routineId": n}} for n, k in entries if k == "ROUTINE"]
                 )

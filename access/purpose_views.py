@@ -68,8 +68,10 @@ LAYERS = ("landed", "intermediate")
 COLUMN = re.compile(r"^[a-z][a-z0-9_]*$")
 # A name found in a purpose dataset that the module can write into a statement, as `path` checks.
 NAME = re.compile(r"^[a-z][a-z0-9_]*$")
-# The most entries one listing returns; a listing that reaches it may leave entries out.
-LISTED = 10000
+# The most entries one listing returns; a listing that reaches it may leave entries out. BigQuery's
+# routine listing refuses more than 1000 (`maxResults must be less than or equal to the maximum of
+# 1000`), so both listings ask for 1000.
+LISTED = 1000
 VIEW_KIND = "VIEW"
 ROUTINE_KIND = "ROUTINE"
 
