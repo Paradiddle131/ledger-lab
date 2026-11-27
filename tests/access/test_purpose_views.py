@@ -35,7 +35,15 @@ import httpx
 import pytest
 
 from access import purpose_views
-from access.bigquery import PersonaQueryError, PersonaSession, chain, mint, service_account
+from access.bigquery import (
+    OVER_CAP,
+    PersonaQueryError,
+    PersonaSession,
+    chain,
+    in_parts,
+    mint,
+    service_account,
+)
 from access.identities import identity
 from access.purpose_views import (
     Found,
@@ -496,30 +504,15 @@ def digested(view: View, columns: Doc) -> tuple[str, ...]:
     return tuple(c for c in view.columns if c not in tags)
 
 
-# BigQuery's reason for a query refused by its bytes-billed cap, which it refuses before running.
-OVER_CAP = "bytesBilledLimitExceeded"
-
-
 def split_summary(
     warehouse: Warehouse, dataset: str, table: str, digest: Sequence[str]
 ) -> list[tuple[tuple[str, ...], list[tuple[Any, ...]]]]:
     """The summary of every row the warehouse shows of the columns, in parts of columns, each
-    part keeping `entity_id`: a part BigQuery refuses as over the persona's bytes-billed cap (a
-    query reads every row of each column it names, whatever the row policies leave) is split in
-    two, so the cap stays as it is and no part bills more than it allows."""
-    columns = tuple(digest)
-    try:
-        return [(columns, warehouse.summary(dataset, table, columns, None))]
-    except PersonaQueryError as error:
-        key = tuple(c for c in columns if c == "entity_id")
-        rest = [c for c in columns if c != "entity_id"]
-        if error.reason != OVER_CAP or len(rest) < 2:
-            raise
-        half = len(rest) // 2
-        return [
-            *split_summary(warehouse, dataset, table, (*key, *rest[:half])),
-            *split_summary(warehouse, dataset, table, (*key, *rest[half:])),
-        ]
+    part keeping `entity_id`, where BigQuery refuses the whole as over the persona's bytes-billed
+    cap (`access/bigquery.py`'s `in_parts`)."""
+    return in_parts(
+        lambda part: warehouse.summary(dataset, table, part, None), digest, keep=(ENTITY,)
+    )
 
 
 def ours(view: View, columns: Doc, persona: str) -> bool:

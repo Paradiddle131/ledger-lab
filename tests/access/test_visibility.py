@@ -33,9 +33,13 @@ rows and an aggregate that keeps no group are acted out on invented tables, labe
 copy of the build, and are reported as proven on invented tables only.
 
 The engine is a parameter: an engine opens a persona's connection and the source with full rights,
-and every observation is SQL over the persona's own tables and the source's, so the BigQuery twin
-swaps the engine and keeps the cells. Failure messages name persona, place, the expected cell and
-what was observed, in counts and names of tables and columns, never a data value.
+and every observation reads them through the same reader methods (counts, row digests, distinct
+values, groups), each engine writing its own SQL, so the BigQuery twin
+(`tests/access/visibility_on_bigquery.py`, `make bigquery-visibility`) keeps the cells. It cannot
+hold invented tables or rebuild the rules, so there a cell the build holds nothing for is counted
+as left to the local engine, and the tests that rebuild the rules skip. Failure messages name
+persona, place, the expected cell and what was observed, in counts and names of tables and
+columns, never a data value.
 """
 
 import shutil
@@ -51,6 +55,7 @@ import duckdb
 import pytest
 from gcp_project import lab_project_or_none
 
+from access.bigquery import in_parts
 from access.compile import (
     ENTITY,
     SOURCE,
@@ -109,9 +114,9 @@ class Catalogues:
 
 
 class Reader(Protocol):
-    """A connection: the source read with full rights, or one persona's own."""
-
-    def rows(self, sql: str) -> list[Row]: ...
+    """A connection: the source read with full rights, or one persona's own. Tables are named as
+    `tables` names them; every read of rows goes through these methods, so each engine writes its
+    own SQL and reads a large table without bringing its rows back where it can."""
 
     def tables(self) -> dict[str, dict[str, str]]:
         """Each table and view the connection's database holds, in any schema, with its columns
@@ -119,20 +124,82 @@ class Reader(Protocol):
         ...
 
     def views(self) -> set[str]:
-        """The names of `tables` that are views."""
-        ...
-
-    def row_hash(self, columns: Sequence[str]) -> str:
-        """SQL for one number per row over the named columns, equal for equal values."""
+        """The names of `tables` that are views the engine's own rules did not generate as
+        generated."""
         ...
 
     def is_string(self, kind: str) -> bool: ...
 
+    def count(self, table: str, entities: set[str] | None, column: str | None = None) -> int:
+        """The rows of the entities (every row, for None), or their non-null cells of a column."""
+        ...
+
+    def read(self, table: str, columns: Sequence[str]) -> list[Row]:
+        """Every row of the columns, as the connection gives a table that small (an aggregate
+        table)."""
+        ...
+
+    def digest(
+        self,
+        table: str,
+        columns: Sequence[str],
+        entities: set[str] | None,
+        apart: Mapping[str, str | None] | None = None,
+    ) -> object:
+        """The rows of the entities over the columns, as a multiset equal for equal rows; each
+        column in `apart` under its masking rule, or as stored for None, so a value can be held to
+        its rule. `missing` compares two."""
+        ...
+
+    def unique(self, table: str, column: str) -> bool:
+        """Whether the column holds a distinct value on every row."""
+        ...
+
+    def distinct(self, table: str, column: str) -> set[Any]:
+        """Every distinct value the column holds that the connection can read."""
+        ...
+
+    def grouped(
+        self,
+        table: str,
+        keys: Sequence[str],
+        sums: Sequence[str],
+        kind: str,
+        of: str,
+        entities: set[str] | None,
+    ) -> list[tuple[Row, list[Any], Any]]:
+        """Per group of the keys, which hold `entity_id`: its sums and its units, the set of
+        distinct values of `of` for `count_distinct` (or their count, where the engine counts
+        them), the largest `of` for `max`."""
+        ...
+
+    def rows(self, sql: str) -> list[Row]:
+        """The rows of a query in the engine's own SQL, for the tests that run on the local
+        engine alone."""
+        ...
+
+
+def missing(want: object, got: object) -> int | None:
+    """How many of the wanted rows the other multiset lacks: a count where both are counted
+    rows, else 0 for equal digests and None for digests that differ by an unknown number."""
+    if isinstance(want, Counter) and isinstance(got, Counter):
+        return sum((want - got).values())
+    return 0 if want == got else None
+
+
+def some(n: int | None) -> str:
+    return "some" if n is None else str(n)
+
 
 class Engine(Protocol):
     catalogues: Catalogues
+    # Why a test cannot change the engine's rules or tables, so `invented` and `rebuilt` refuse;
+    # None where it can.
+    fixed: str | None
 
-    def source(self) -> Reader: ...
+    def source(self, persona: str | None = None) -> Reader:
+        """The source read with full rights, as the reference for the persona's cells."""
+        ...
 
     def persona(self, persona: str) -> Reader: ...
 
@@ -181,11 +248,75 @@ class LocalReader:
             ).fetchall()
         }
 
-    def row_hash(self, columns: Sequence[str]) -> str:
-        return f"hash({', '.join(quote(c) for c in columns)})"
-
     def is_string(self, kind: str) -> bool:
         return kind == "VARCHAR"
+
+    def count(self, table: str, entities: set[str] | None, column: str | None = None) -> int:
+        what = f"count({quote(column)})" if column else "count(*)"
+        ((n,),) = self.rows(select(what, table, of_entities(entities)))
+        return n
+
+    def read(self, table: str, columns: Sequence[str]) -> list[Row]:
+        return self.rows(select(", ".join(quote(c) for c in columns), table))
+
+    def digest(
+        self,
+        table: str,
+        columns: Sequence[str],
+        entities: set[str] | None,
+        apart: Mapping[str, str | None] | None = None,
+    ) -> Counter[Row]:
+        """DuckDB's hash of each row's columns outside `apart`, and each column in it as stored
+        or under its masking rule, worked out here in Python."""
+        rules = apart or {}
+        hashed = [c for c in columns if c not in rules]
+        kept = [c for c in columns if c in rules]
+        key = f"hash({', '.join(quote(c) for c in hashed)})" if hashed else "0"
+        listed = ", ".join([key, *(quote(c) for c in kept)])
+        return Counter(
+            (
+                h,
+                *(
+                    v if rules[c] is None else mask(str(rules[c]), v)
+                    for c, v in zip(kept, values, strict=True)
+                ),
+            )
+            for h, *values in self.rows(select(listed, table, of_entities(entities)))
+        )
+
+    def unique(self, table: str, column: str) -> bool:
+        ((rows, distinct),) = self.rows(select(f"count(*), count(distinct {quote(column)})", table))
+        return rows == distinct
+
+    def distinct(self, table: str, column: str) -> set[Any]:
+        return {v for (v,) in self.rows(select(f"distinct {quote(column)}", table))}
+
+    def grouped(
+        self,
+        table: str,
+        keys: Sequence[str],
+        sums: Sequence[str],
+        kind: str,
+        of: str,
+        entities: set[str] | None,
+    ) -> list[tuple[Row, list[Any], Any]]:
+        """Each entity's sums summed here in DuckDB and, for `count_distinct`, the distinct values
+        of `of` brought back, so groups across entities combine them in Python."""
+        listed = ", ".join(quote(k) for k in keys)
+        rows = of_entities(entities)
+        totals = ", ".join([*(f"sum({quote(s)})" for s in sums), f"max({quote(of)})"])
+        payees: dict[Row, set[Any]] = {}
+        if kind == "count_distinct":
+            for *key, unit in self.rows(select(f"distinct {listed}, {quote(of)}", table, rows)):
+                if unit is not None:
+                    payees.setdefault(tuple(key), set()).add(unit)
+        found: list[tuple[Row, list[Any], Any]] = []
+        for values in self.rows(select(f"{listed}, {totals}", table, f"{rows} group by {listed}")):
+            key, summed, largest = tuple(values[: len(keys)]), values[len(keys) : -1], values[-1]
+            found.append(
+                (key, list(summed), payees.get(key, set()) if kind == "count_distinct" else largest)
+            )
+        return found
 
 
 @dataclass
@@ -201,8 +332,9 @@ class LocalEngine:
     opened: list[duckdb.DuckDBPyConnection] = field(default_factory=list)
     children: list["LocalEngine"] = field(default_factory=list)
     reader: LocalReader | None = None
+    fixed: str | None = None
 
-    def source(self) -> LocalReader:
+    def source(self, persona: str | None = None) -> LocalReader:
         if self.reader is None:
             self.reader = LocalReader(duckdb.connect(str(self.warehouse), read_only=True), True)
             self.opened.append(self.reader.db)
@@ -451,7 +583,8 @@ class Group:
 
     kind: str  # how the units count: `count_distinct` or `max`
     sums: dict[str, list[Any]] = field(default_factory=dict)  # per entity, its sums
-    units: dict[str, Any] = field(default_factory=dict)  # per entity, its payees or largest count
+    # Per entity, its payees (or their count, where the engine counts them) or largest count.
+    units: dict[str, Any] = field(default_factory=dict)
 
     def total(self, entities: Sequence[str] | None = None) -> list[Any]:
         shares = [s for e, s in self.sums.items() if entities is None or e in entities]
@@ -460,7 +593,13 @@ class Group:
     def count(self, entities: Sequence[str] | None = None) -> int | None:
         each = [n for e, n in self.units.items() if entities is None or e in entities]
         if self.kind == "count_distinct":
-            return len(set().union(*each))
+            if all(isinstance(n, set) for n in each):
+                return len(set().union(*each))
+            # Counted in the source per entity: one entity's count is the group's, and two
+            # entities' payees, which may overlap, cannot be combined from their counts.
+            if len(each) != 1:
+                raise ValueError("payees counted per entity cannot be combined across entities")
+            return int(each[0])
         present = [n for n in each if n is not None]
         return max(present) if present else None
 
@@ -475,25 +614,12 @@ def groups_of(source: Reader, spec: Doc, entry: Doc, scope: set[str] | None) -> 
     None), each entity's sums and units summed in the source and combined here in Python."""
     grain, sums, _, kind, of = spec_columns(spec, entry)
     keys = list(dict.fromkeys([*grain, ENTITY]))
-    listed = ", ".join(quote(k) for k in keys)
-    rows = of_entities(scope)
-    totals = ", ".join([*(f"sum({quote(s)})" for s in sums), f"max({quote(of)})"])
-    payees: dict[Row, set[Any]] = {}
-    if kind == "count_distinct":
-        for *key, unit in source.rows(
-            select(f"distinct {listed}, {quote(of)}", spec["from"], rows)
-        ):
-            if unit is not None:
-                payees.setdefault(tuple(key), set()).add(unit)
     groups: dict[Row, Group] = {}
-    for values in source.rows(
-        select(f"{listed}, {totals}", spec["from"], f"{rows} group by {listed}")
-    ):
-        key, summed, largest = values[: len(keys)], values[len(keys) : -1], values[-1]
+    for key, summed, units in source.grouped(spec["from"], keys, sums, kind, of, scope):
         group = groups.setdefault(tuple(key[keys.index(c)] for c in grain), Group(kind))
         entity = key[keys.index(ENTITY)]
         group.sums[entity] = list(summed)
-        group.units[entity] = payees.get(tuple(key), set()) if kind == "count_distinct" else largest
+        group.units[entity] = units
     return groups
 
 
@@ -541,13 +667,12 @@ class Sight:
     catalogues: Catalogues
 
     def count(self, reader: Reader, table: str, entities: set[str] | None) -> int:
-        ((n,),) = reader.rows(select("count(*)", table, of_entities(entities)))
-        return n
+        return reader.count(table, entities)
 
 
 def observe(engine: Engine, matrix: Doc, persona: str) -> list[Seen]:
     """Every cell of the persona's row, observed through its own connection."""
-    me, source = engine.persona(persona), engine.source()
+    me, source = engine.persona(persona), engine.source(persona)
     cat = engine.catalogues
     sight = Sight(
         persona, matrix["personas"][persona], me, source, me.tables(), source.tables(), cat
@@ -623,12 +748,9 @@ def observe_product(
                 if (n := sight.count(me, name, one)) != total:
                     place.fail(f"observed {n} rows in {name} where the source holds {total}")
                 plain = [c for c in want if c not in tagged.get(table, {})]
-                digest = select(me.row_hash(plain), table, of_entities(one))
-                theirs = select(me.row_hash(plain), name, of_entities(one))
-                if differ := Counter(source.rows(digest)) - Counter(me.rows(theirs)):
-                    place.fail(
-                        f"observed {sum(differ.values())} rows of {name} unlike the source's"
-                    )
+                key = row_key(sight, table, listed)
+                if (differ := compared(sight, table, name, plain, one, key)) != 0:
+                    place.fail(f"observed {some(differ)} rows of {name} unlike the source's")
             continue
         place.support += 0 if place.cell == "aggregate" else total
         for name in row_tables(table):
@@ -661,7 +783,7 @@ def observe_product(
             scope if entity else None,
             known_entities(sight.row, cat.aggregates),
         )
-        got = me.rows(select(", ".join(quote(c) for c in shape[name]), name))
+        got = me.read(name, shape[name])
         if apart:
             at = grain.index(ENTITY)
             want, got = ([g for g in groups if g[at] == entity] for groups in (want, got))
@@ -682,20 +804,46 @@ def row_key(sight: Sight, table: str, listed: Sequence[str]) -> list[str]:
     tagged = tagged_columns(sight.catalogues.columns).get(table, {})
     plain = [c for c in sight.built[table] if c not in tagged and c in listed]
     for column in plain:
-        ((rows, distinct),) = sight.source.rows(
-            select(f"count(*), count(distinct {quote(column)})", table)
-        )
-        if rows == distinct:
+        if sight.source.unique(table, column):
             return [column]
     return plain
+
+
+def compared(
+    sight: Sight,
+    table: str,
+    name: str,
+    columns: Sequence[str],
+    entities: set[str] | None,
+    key: Sequence[str],
+    rule: Mapping[str, str | None] | None = None,
+) -> int | None:
+    """How many of the source's rows of the entities over the columns the persona's table lacks
+    (None where the engine tells only that they differ), each column in `rule` under its rule on
+    the source's side and as the persona reads it on its own: 0 when they match. Where BigQuery
+    refuses a read as over the bytes-billed cap, the columns are compared in parts, each keeping
+    the row key, `entity_id` and the ruled columns, so equal parts still mean equal rows wherever
+    the key tells the rows apart."""
+    rules = dict(rule or {})
+
+    def both(part: tuple[str, ...]) -> tuple[object, object]:
+        ruled = {c: r for c, r in rules.items() if c in part}
+        return (
+            sight.source.digest(table, part, entities, ruled),
+            sight.me.digest(name, part, entities, dict.fromkeys(ruled)),
+        )
+
+    worst: int | None = 0
+    for _, (want, got) in in_parts(both, columns, (*key, ENTITY, *rules)):
+        n = missing(want, got)
+        worst = None if n is None or worst is None else worst + n
+    return worst
 
 
 def strings_held(sight: Sight) -> dict[str, set[Any]]:
     """Every distinct string value the persona can read, per `<table>.<column>`."""
     return {
-        f"{table}.{column}": {
-            v for (v,) in sight.me.rows(select(f"distinct {quote(column)}", table))
-        }
+        f"{table}.{column}": sight.me.distinct(table, column)
         for table, columns in sight.held.items()
         for column, kind in columns.items()
         if sight.me.is_string(kind)
@@ -708,7 +856,7 @@ def secrets(sight: Sight, marks: list[tuple[str, str]]) -> set[Any]:
     tagged, source = tagged_columns(sight.catalogues.columns), sight.source
 
     def values(table: str, column: str) -> set[Any]:
-        return {v for (v,) in source.rows(select(f"distinct {quote(column)}", table))}
+        return source.distinct(table, column)
 
     found: set[Any] = set()
     for table, column in marks:
@@ -755,18 +903,15 @@ def observe_tags(sight: Sight) -> list[Seen]:
                     if name not in sight.held or column not in sight.held[name]:
                         place.fail(f"observed no column {name}.{column}")
                         continue
-                    key = sight.me.row_hash(row_key(sight, table, listed))
-                    pairs = select(f"{key}, {quote(column)}", table, of_entities(entities))
-                    theirs = select(f"{key}, {quote(column)}", name, of_entities(entities))
-                    stored = sight.source.rows(pairs)
-                    place.support += sum(1 for _, v in stored if v is not None)
+                    key = row_key(sight, table, listed)
+                    place.support += sight.source.count(table, entities, column)
                     rule = "stored value" if cell == "clear" else f"{rules[tag]} masking"
-                    want = Counter(
-                        (h, v if cell == "clear" else mask(rules[tag], v)) for h, v in stored
-                    )
-                    if differ := want - Counter(sight.me.rows(theirs)):
-                        n = sum(differ.values())
-                        place.fail(f"observed {n} values of {name}.{column} not its {rule}")
+                    applied = {column: None if cell == "clear" else rules[tag]}
+                    differ = compared(sight, table, name, [*key, column], entities, key, applied)
+                    if differ != 0:
+                        place.fail(
+                            f"observed {some(differ)} values of {name}.{column} not its {rule}"
+                        )
         if cell in ("masked", "denied"):
             hidden = secrets(sight, marks)
             # Denied, or masked where no purpose lists a column of the tag: the stored values
@@ -788,38 +933,49 @@ def observe_tags(sight: Sight) -> list[Seen]:
 
 
 def act_out(engine: Engine, matrix: Doc, personas: Sequence[str]) -> dict[str, list[Seen]]:
-    """Every cell of each persona, on the build and on the invented copy of it."""
-    invented = engine.invented()
-    return {
-        "build": [s for p in personas for s in observe(engine, matrix, p)],
-        "invented": [s for p in personas for s in observe(invented, matrix, p)],
-    }
+    """Every cell of each persona, on the build and, where the engine can hold them, on the
+    invented copy of it."""
+    runs = {"build": [s for p in personas for s in observe(engine, matrix, p)]}
+    if engine.fixed is None:
+        invented = engine.invented()
+        runs["invented"] = [s for p in personas for s in observe(invented, matrix, p)]
+    return runs
+
+
+# The kind's suffix for a cell an engine with no invented copy acted out on no row: proven, if at
+# all, on the local engine's invented tables, never counted as proven here.
+LEFT = " left to the local engine"
 
 
 def verdict(runs: Mapping[str, list[Seen]]) -> tuple[list[str], dict[str, Counter[str]]]:
     """The failures, and per persona the cells proven by kind: `<kind>` on the build, `<kind>
-    invented` on invented tables only. A cell proven on neither is a failure."""
+    invented` on invented tables only. A cell proven on neither is a failure; without an invented
+    run, a cell the build holds nothing for is tallied as `<kind> left to the local engine`,
+    apart from the proven ones."""
     failures = [f for seen in runs.values() for s in seen for f in s.failures]
     where: dict[tuple[str, str], str] = {}
     cells: dict[tuple[str, str], Seen] = {}
     for build in ("build", "invented"):
-        for s in runs[build]:
+        for s in runs.get(build, []):
             if s.place != "tables":
                 cells.setdefault((s.persona, s.place), s)
                 if s.support:
                     where.setdefault((s.persona, s.place), build)
     tally: dict[str, Counter[str]] = {}
     for key, s in cells.items():
-        if key not in where:
-            failures.append(f"{s.persona} {s.place}: expected {s.cell}, acted out on no row")
-            continue
         kind = ("tag " if s.place.startswith("tag ") else "") + s.cell
+        if key not in where:
+            if "invented" in runs:
+                failures.append(f"{s.persona} {s.place}: expected {s.cell}, acted out on no row")
+            else:
+                tally.setdefault(s.persona, Counter())[kind + LEFT] += 1
+            continue
         suffix = " invented" if where[key] == "invented" else ""
         tally.setdefault(s.persona, Counter())[kind + suffix] += 1
     return failures, tally
 
 
-@pytest.fixture(params=["local", "bigquery"])
+@pytest.fixture(params=["local", pytest.param("bigquery", marks=pytest.mark.bigquery_persona)])
 def engine(
     request: pytest.FixtureRequest,
     access: Doc,
@@ -829,14 +985,25 @@ def engine(
     tmp_path: Path,
 ) -> Iterator[Engine]:
     """The engine a persona's connection is opened on: the local engine over the dbt build of
-    the samples, or BigQuery in the lab's own project, skipped until it is written, before any
-    build, so the controls test can see it skip quickly."""
+    the samples, or BigQuery in the lab's own project (`tests/access/visibility_on_bigquery.py`),
+    as each persona's own service account, which a plain run leaves out by its marker
+    (`make bigquery-visibility` runs it on the owner's machine) and which skips before any build
+    or GCP call without the lab's project."""
     if request.param == "bigquery":
         if lab_project_or_none() is None:
             pytest.skip("LEDGER_LAB_GCP_PROJECT is unset: the lab has no BigQuery to act in")
-        # Named, not run: opening a persona on BigQuery and reading the source there are written
-        # with the warehouse's own rules, which this engine acts on; nothing here calls GCP.
-        pytest.skip("the BigQuery engine is not written yet: it comes with the warehouse's rules")
+        from gcp_project import lab_project
+
+        from tests.access.visibility_on_bigquery import BigQueryEngine
+
+        live = BigQueryEngine(
+            Catalogues(access, columns, aggregates, purposes),
+            lab_project(),
+            request.getfixturevalue("as_persona_on_bigquery"),
+        )
+        yield live
+        live.close()
+        return
     warehouse: Path = request.getfixturevalue("warehouse")
     local = LocalEngine(warehouse, Catalogues(access, columns, aggregates, purposes), tmp_path)
     yield local
@@ -868,11 +1035,43 @@ SAMPLE_PROVEN = {
 }
 
 
+def live_proven() -> dict[str, dict[str, int]]:
+    """Each persona's cells on BigQuery, by kind: those the local engine proves over the landed
+    build, which BigQuery holds, proven there too, and those it proves on invented tables only
+    left to it."""
+    return {
+        persona: {
+            kind.removesuffix(" invented") + (LEFT if kind.endswith(" invented") else ""): n
+            for kind, n in counted.items()
+        }
+        for persona, counted in LANDED_PROVEN.items()
+    }
+
+
 def test_every_persona_sees_its_matrix(engine: Engine, visibility: Doc) -> None:
-    failures, tally = verdict(act_out(engine, visibility, PERSONAS))
-    assert failures == []
+    """On BigQuery, every cell the landed data holds something for is proven, and the cells it
+    holds nothing for (no table, no tagged column, no rows) are named and left to the local
+    engine's invented tables; a cell proven there or left to it in other numbers fails."""
+    runs = act_out(engine, visibility, PERSONAS)
+    failures, tally = verdict(runs)
+    if failures:
+        pytest.fail(f"{len(failures)} observations unlike the matrix: " + "; ".join(failures))
     assert set(tally) == set(PERSONAS)
-    assert kinds(tally) == SAMPLE_PROVEN
+    if engine.fixed is None:
+        assert kinds(tally) == SAMPLE_PROVEN
+        return
+    proven = {(s.persona, s.place) for s in runs["build"] if s.support and s.place != "tables"}
+    left = [s for s in runs["build"] if s.place != "tables" and (s.persona, s.place) not in proven]
+    print(f"\n{len(proven)} cells proven on BigQuery, {len(left)} left to the local engine:")
+    for persona in PERSONAS:
+        places = [f"{s.place} ({s.cell})" for s in left if s.persona == persona]
+        print(f"  {persona}: {', '.join(places)}")
+    found = {p: dict(sorted(t.items())) for p, t in tally.items()}
+    if found != live_proven():
+        pytest.fail(
+            f"cells proven on BigQuery and left to the local engine, by kind: {found}, where the"
+            f" landed build gives {live_proven()}"
+        )
 
 
 # The harness fails for every kind of cell: each change below breaks one persona's compiled
@@ -1194,7 +1393,11 @@ def test_a_small_cell_query_returns_nothing(
     engine: Engine, visibility: Doc, aggregates: Doc
 ) -> None:
     """Each aggregate reader asks its aggregate tables for every group of the source of fewer
-    payees than the minimum, by its grain, and is given none."""
+    payees than the minimum, by its grain, and is given none. On BigQuery, where a threshold view
+    answers only an aggregating query, the small cells are `make bigquery-thresholds`' finer
+    grain."""
+    if engine.fixed:
+        pytest.skip("on BigQuery the small-cell query is the thresholds test's finer grain")
     asked: Counter[str] = Counter()
     minimum = aggregates["minimum_group"]
     for persona in PERSONAS:
@@ -1334,6 +1537,8 @@ def across_entities(engine: Engine) -> Engine:
 def test_two_aggregates_whose_difference_isolates_one_entity_are_suppressed(
     engine: Engine, visibility: Doc, aggregates: Doc
 ) -> None:
+    if engine.fixed:
+        pytest.skip(f"{engine.fixed}: the pair is acted out at other minimums, rebuilt")
     # The samples' groups are small, so both lines run at a minimum group of two.
     assert aggregates["minimum_entities"] == 2
     # Each entity's group totals apart, as the catalogue gives them, take nothing away.
