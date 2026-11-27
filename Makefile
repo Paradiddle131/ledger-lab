@@ -141,7 +141,8 @@ bigquery-visibility: sync
 # persona: the Chicago and the UK transport accountants asking the same question get different rows,
 # each job run as the asker's own account (SESSION_USER() checked before the first query) and
 # labelled with the agent, the conversation and the turn; a question without a persona mints no
-# token; and a runaway join is refused by BigQuery at the bytes left of the turn, with no job billed.
+# token; and a runaway join's job is refused by BigQuery at the bytes left of the turn, the turn
+# stopped with no run.
 # Run it between two `make cost-check` reads.
 bigquery-agent: sync
 	uv run pytest -m bigquery_persona -rA tests/agent/test_ask.py::test_two_personas_asking_the_same_question_get_different_rows tests/agent/test_ask.py::test_a_question_without_a_persona_gets_no_answer tests/agent/test_cost.py::test_runaway_join_stops_at_the_cap tests/agent/test_bigquery_mode.py::test_each_job_of_a_turn_carries_its_labels

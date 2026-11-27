@@ -9,6 +9,7 @@ denial-of-wallet cases (`agent/evals/adversarial.yaml`): every payment against e
 """
 
 import dataclasses
+import re
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -23,6 +24,7 @@ from agent.ask import (
     MAX_STEPS,
     MAX_TOOL_CALLS,
     TURN_CAPPED,
+    Answer,
     Audit,
     Connection,
     ask,
@@ -129,6 +131,33 @@ def engine(request: pytest.FixtureRequest) -> str:
 # A turn's bytes on BigQuery for the runaway join's proof: below the 10 MiB BigQuery bills at least
 # for each table a query reads, so any job that reads a table bills past what is left of the turn.
 FEW_BYTES = 1_000_000
+# The refusal `agent/bigquery.py` gives only when BigQuery answers a job past its cap
+# (`bytesBilledLimitExceeded`), naming the cap the job carried and the turn's bytes; the turn's own
+# stop before a job is sent, with no bytes left, reads otherwise.
+REFUSED_BY_BIGQUERY = re.compile(
+    r"BigQuery refused it before it ran, as billing more than the (\d+) bytes left of the turn's"
+    r" (\d+)"
+)
+
+
+def stopped_at_the_cap(answer: Answer, model: Calls, audit: Audit, engine: str) -> None:
+    """The runaway join's turn stopped at the byte cap, with no run and no rows: on the local
+    engine by the row cap, on BigQuery by BigQuery's refusal of the job at the cap it carried,
+    within the turn's `FEW_BYTES`."""
+    assert answer.citations == ()
+    (refusal,) = answer.refusals
+    assert refusal.query == RUNAWAY.id
+    if engine == "local":
+        assert "rows" in refusal.reason
+    else:
+        found = REFUSED_BY_BIGQUERY.fullmatch(refusal.reason)
+        assert found is not None
+        assert 0 < int(found[1]) <= int(found[2]) == FEW_BYTES
+    assert answer.text.startswith("A query reached a spending cap")
+    assert model.asked == 2  # the plan and the one step that made the call
+    record = last(audit)
+    assert (record["outcome"], record["reason"]) == ("stopped", BYTES_CAP)
+    assert record["runs"] == []
 
 
 def test_runaway_join_stops_at_the_cap(
@@ -136,9 +165,10 @@ def test_runaway_join_stops_at_the_cap(
 ) -> None:
     """Pairing every payment with every other is not run past the turn's cap. On the local engine
     it is planned past the turn's row cap, the byte cap's stand-in. On BigQuery, which bills the
-    bytes of the columns a query reads however many rows it pairs, the job carries the bytes left
-    of the turn as its `maximumBytesBilled`, and BigQuery refuses it before it runs; the turn is
-    stopped at the byte cap, with no run and no rows."""
+    bytes of the columns a query reads however many rows it pairs, the turn's bytes are set below
+    one table's least bill, and the job is sent and refused by BigQuery at the cap it carried, the
+    bytes left of the turn; a turn stopped before any job is sent fails it. Either way the turn is
+    stopped at the byte cap, with no run and no rows (`stopped_at_the_cap`)."""
     limits = load_limits()
     if engine == "local":
         connection = request.getfixturevalue("as_persona")(READER)
@@ -147,11 +177,9 @@ def test_runaway_join_stops_at_the_cap(
         assert estimated_rows(cursor, RUNAWAY.sql, None) > cap_of(connection, limits)
         cursor.close()
         connect: Callable[[str], Connection] = lambda _: connection  # noqa: E731
-        spent = "rows"
     else:
         limits = dataclasses.replace(limits, bytes_billed_per_turn=FEW_BYTES)
         connect = request.getfixturevalue("agent_on_bigquery")
-        spent = "bytes"
     model = Calls(RUNAWAY.id)
     started = time.monotonic()
     answer = ask(
@@ -164,15 +192,7 @@ def test_runaway_join_stops_at_the_cap(
         limits=limits,
     )
     assert time.monotonic() - started < limits.seconds_per_query
-    assert answer.citations == ()
-    (refusal,) = answer.refusals
-    assert refusal.query == RUNAWAY.id
-    assert spent in refusal.reason
-    assert answer.text.startswith("A query reached a spending cap")
-    assert model.asked == 2  # the plan and the one step that made the call
-    record = last(audit)
-    assert (record["outcome"], record["reason"]) == ("stopped", BYTES_CAP)
-    assert record["runs"] == []
+    stopped_at_the_cap(answer, model, audit, engine)
 
 
 def test_a_query_past_the_time_cap_is_interrupted(as_persona: AsPersona, audit: Audit) -> None:

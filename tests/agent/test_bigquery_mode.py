@@ -3,8 +3,9 @@
 Three kinds of proof:
 - against a fake BigQuery at httpx's transport and a fake mint, each job the agent sends is read
   as it leaves: its byte cap is the bytes left of the turn within the persona queries' cap, its
-  labels tie it to the turn, a job refused at the cap stops the turn and is sent once, and no
-  query runs on a connection BigQuery would run as anyone but the asking persona;
+  labels tie it to the turn, a job refused at the cap stops the turn and is sent once, the runaway
+  join's proof passes only when BigQuery refused its job, and no query runs on a connection
+  BigQuery would run as anyone but the asking persona;
 - `make bigquery-agent`'s pytest run, in a child process with no network, no gcloud and no
   inherited variable, over the stand-in for the lab's BigQuery (`tests/access/bigquery_stub.py`)
   serving the samples' build under its row access policies and grants: the BigQuery parameters of
@@ -49,6 +50,9 @@ from agent.bigquery import (
 )
 from agent.limits import BYTES_CAP, load_limits
 from agent.model import Reply, ToolCall, Turn, VerifiedQuery, model_from_config
+from tests.agent.test_cost import FEW_BYTES, READER, stopped_at_the_cap
+from tests.agent.test_cost import RUNAWAY as RUNAWAY_JOIN
+from tests.agent.test_cost import Calls as Counted
 from tests.conftest import REPO
 
 PROJECT = "the-lab"
@@ -238,6 +242,55 @@ def test_a_job_whose_answer_names_no_bill_counts_its_whole_cap(audit: Audit) -> 
     per_turn = MAX_BYTES_BILLED + 50 * MIB
     asked(fake, audit, per_turn, "total-1", "total-2")
     assert [int(b["maximumBytesBilled"]) for b in fake.queries] == [MAX_BYTES_BILLED, 50 * MIB]
+
+
+class CheckNamesNoBill(Fake):
+    """A fake whose identity check's answer names no bill, so the check is counted at its whole
+    cap and the turn has no bytes left for the next job."""
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        response = super().handle(request)
+        if json.loads(request.content)["query"] != "SELECT SESSION_USER()":
+            return response
+        answer = response.json()
+        del answer["totalBytesBilled"]
+        return httpx.Response(200, json=answer)
+
+
+def runaway_asked(fake: Fake, audit: Audit) -> tuple[Any, Counted]:
+    """The runaway join's BigQuery case of `tests/agent/test_cost.py`, asked over `fake`."""
+    model = Counted(RUNAWAY_JOIN.id)
+    answer = ask(
+        READER,
+        RUNAWAY_JOIN.question,
+        as_persona=fake.connect(),
+        audit=audit,
+        model=model,
+        queries={RUNAWAY_JOIN.id: RUNAWAY_JOIN},
+        limits=replace(load_limits(), bytes_billed_per_turn=FEW_BYTES),
+    )
+    return answer, model
+
+
+def test_the_runaway_proof_passes_when_bigquery_refuses_the_job(fake: Fake, audit: Audit) -> None:
+    answer, model = runaway_asked(fake, audit)
+    assert [int(b["maximumBytesBilled"]) for b in fake.queries] == [FEW_BYTES]
+    stopped_at_the_cap(answer, model, audit, "bigquery")
+
+
+def test_the_runaway_proof_fails_when_no_job_is_sent(audit: Audit) -> None:
+    """The turn stopped before the runaway job is sent looks like a stop at the cap in every way
+    but the refusal's words, and the proof's BigQuery case refuses it."""
+    fake = CheckNamesNoBill()
+    answer, model = runaway_asked(fake, audit)
+    assert (fake.queries, answer.citations) == ([], ())
+    assert [r.query for r in answer.refusals] == [RUNAWAY_JOIN.id]
+    assert answer.text.startswith("A query reached a spending cap") and model.asked == 2
+    (record,) = records(audit)
+    assert (record["outcome"], record["reason"], record["runs"]) == ("stopped", BYTES_CAP, [])
+    with pytest.raises(AssertionError):
+        stopped_at_the_cap(answer, model, audit, "bigquery")
+    fake.client.close()
 
 
 @pytest.mark.parametrize("cap", [0, -1, MAX_BYTES_BILLED + 1])
