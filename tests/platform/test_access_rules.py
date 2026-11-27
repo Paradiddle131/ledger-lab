@@ -1,6 +1,7 @@
 """The warehouse's access rules in `platform/gcp`, read offline: datasets, the agent's data-owner
-rights, the persona grants on datasets, policy tags and masking rules, all generated from
-`access/personas.yaml` and `access/columns.yaml`, and none giving anyone a fence-moving permission.
+rights, the persona grants on datasets, the purposes' datasets of views and their grants, policy
+tags and masking rules, all generated from `access/personas.yaml`, `access/purposes.yaml` and
+`access/columns.yaml`, and none giving anyone a fence-moving permission.
 
 The tests in `make check` read the HCL; the `tofu` ones (run by `make fences-validate`, after
 `tofu init`) have OpenTofu evaluate the generated maps and compare them with what the catalogues
@@ -80,9 +81,53 @@ def expected_aggregate_datasets() -> dict[str, str]:
     return {p: aggregates_dataset(p) for p in catalogue("aggregates.yaml")["products"]}
 
 
+def expected_purpose_datasets() -> dict[str, str]:
+    """Each purpose's dataset of views, by purpose id: the id with `_` for `-`."""
+    return {u["id"]: dataset_id(u["id"]) for u in catalogue("purposes.yaml")["purposes"]}
+
+
 def expected_datasets() -> set[str]:
     products = {dataset_id(p["id"]) for p in catalogue("personas.yaml")["data_products"]}
-    return LAYERS | products | set(expected_aggregate_datasets().values())
+    views = set(expected_aggregate_datasets().values()) | set(expected_purpose_datasets().values())
+    return LAYERS | products | views
+
+
+def expected_built() -> set[str]:
+    """The datasets the agent builds in: every one but those of views, which read as themselves."""
+    views = set(expected_aggregate_datasets().values()) | set(expected_purpose_datasets().values())
+    return expected_datasets() - views
+
+
+def purpose_products() -> set[str]:
+    """The products the models build tables of, whose rows are read only through purposes."""
+    return {p["id"] for p in catalogue("personas.yaml")["data_products"] if p.get("tables")}
+
+
+def table_products() -> dict[str, str]:
+    return {
+        table: p["id"]
+        for p in catalogue("personas.yaml")["data_products"]
+        for table in p.get("tables", [])
+    }
+
+
+def expected_purpose_grants() -> set[tuple[str, str]]:
+    """Each persona of a purpose, as a read of the purpose's dataset."""
+    return {
+        (persona, dataset_id(u["id"]))
+        for u in catalogue("purposes.yaml")["purposes"]
+        for persona in u["personas"]
+    }
+
+
+def expected_purpose_sources() -> set[tuple[str, str]]:
+    """Each purpose dataset with each dataset its views read: those of its tables' products."""
+    products = table_products()
+    return {
+        (dataset_id(u["id"]), dataset_id(products[table]))
+        for u in catalogue("purposes.yaml")["purposes"]
+        for table in u["tables"]
+    }
 
 
 def expected_aggregate_grants() -> set[tuple[str, str]]:
@@ -96,10 +141,12 @@ def expected_aggregate_grants() -> set[tuple[str, str]]:
 
 
 def expected_dataset_grants() -> set[tuple[str, str, str]]:
+    """Each read or edit grant on a product the models build no tables of yet, as its dataset role;
+    a product with tables is read through purposes alone."""
     return {
         (g["persona"], dataset_id(g["product"]), DATASET_ROLES[g["access"]])
         for g in catalogue("personas.yaml")["grants"]
-        if g["access"] in DATASET_ROLES
+        if g["access"] in DATASET_ROLES and g["product"] not in purpose_products()
     }
 
 
@@ -127,7 +174,8 @@ COLUMNS_FROM_FILE = (
 DATASETS_FROM_FILE = re.compile(
     r"\$\{merge\(\{landed = \"[^\"]+\", intermediate = \"[^\"]+\"\}, "
     r'\{for p in local\.access\.data_products : replace\(p\.id, "-", "_"\) => p\.holds\}, '
-    r'\{for d, p in local\.aggregate_datasets : d => "[^"]+"\}\)\}'
+    r'\{for d, p in local\.aggregate_datasets : d => "[^"]+"\}, '
+    r'\{for d, u in local\.purpose_datasets : d => "[^"]+"\}\)\}'
 )
 AGGREGATES_FILE = 'yamldecode(file("${path.module}/../../access/aggregates.yaml"))'
 AGGREGATE_DATASETS = (
@@ -142,8 +190,28 @@ AGGREGATE_GRANTS = (
 GRANTS_FROM_FILE = (
     "${{for g in distinct([for g in local.access.grants : {persona = g.persona, "
     'dataset = replace(g.product, "-", "_"), role = local.dataset_roles[g.access]} '
-    "if contains(keys(local.dataset_roles), g.access)]) : "
+    "if contains(keys(local.dataset_roles), g.access) && "
+    "!contains(local.purpose_products, g.product)]) : "
     '"${g.persona} ${g.dataset} ${g.role}" => g}}'
+)
+PURPOSES_FILE = 'yamldecode(file("${path.module}/../../access/purposes.yaml"))'
+PURPOSE_DATASETS = '${{for u in local.purposes.purposes : replace(u.id, "-", "_") => u}}'
+PURPOSE_PRODUCTS = (
+    "${toset([for p in local.access.data_products : p.id if length(try(p.tables, [])) > 0])}"
+)
+PURPOSE_GRANTS = (
+    "${{for g in distinct(flatten([for d, u in local.purpose_datasets : "
+    "[for p in u.personas : {persona = p, dataset = d}]])) : "
+    '"${g.persona} ${g.dataset}" => g}}'
+)
+TABLE_DATASETS = (
+    "${merge([for p in local.access.data_products : "
+    '{for t in try(p.tables, []) : t => replace(p.id, "-", "_")}] ...)}'
+)
+PURPOSE_SOURCES = (
+    "${{for s in distinct(flatten([for d, u in local.purpose_datasets : "
+    "[for t in keys(u.tables) : {views = d, source = local.table_datasets[t]}]])) : "
+    '"${s.views} ${s.source}" => s}}'
 )
 
 
@@ -160,14 +228,24 @@ def test_the_generated_maps_read_the_catalogues() -> None:
     assert squash(local("dataset_grants")) == GRANTS_FROM_FILE
     assert squash(local("warehouse_readers")) == (
         "${toset(concat([for g in local.dataset_grants : g.persona], "
-        "[for g in local.aggregate_grants : g.persona]))}"
+        "[for g in local.aggregate_grants : g.persona], "
+        "[for g in local.purpose_grants : g.persona]))}"
     )
     assert local("aggregates") == f"${{{AGGREGATES_FILE}}}"
     assert squash(local("aggregate_datasets")) == AGGREGATE_DATASETS
     assert squash(local("aggregate_grants")) == AGGREGATE_GRANTS
-    assert squash(local("built")) == (
-        "${{for d, _ in local.datasets : d => d if !contains(keys(local.aggregate_datasets), d)}}"
+    assert squash(local("view_datasets")) == (
+        "${setunion(keys(local.aggregate_datasets), keys(local.purpose_datasets))}"
     )
+    assert squash(local("built")) == (
+        "${{for d, _ in local.datasets : d => d if !contains(local.view_datasets, d)}}"
+    )
+    assert local("purposes") == f"${{{PURPOSES_FILE}}}"
+    assert squash(local("purpose_datasets")) == PURPOSE_DATASETS
+    assert squash(local("purpose_products")) == PURPOSE_PRODUCTS
+    assert squash(local("purpose_grants")) == PURPOSE_GRANTS
+    assert squash(local("table_datasets")) == TABLE_DATASETS
+    assert squash(local("purpose_sources")) == PURPOSE_SOURCES
     assert squash(local("aggregate_sources")) == (
         "${{for d, p in local.aggregate_datasets : d => (contains(local.governed, "
         'replace(p, "-", "_")) ? "intermediate" : replace(p, "-", "_"))}}'
@@ -311,6 +389,12 @@ DATASET_ACCESS = {
         VIEWER_BASIC,
         "${google_service_account.persona[each.value.persona].email}",
     ),
+    "persona_reads_purposes": (
+        "${local.purpose_grants}",
+        DATASET.format("each.value.dataset"),
+        VIEWER_BASIC,
+        "${google_service_account.persona[each.value.persona].email}",
+    ),
     "publisher_writes_governed_copies": (
         "${local.governed}",
         DATASET.format("each.key"),
@@ -332,7 +416,7 @@ def test_every_dataset_grant_is_an_access_entry_and_none_a_dataset_iam_member() 
     resources = blocks("resource")
     assert not [k for k in resources if k[0].startswith("google_bigquery_dataset_iam_")]
     entries = {n: b for (t, n), b in resources.items() if t == "google_bigquery_dataset_access"}
-    assert set(entries) == {*DATASET_ACCESS, "aggregates_read_source"}
+    assert set(entries) == {*DATASET_ACCESS, "aggregates_read_source", "purposes_read_sources"}
     for name, (for_each, dataset, role, email) in DATASET_ACCESS.items():
         body = entries[name]
         assert set(body) - {"__is_block__"} == {"dataset_id", "role", "user_by_email"} | (
@@ -354,6 +438,66 @@ def test_each_aggregates_dataset_authorizes_its_views_on_its_source_alone() -> N
     (views,) = entry["dataset"]
     assert views["dataset_id"] == DATASET.format("each.key")
     assert views["project_id"] == "${var.project}"
+
+
+def test_each_purpose_dataset_authorizes_its_views_on_its_sources_alone() -> None:
+    body = blocks("resource")[("google_bigquery_dataset_access", "purposes_read_sources")]
+    assert set(body) - {"__is_block__"} == {"for_each", "dataset_id", "dataset"}
+    assert body["for_each"] == "${local.purpose_sources}"
+    assert body["dataset_id"] == DATASET.format("each.value.source")
+    (entry,) = body["dataset"]
+    assert [unquote(t) for t in entry["target_types"]] == ["VIEWS"]
+    (views,) = entry["dataset"]
+    assert views["dataset_id"] == DATASET.format("each.value.views")
+    assert views["project_id"] == "${var.project}"
+
+
+def test_a_purposes_views_read_its_tables_products_and_never_the_marts() -> None:
+    # The governed copy, under its row access policies, and a group product's own table: a view
+    # authorized on `intermediate` would read the marts, which carry no row access policy.
+    sources = expected_purpose_sources()
+    assert {source for _, source in sources} == {dataset_id(p) for p in purpose_products()}
+    assert not {source for _, source in sources} & LAYERS
+    assert sources == {
+        ("payment_review", "payments"),
+        ("group_close", "payments"),
+        ("group_close", "group_totals"),
+        ("audit", "payments"),
+        ("audit", "group_totals"),
+    }
+
+
+def test_a_purpose_dataset_is_no_other_declared_dataset() -> None:
+    others = LAYERS | {dataset_id(p["id"]) for p in catalogue("personas.yaml")["data_products"]}
+    others |= set(expected_aggregate_datasets().values())
+    purposes = list(expected_purpose_datasets().values())
+    assert len(set(purposes)) == len(purposes)
+    assert not set(purposes) & others
+
+
+def test_no_persona_reads_a_product_with_tables_but_through_its_purposes() -> None:
+    """Every row grant on a product with tables is served by a purpose of it, so moving the grant
+    to the purposes' datasets takes no reader's rows away, and no product dataset role is left on
+    such a product. An edit grant there would lose its writes, so none is held."""
+    products = table_products()
+    held = {
+        (persona, products[table])
+        for u in catalogue("purposes.yaml")["purposes"]
+        for persona in u["personas"]
+        for table in u["tables"]
+    }
+    rows = {
+        (g["persona"], g["product"], g["access"])
+        for g in catalogue("personas.yaml")["grants"]
+        if g["access"] in DATASET_ROLES and g["product"] in purpose_products()
+    }
+    assert rows, "the catalogue has a row reader of a product with tables to hold"
+    assert {(p, product) for p, product, _ in rows} == held
+    assert {access for _, _, access in rows} == {"read"}
+    assert not {d for _, d, _ in expected_dataset_grants()} & {
+        dataset_id(p) for p in purpose_products()
+    }
+    assert purpose_products() == {"payments", "group-totals"}
 
 
 def test_grants_land_on_the_resource_their_map_names() -> None:
@@ -614,10 +758,26 @@ def test_tofu_generates_each_personas_dataset_grants_and_no_others() -> None:
     grants = tofu_eval("values(local.dataset_grants)")
     assert {(g["persona"], g["dataset"], g["role"]) for g in grants} == expected_dataset_grants()
     assert len(grants) == len(expected_dataset_grants())
-    readers = {p for p, _, _ in expected_dataset_grants()} | {
-        p for p, _ in expected_aggregate_grants()
-    }
+    readers = (
+        {p for p, _, _ in expected_dataset_grants()}
+        | {p for p, _ in expected_aggregate_grants()}
+        | {p for p, _ in expected_purpose_grants()}
+    )
     assert set(tofu_eval("local.warehouse_readers")) == readers
+
+
+@pytest.mark.tofu
+def test_tofu_generates_the_purpose_reads_their_sources_and_keeps_the_agent_out() -> None:
+    grants = tofu_eval("values(local.purpose_grants)")
+    assert {(g["persona"], g["dataset"]) for g in grants} == expected_purpose_grants()
+    assert len(grants) == len(expected_purpose_grants())
+    sources = tofu_eval("values(local.purpose_sources)")
+    assert {(s["views"], s["source"]) for s in sources} == expected_purpose_sources()
+    assert len(sources) == len(expected_purpose_sources())
+    assert set(tofu_eval("keys(local.purpose_datasets)")) == set(
+        expected_purpose_datasets().values()
+    )
+    assert set(tofu_eval("keys(local.built)")) == expected_built()
 
 
 @pytest.mark.tofu
@@ -630,9 +790,8 @@ def test_tofu_generates_the_aggregate_reads_their_sources_and_the_built_datasets
         "payments_aggregates": "intermediate",
         "group_totals_aggregates": "group_totals",
     }
-    aggregates = set(expected_aggregate_datasets().values())
     assert set(tofu_eval("keys(local.datasets)")) == expected_datasets()
-    assert set(tofu_eval("keys(local.built)")) == expected_datasets() - aggregates
+    assert set(tofu_eval("keys(local.built)")) == expected_built()
 
 
 @pytest.mark.tofu

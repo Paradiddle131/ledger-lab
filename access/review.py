@@ -38,6 +38,7 @@ CATALOGUES = {
     "columns": ("access/columns.yaml", "access/columns.schema.json"),
     "review": ("access/review.yaml", "access/review.schema.json"),
     "aggregates": ("access/aggregates.yaml", "access/aggregates.schema.json"),
+    "purposes": ("access/purposes.yaml", "access/purposes.schema.json"),
 }
 
 
@@ -183,7 +184,7 @@ class Reviewed:
 
 
 def load_catalogues() -> dict[str, Doc]:
-    """The three catalogues, each refused with every error its schema finds."""
+    """The catalogues, each refused with every error its schema finds."""
     docs: dict[str, Doc] = {}
     for name, (data, schema) in CATALOGUES.items():
         doc = yaml.safe_load((REPO / data).read_text())
@@ -247,6 +248,27 @@ def local_map(config: Config, name: str) -> dict[str, str]:
     return {unquote(k): unquote(v) for k, v in values[0].items()}
 
 
+def purpose_products(access: Doc) -> set[str]:
+    """The products the models build tables of, read only through purposes."""
+    return {p["id"] for p in access["data_products"] if p.get("tables")}
+
+
+def purpose_sources(docs: Mapping[str, Doc]) -> set[tuple[str, str]]:
+    """Each purpose's dataset with the dataset of each table it lists, as `platform/gcp` pairs
+    them: the views and the one source each is authorized on."""
+    products = {
+        table: p["id"].replace("-", "_")
+        for p in docs["access"]["data_products"]
+        for table in p.get("tables", [])
+    }
+    return {
+        (u["id"].replace("-", "_"), products[table])
+        for u in docs["purposes"]["purposes"]
+        for table in u["tables"]
+        if table in products
+    }
+
+
 def instances(
     for_each: str | None, docs: Mapping[str, Doc], config: Config
 ) -> list[dict[str, str]]:
@@ -269,6 +291,20 @@ def instances(
     )
     if for_each == "${local.aggregate_grants}":
         return [{"each.value.persona": p, "each.value.dataset": d} for p, d in aggregate_grants]
+    purpose_grants = sorted(
+        {
+            (persona, u["id"].replace("-", "_"))
+            for u in docs["purposes"]["purposes"]
+            for persona in u["personas"]
+        }
+    )
+    if for_each == "${local.purpose_grants}":
+        return [{"each.value.persona": p, "each.value.dataset": d} for p, d in purpose_grants]
+    if for_each == "${local.purpose_sources}":
+        return [
+            {"each.value.views": v, "each.value.source": s}
+            for v, s in sorted(purpose_sources(docs))
+        ]
     governed = {
         p["id"].replace("-", "_")
         for p in access["data_products"]
@@ -286,15 +322,17 @@ def instances(
         return [{"each.key": d} for d in sorted(built)]
     if for_each == "${local.dataset_grants}" or for_each == "${local.warehouse_readers}":
         roles = local_map(config, "dataset_roles")
+        # A product the models build tables of takes no dataset role: it is read through purposes.
         grants = sorted(
             {
                 (g["persona"], g["product"].replace("-", "_"), roles[g["access"]])
                 for g in access["grants"]
-                if g["access"] in roles
+                if g["access"] in roles and g["product"] not in purpose_products(access)
             }
         )
         if for_each == "${local.warehouse_readers}":
             readers = {p for p, _, _ in grants} | {p for p, _ in aggregate_grants}
+            readers |= {p for p, _ in purpose_grants}
             return [{"each.key": p} for p in sorted(readers)]
         return [
             {"each.value.persona": p, "each.value.dataset": d, "each.value.role": r}
@@ -418,11 +456,13 @@ def declared_grants(
             refused.append(f"{address}: a grant on a resource the review has no words for")
     found: dict[str, list[CloudGrant]] = {i: [] for i in [*sorted(personas), *addresses.values()]}
     acts_as: dict[str, set[str]] = {i: set() for i in found}
-    aggregated = {f"{p.replace('-', '_')}_aggregates" for p in docs["aggregates"]["products"]}
-    sources = {
-        i["each.key"]: i["each.value"]
-        for i in instances("${local.aggregate_sources}", docs, config)
-    }
+    # The views datasets the catalogues give and the one or more sources each is authorized on:
+    # each aggregates dataset on its product's source, each purpose dataset on its tables' products.
+    authorized: dict[str, set[str]] = {}
+    for i in instances("${local.aggregate_sources}", docs, config):
+        authorized.setdefault(i["each.key"], set()).add(i["each.value"])
+    for views_dataset, source in purpose_sources(docs):
+        authorized.setdefault(views_dataset, set()).add(source)
     for address, body in sorted(resources.items()):
         rtype, _ = address.split(".", 1)
         if rtype == DATASET_ACCESS and set(body) - {"__is_block__"} in (
@@ -449,13 +489,13 @@ def declared_grants(
                         substitute(unquote(views["dataset_id"]), instance),
                     )
                     types = [unquote(t) for t in entry["target_types"]]
-                    # The views of the lab's own aggregates dataset, on the one source the
-                    # catalogues give it, and nothing else.
+                    # The views of the lab's own aggregates or purpose dataset, on a source the
+                    # catalogues give that dataset, and nothing else.
                     if (
-                        of not in aggregated
+                        of not in authorized
                         or unquote(views.get("project_id", "")) != "${var.project}"
                         or types != ["VIEWS"]
-                        or on != f"warehouse dataset {sources[of]}"
+                        or on not in {f"warehouse dataset {d}" for d in authorized[of]}
                     ):
                         refused.append(f"{address}: an authorization of views it cannot attribute")
                     continue
