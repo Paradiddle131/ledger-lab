@@ -29,7 +29,7 @@ text_run: 12
 # of run time interrupts, on the local engine, a query still running then, whatever its plan
 # estimated.
 cost_ceilings:
-  bytes_billed_per_turn: 1073741824
+  bytes_billed_per_turn: 300000000
   product_passes_per_turn: 10
   queries_per_turn: 20
   model_calls_per_turn: 10
