@@ -1051,7 +1051,7 @@ def test_every_persona_sees_its_matrix(engine: Engine, visibility: Doc) -> None:
     runs = act_out(engine, visibility, PERSONAS)
     failures, tally = verdict(runs)
     if failures:
-        pytest.fail(f"{len(failures)} cells not as the matrix says: " + "; ".join(failures))
+        pytest.fail(f"{len(failures)} observations unlike the matrix: " + "; ".join(failures))
     assert set(tally) == set(PERSONAS)
     if engine.fixed is None:
         assert kinds(tally) == SAMPLE_PROVEN
