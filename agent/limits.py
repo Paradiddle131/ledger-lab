@@ -9,6 +9,8 @@ What is capped, and where:
 - a person's turns: a persona's turns are held one at a time (`AuditLog.turn`), and a persona whose
   turns in the 24 hours before a new one (`turns_today`, counted in the audit log) reach
   `turns_per_person_per_day` is answered with no model call and no query;
+- the bytes a turn's jobs bill, on BigQuery (`agent/bigquery.py`): each job carries the bytes left
+  of `bytes_billed_per_turn`, and BigQuery refuses one that would bill past them;
 - the rows a turn's queries read, on the local engine, as the stand-in for bytes billed: before a
   query runs, `estimated_rows` reads the engine's plan, and a query whose estimate, added to what
   the turn's earlier queries were estimated to read, passes `product_passes_per_turn` times the
@@ -22,8 +24,9 @@ Stated limits:
   `seconds_per_query`;
 - `rows_held` counts the rows of the database's base tables by the engine's own estimate, so a view
   adds nothing to it;
-- the BigQuery mode of the own agent is not built, so nothing here sets `maximum_bytes_billed` on
-  a job; `bytes_billed_per_turn` is the ceiling that mode is to set;
+- on BigQuery the bytes billed are capped by `agent/bigquery.py`, not here: each job carries the
+  bytes left of `bytes_billed_per_turn` as its `maximumBytesBilled`, within the persona queries'
+  own cap;
 - the 24 hours are counted back from the new turn's start on the records' own times, so a log whose
   times were written wrong counts wrong, and a log removed or replaced counts from what it holds;
 - the turn lock is `FileLog`'s `flock` on a file per persona beside the log, so it holds turns

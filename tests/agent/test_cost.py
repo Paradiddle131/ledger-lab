@@ -1,4 +1,7 @@
-"""The own agent's spending caps (`agent/limits.py`), on the local engine over the sample build.
+"""The own agent's spending caps (`agent/limits.py`), on the local engine over the sample build,
+and the runaway join's on BigQuery through the agent's BigQuery mode (`agent/bigquery.py`), under
+the `bigquery_persona` marker a plain run leaves out (`make bigquery-agent`;
+`tests/agent/test_bigquery_mode.py` runs it offline over a stand-in).
 
 Each test asks through the `as_persona` fixture (`tests/conftest.py`) with a model of its own, so
 nothing here calls a model or GCP. A join of the payments with themselves is the runaway join of the
@@ -14,12 +17,14 @@ from typing import Any
 
 import duckdb
 import pytest
+from gcp_project import lab_project_or_none
 
 from agent.ask import (
     MAX_STEPS,
     MAX_TOOL_CALLS,
     TURN_CAPPED,
     Audit,
+    Connection,
     ask,
     load_context,
     run_metric_query,
@@ -110,42 +115,59 @@ def cap_of(connection: duckdb.DuckDBPyConnection, limits: Limits) -> int:
         cursor.close()
 
 
-@pytest.fixture(params=["local", "bigquery"])
+@pytest.fixture(params=["local", pytest.param("bigquery", marks=pytest.mark.bigquery_persona)])
 def engine(request: pytest.FixtureRequest) -> str:
-    """The engine a cap is proven on: the local engine, or BigQuery, skipped before any build since
-    the own agent has no BigQuery mode, so no job of it carries `maximum_bytes_billed` yet; nothing
-    here calls GCP."""
-    if request.param == "bigquery":
-        pytest.skip(
-            "the agent's BigQuery mode is not built: no job of it carries maximum_bytes_billed"
-        )
+    """The engine a cap is proven on: the local engine, or the agent's BigQuery mode in the lab's
+    own project (`agent/bigquery.py`), which a plain run leaves out by its marker (`make
+    bigquery-agent` runs it on the owner's machine) and which skips with no GCP call without the
+    lab's project."""
+    if request.param == "bigquery" and lab_project_or_none() is None:
+        pytest.skip("LEDGER_LAB_GCP_PROJECT is unset: the lab has no BigQuery to act in")
     return request.param
 
 
-def test_runaway_join_stops_at_the_cap(as_persona: AsPersona, audit: Audit, engine: str) -> None:
-    """Pairing every payment with every other is planned past the turn's row cap, so it is not
-    run: the turn is stopped at the byte cap's stand-in, with no run and no rows."""
+# A turn's bytes on BigQuery for the runaway join's proof: below the 10 MiB BigQuery bills at least
+# for each table a query reads, so any job that reads a table bills past what is left of the turn.
+FEW_BYTES = 1_000_000
+
+
+def test_runaway_join_stops_at_the_cap(
+    audit: Audit, engine: str, request: pytest.FixtureRequest
+) -> None:
+    """Pairing every payment with every other is not run past the turn's cap. On the local engine
+    it is planned past the turn's row cap, the byte cap's stand-in. On BigQuery, which bills the
+    bytes of the columns a query reads however many rows it pairs, the job carries the bytes left
+    of the turn as its `maximumBytesBilled`, and BigQuery refuses it before it runs; the turn is
+    stopped at the byte cap, with no run and no rows."""
     limits = load_limits()
-    connection = as_persona(READER)
-    cursor = connection.cursor()
-    cursor.execute("set search_path = 'group_close'")
-    assert estimated_rows(cursor, RUNAWAY.sql, None) > cap_of(connection, limits)
-    cursor.close()
+    if engine == "local":
+        connection = request.getfixturevalue("as_persona")(READER)
+        cursor = connection.cursor()
+        cursor.execute("set search_path = 'group_close'")
+        assert estimated_rows(cursor, RUNAWAY.sql, None) > cap_of(connection, limits)
+        cursor.close()
+        connect: Callable[[str], Connection] = lambda _: connection  # noqa: E731
+        spent = "rows"
+    else:
+        limits = dataclasses.replace(limits, bytes_billed_per_turn=FEW_BYTES)
+        connect = request.getfixturevalue("agent_on_bigquery")
+        spent = "bytes"
     model = Calls(RUNAWAY.id)
     started = time.monotonic()
     answer = ask(
         READER,
         RUNAWAY.question,
-        as_persona=lambda _: connection,
+        as_persona=connect,
         audit=audit,
         model=model,
         queries={RUNAWAY.id: RUNAWAY},
+        limits=limits,
     )
     assert time.monotonic() - started < limits.seconds_per_query
     assert answer.citations == ()
     (refusal,) = answer.refusals
     assert refusal.query == RUNAWAY.id
-    assert "rows" in refusal.reason
+    assert spent in refusal.reason
     assert answer.text.startswith("A query reached a spending cap")
     assert model.asked == 2  # the plan and the one step that made the call
     record = last(audit)

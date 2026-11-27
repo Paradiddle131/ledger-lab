@@ -49,12 +49,19 @@ What `ask` checks, in this order:
     is a `Refusal` naming the policy's reasons;
   - a call the policy allows to any tool but `run_metric_query` is a `Refusal`, since `ask` runs
     no other tool;
-  - only then is a connection opened, by calling `as_persona(persona)`, at most once per `ask`,
-    and the query run under the turn's caps (`agent/limits.py`): a query whose plan is estimated
-    to read more rows than are left of `product_passes_per_turn` times the rows of the persona's
-    tables is not run, and one still running at `seconds_per_query` is interrupted; either is a
-    `Refusal` that ends the turn, asking the model no more, with the fixed text `QUERY_CAPPED`
-    naming the cap;
+  - only then is a connection opened, by calling `as_persona(persona)`, at most once per `ask`;
+    it is a local engine connection or a BigQuery one (`agent/bigquery.py`), and any other value
+    raises; on BigQuery, before the first query, `agent.bigquery.verify` checks that BigQuery
+    runs the connection's jobs as the asking persona's own account and raises `WrongIdentity`
+    otherwise, so no query runs on another identity;
+  - the query is run under the turn's caps (`agent/limits.py`): on the local engine, a query
+    whose plan is estimated to read more rows than are left of `product_passes_per_turn` times
+    the rows of the persona's tables is not run, and one still running at `seconds_per_query` is
+    interrupted; on BigQuery, each job carries the bytes left of `bytes_billed_per_turn` as its
+    cap, and a job BigQuery refuses at it, one not finished at `seconds_per_query` and a turn
+    with no bytes left are stopped; either engine's cap is a `Refusal` that ends the turn, asking
+    the model no more, with the fixed text `QUERY_CAPPED` naming the cap; every BigQuery job,
+    the identity check's included, carries the turn's labels (`agent.bigquery.job_labels`);
   - a call refused before the tool, unplanned or by one of the checks above, counts toward
     `MAX_REFUSALS`; at that many, the model is asked for no more steps: the planned calls it has
     not made are put through the same checks, the tool-call limit among them, in the plan's order,
@@ -75,7 +82,9 @@ session id and the turn after its last kept exchange, or, with no conversation, 
 refusal or on a `foreign-session` refusal, a session id `ask` makes and turn 1 (so a
 `foreign-session` record does not say which session was named), `own-agent`, the time the turn
 ended, `audit.release` and `audit.data` as the caller gives them, the metrics cited, and per query
-run that returned the SQL as sent, the persona, `duckdb`, a run id and its start time; in place of
+run that returned the SQL as sent, the persona, the engine (`duckdb` or `bigquery`), a run id (on
+BigQuery the job's `<project>:<location>.<id>`, whose labels name the record's session and turn)
+and its start time; the identity check's job is not among the runs; in place of
 the question, the answer's text, each run's result (`agent.audit.sealed_result` of its columns and
 its cells as `cell_text`) and its bound values, a seal, each under its own salt, the salt and value
 kept by the log apart from the record.
@@ -96,7 +105,10 @@ a view, so the verified query's unqualified table names resolve to the persona's
 is the context's text with each of its own values lifted to a named parameter (`agent.audit.bind`),
 executed with those values bound, so nothing of the question or the model's output is spliced into
 it. A table or view name held in two of those schemas is refused as ambiguous, and a text `bind`
-refuses or an engine error comes back as a `Refusal` carrying the message, with no rows.
+refuses or an engine error comes back as a `Refusal` carrying the message, with no rows. On
+BigQuery the tool is `agent.bigquery.run`: the DuckDB text in BigQuery's dialect, each table placed
+on the view the persona reads it through and each value bound as a named parameter; a table it
+cannot place, and a refusal by BigQuery other than at a cap, come back as a `Refusal` with no rows.
 
 Once the record of a turn that did not raise is written, the conversation's store keeps the turn's
 question and the text it showed as the session's next exchange, at the record's time; a failed
@@ -107,13 +119,15 @@ Stated limits:
   and raises that error; one that raises keeping the exchange raises after the record is written,
   and no answer is returned;
 - `ask` holds no connection of its own: the rows are whatever the connection `as_persona` returns
-  can read, so the scoping is the connection-maker's (on the local engine, `access/compile.py`);
+  can read, so the scoping is the connection-maker's (on the local engine, `access/compile.py`;
+  on BigQuery, the warehouse's rules for the identity the check above saw);
 - `ask` does not close that connection, which stays its maker's to close;
 - the catalogue is read as YAML without its schema check (`access/schema.json`); the id is looked
   up by `access.identities.identity`, which also raises on a grant naming an entity exactly when
   its product is not entity-scoped, and that error is a `NoPersonaError` too;
 - the query is not checked to be a single read: the persona's connection on the local engine is
-  read-only, which is what stops a write;
+  read-only, and on BigQuery the persona's account holds no write grant on the datasets the query
+  names, which is what stops a write;
 - the record names no model (the model protocol carries no name or settings yet), and its release
   and data are the caller's word, not checked here against the code or the connection;
 - only `Exception` is caught for a `failed` record: a `KeyboardInterrupt`, `SystemExit` or other
@@ -152,6 +166,7 @@ import duckdb
 import yaml
 
 from access.identities import UnknownPersonaError, identity
+from agent import bigquery
 from agent.audit import (
     AuditLog,
     AuditWriteFailed,
@@ -244,7 +259,10 @@ MODEL_ERROR, POLICY_ERROR, CONNECTION_ERROR, TOOL_ERROR = (
     "tool-error",
 )
 
-AsPersona = Callable[[str], duckdb.DuckDBPyConnection]
+# A connection-maker returns the persona's connection on the local engine or on BigQuery
+# (`agent/bigquery.py`); the tool runs on whichever it is.
+Connection = duckdb.DuckDBPyConnection | bigquery.BigQueryConnection
+AsPersona = Callable[[str], Connection]
 
 
 class NoPersonaError(ValueError):
@@ -278,7 +296,7 @@ class Audit:
 @dataclass(frozen=True)
 class Run:
     """A query run that returned, as its record holds it: the SQL as sent, its bound values, the
-    persona it ran as, the run id, its start time and its result."""
+    persona it ran as, the run id, its start time, its result and the engine it ran on."""
 
     text: str
     parameters: Mapping[str, Any]
@@ -287,6 +305,7 @@ class Run:
     at: str
     columns: tuple[str, ...]
     rows: tuple[tuple[Any, ...], ...]
+    engine: str = ENGINE
 
 
 def load_personas(path: Path = PERSONAS) -> dict[str, Any]:
@@ -340,11 +359,13 @@ def ask(
     session = uuid.uuid4().hex
     history: tuple[Exchange, ...] = ()
     refusal: NoPersonaError | None = None
+    personas: Mapping[str, Any] = {}
     if not isinstance(persona, str):
         refusal = NoPersonaError(f"a question needs the asking persona, not {persona!r}")
     else:
         try:
-            identity(load_personas() if catalogue is None else catalogue, persona)
+            personas = load_personas() if catalogue is None else catalogue
+            identity(personas, persona)
         except (UnknownPersonaError, ValueError) as error:
             refusal = NoPersonaError(f"{persona!r} is not a persona of the catalogue")
             refusal.__cause__ = error
@@ -385,14 +406,16 @@ def ask(
         queries = load_context() if queries is None else queries
         shown = (tuple(load_glossary() if glossary is None else glossary), tuple(columns))
         model = model_from_config(os.environ, queries) if model is None else model
-        connection: duckdb.DuckDBPyConnection | None = None
+        connection: Connection | None = None
         results: list[Citation | Refusal] = []
         runs: list[Run] = []
         denied = unplanned = capped = False
         stopped: str | None = None
         calls = refused = 0
-        # The rows the turn's queries were estimated to read, against the turn's row cap.
+        # What the turn's queries have used of its cap: on the local engine the rows they were
+        # estimated to read, against the row cap; on BigQuery the bytes its jobs billed.
         spent = 0
+        labels = bigquery.job_labels(AGENT, session, turn)
         # The reason a `failed` record gives when the step under way raises.
         stage = MODEL_ERROR
         raised: Exception | None = None
@@ -433,10 +456,22 @@ def ask(
                 return True
             if connection is None:
                 stage = CONNECTION_ERROR
-                connection = as_persona(persona)
+                opened = as_persona(persona)
+                if isinstance(opened, bigquery.BigQueryConnection):
+                    # No query runs until BigQuery shows it runs this connection's jobs as the
+                    # asking persona's own account.
+                    spent += bigquery.verify(opened, persona, personas, labels, limits, spent)
+                elif not isinstance(opened, duckdb.DuckDBPyConnection):
+                    raise TypeError("the connection-maker returned no connection of either engine")
+                connection = opened
             stage = TOOL_ERROR
             calls += 1
-            result, run, read, cap = _run(connection, query, persona, limits, spent)
+            if isinstance(connection, bigquery.BigQueryConnection):
+                result, run, read, cap = _run_on_bigquery(
+                    connection, query, persona, limits, spent, labels
+                )
+            else:
+                result, run, read, cap = _run(connection, query, persona, limits, spent)
             spent += read
             results.append(result)
             if run is not None:
@@ -604,7 +639,7 @@ def record(
                 entry["query"]["parameters"] = sealed(
                     f"runs/{index}/query/parameters", dict(run.parameters)
                 )
-            entry |= {"as": run.persona, "engine": ENGINE, "job": run.job, "at": run.at}
+            entry |= {"as": run.persona, "engine": run.engine, "job": run.job, "at": run.at}
             result = sealed_result(run.columns, ([cell_text(v) for v in r] for r in run.rows))
             entry["result"] = sealed(f"runs/{index}/result", result)
             entries.append(entry)
@@ -641,6 +676,25 @@ def run_metric_query(
     (`limits`, by default the cost ceilings); a text `bind` refuses, an engine error, an ambiguous
     name or a cap reached is a `Refusal`."""
     return _run(connection, query, "", load_limits() if limits is None else limits, 0)[0]
+
+
+def _run_on_bigquery(
+    connection: bigquery.BigQueryConnection,
+    query: VerifiedQuery,
+    persona: str,
+    limits: Limits,
+    spent: int,
+    labels: Mapping[str, str],
+) -> tuple[Citation | Refusal, Run | None, int, CapReached | None]:
+    """Run one verified query on BigQuery (`agent.bigquery.run`); also the bytes counted as billed
+    and the cap it reached, if any. `spent` is what the turn's earlier jobs billed."""
+    result, ran, billed, cap = bigquery.run(connection, query, limits, spent, labels, now)
+    if ran is None:
+        return result, None, billed, cap
+    run = Run(
+        ran.text, ran.parameters, persona, ran.job, ran.at, ran.columns, ran.rows, bigquery.ENGINE
+    )
+    return result, run, billed, cap
 
 
 def _run(
