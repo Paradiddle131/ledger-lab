@@ -234,7 +234,12 @@ def as_persona_on_bigquery(
 
 
 def holds_a_persona_token(item: pytest.Item) -> bool:
-    return isinstance(item, pytest.Function) and "as_persona_on_bigquery" in item.fixturenames
+    """A test that takes the persona sessions, or one marked `bigquery_persona`, which may take
+    them from a fixture of its own (the visibility matrix's BigQuery engine)."""
+    return isinstance(item, pytest.Function) and (
+        "as_persona_on_bigquery" in item.fixturenames
+        or item.get_closest_marker("bigquery_persona") is not None
+    )
 
 
 def persona_test_id(item: pytest.Item) -> str:

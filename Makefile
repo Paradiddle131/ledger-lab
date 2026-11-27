@@ -4,7 +4,7 @@
 LOADOUT ?= $(or $(shell sed -n 's/^The collection .* is cloned at `\([^`]*\)`.*/\1/p' $(HOME)/.claude/CLAUDE.md 2>/dev/null),../loadout)
 GUARDS := $(LOADOUT)/cloud/githooks
 
-.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test warehouse-parity bigquery-personas bigquery-row-policies bigquery-thresholds bigquery-purposes stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
+.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test warehouse-parity bigquery-personas bigquery-row-policies bigquery-thresholds bigquery-purposes bigquery-visibility stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
 
 check: lint typecheck test ids portable scan contract metric-versions
 	@echo "make check: all passed"
@@ -128,6 +128,14 @@ bigquery-thresholds: sync
 # sources' case while the product grants are still applied.
 bigquery-purposes: sync
 	uv run pytest -m bigquery_persona tests/access/test_purpose_views.py
+
+# The visibility matrix acted out on BigQuery, as each persona: every cell the landed data holds
+# something for observed through the persona's own session against the source read with full
+# rights (the payments mart as the publisher reads it, the group totals through the audit purpose's
+# views), and the cells on invented tables named and left to the local engine
+# (tests/access/visibility_on_bigquery.py); `-rP` prints the cells left.
+bigquery-visibility: sync
+	uv run pytest -m bigquery_persona -rP tests/access/test_visibility.py::test_every_persona_sees_its_matrix
 
 # The container stack: the shared database always, one more service per PROFILE=<name>.
 # Each checkout is its own Compose project (containers, network, volume) and the database takes a

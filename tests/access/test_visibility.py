@@ -281,9 +281,7 @@ class LocalReader:
         )
 
     def unique(self, table: str, column: str) -> bool:
-        ((rows, distinct),) = self.rows(
-            select(f"count(*), count(distinct {quote(column)})", table)
-        )
+        ((rows, distinct),) = self.rows(select(f"count(*), count(distinct {quote(column)})", table))
         return rows == distinct
 
     def distinct(self, table: str, column: str) -> set[Any]:
@@ -973,7 +971,7 @@ def verdict(runs: Mapping[str, list[Seen]]) -> tuple[list[str], dict[str, Counte
     return failures, tally
 
 
-@pytest.fixture(params=["local", "bigquery"])
+@pytest.fixture(params=["local", pytest.param("bigquery", marks=pytest.mark.bigquery_persona)])
 def engine(
     request: pytest.FixtureRequest,
     access: Doc,
@@ -983,14 +981,25 @@ def engine(
     tmp_path: Path,
 ) -> Iterator[Engine]:
     """The engine a persona's connection is opened on: the local engine over the dbt build of
-    the samples, or BigQuery in the lab's own project, skipped until it is written, before any
-    build, so the controls test can see it skip quickly."""
+    the samples, or BigQuery in the lab's own project (`tests/access/visibility_on_bigquery.py`),
+    as each persona's own service account, which a plain run leaves out by its marker
+    (`make bigquery-visibility` runs it on the owner's machine) and which skips before any build
+    or GCP call without the lab's project."""
     if request.param == "bigquery":
         if lab_project_or_none() is None:
             pytest.skip("LEDGER_LAB_GCP_PROJECT is unset: the lab has no BigQuery to act in")
-        # Named, not run: opening a persona on BigQuery and reading the source there are written
-        # with the warehouse's own rules, which this engine acts on; nothing here calls GCP.
-        pytest.skip("the BigQuery engine is not written yet: it comes with the warehouse's rules")
+        from gcp_project import lab_project
+
+        from tests.access.visibility_on_bigquery import BigQueryEngine
+
+        live = BigQueryEngine(
+            Catalogues(access, columns, aggregates, purposes),
+            lab_project(),
+            request.getfixturevalue("as_persona_on_bigquery"),
+        )
+        yield live
+        live.close()
+        return
     warehouse: Path = request.getfixturevalue("warehouse")
     local = LocalEngine(warehouse, Catalogues(access, columns, aggregates, purposes), tmp_path)
     yield local
@@ -1022,11 +1031,43 @@ SAMPLE_PROVEN = {
 }
 
 
+def live_proven() -> dict[str, dict[str, int]]:
+    """Each persona's cells on BigQuery, by kind: those the local engine proves over the landed
+    build, which BigQuery holds, proven there too, and those it proves on invented tables only
+    left to it."""
+    return {
+        persona: {
+            kind.removesuffix(" invented") + (LEFT if kind.endswith(" invented") else ""): n
+            for kind, n in counted.items()
+        }
+        for persona, counted in LANDED_PROVEN.items()
+    }
+
+
 def test_every_persona_sees_its_matrix(engine: Engine, visibility: Doc) -> None:
-    failures, tally = verdict(act_out(engine, visibility, PERSONAS))
-    assert failures == []
+    """On BigQuery, every cell the landed data holds something for is proven, and the cells it
+    holds nothing for (no table, no tagged column, no rows) are named and left to the local
+    engine's invented tables; a cell proven there or left to it in other numbers fails."""
+    runs = act_out(engine, visibility, PERSONAS)
+    failures, tally = verdict(runs)
+    if failures:
+        pytest.fail(f"{len(failures)} cells not as the matrix says: " + "; ".join(failures))
     assert set(tally) == set(PERSONAS)
-    assert kinds(tally) == SAMPLE_PROVEN
+    if engine.fixed is None:
+        assert kinds(tally) == SAMPLE_PROVEN
+        return
+    proven = {(s.persona, s.place) for s in runs["build"] if s.support and s.place != "tables"}
+    left = [s for s in runs["build"] if s.place != "tables" and (s.persona, s.place) not in proven]
+    print(f"\n{len(proven)} cells proven on BigQuery, {len(left)} left to the local engine:")
+    for persona in PERSONAS:
+        places = [f"{s.place} ({s.cell})" for s in left if s.persona == persona]
+        print(f"  {persona}: {', '.join(places)}")
+    found = {p: dict(sorted(t.items())) for p, t in tally.items()}
+    if found != live_proven():
+        pytest.fail(
+            f"cells proven on BigQuery and left to the local engine, by kind: {found}, where the"
+            f" landed build gives {live_proven()}"
+        )
 
 
 # The harness fails for every kind of cell: each change below breaks one persona's compiled
@@ -1348,7 +1389,11 @@ def test_a_small_cell_query_returns_nothing(
     engine: Engine, visibility: Doc, aggregates: Doc
 ) -> None:
     """Each aggregate reader asks its aggregate tables for every group of the source of fewer
-    payees than the minimum, by its grain, and is given none."""
+    payees than the minimum, by its grain, and is given none. On BigQuery, where a threshold view
+    answers only an aggregating query, the small cells are `make bigquery-thresholds`' finer
+    grain."""
+    if engine.fixed:
+        pytest.skip("on BigQuery the small-cell query is the thresholds test's finer grain")
     asked: Counter[str] = Counter()
     minimum = aggregates["minimum_group"]
     for persona in PERSONAS:
@@ -1488,6 +1533,8 @@ def across_entities(engine: Engine) -> Engine:
 def test_two_aggregates_whose_difference_isolates_one_entity_are_suppressed(
     engine: Engine, visibility: Doc, aggregates: Doc
 ) -> None:
+    if engine.fixed:
+        pytest.skip(f"{engine.fixed}: the pair is acted out at other minimums, rebuilt")
     # The samples' groups are small, so both lines run at a minimum group of two.
     assert aggregates["minimum_entities"] == 2
     # Each entity's group totals apart, as the catalogue gives them, take nothing away.

@@ -221,9 +221,7 @@ class PersonaSession:
     def table(self, dataset: str, table: str) -> tuple[str, list[tuple[str, str]], str | None]:
         """A table's kind, its columns with their types in order, and a view's stored query, as
         BigQuery shows them to this identity (`tables.get`, a free metadata read)."""
-        answer = self._get(
-            f"/datasets/{quote(dataset, safe='')}/tables/{quote(table, safe='')}"
-        )
+        answer = self._get(f"/datasets/{quote(dataset, safe='')}/tables/{quote(table, safe='')}")
         try:
             fields = answer.get("schema", {}).get("fields", [])
             columns = [(str(f["name"]), str(f["type"])) for f in fields]

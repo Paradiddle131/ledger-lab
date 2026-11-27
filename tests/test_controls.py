@@ -1,11 +1,14 @@
 """The controls catalogue: shape, owners, layers, and no control claimed before its test exists."""
 
 import ast
+import re
 import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -66,8 +69,10 @@ def test_a_control_awaits_something_only_while_its_tests_exist(controls: dict[st
 
 
 def test_a_control_awaits_a_parameter_its_tests_still_skip(controls: dict[str, Any]) -> None:
-    """Each proving test of a control that awaits a parameter runs with it and skips, so the
-    control cannot go on awaiting once that proof runs."""
+    """Each proving test of a control that awaits a parameter runs with it and skips, or a plain
+    run leaves it out by its marker (a `bigquery_persona` test, which runs only on the owner's
+    machine), so the control cannot go on awaiting once that proof runs in a plain run; what one
+    left out still awaits, its control's `until_then` says."""
     awaiting = [c for c in controls["controls"] if "awaits" in c]
     assert awaiting, "no control awaits a parameter, so this test proves nothing"
     nodes = [f"{t}[{c['awaits']['parameter']}]" for c in awaiting for t in c["proven_by"]]
@@ -78,7 +83,11 @@ def test_a_control_awaits_a_parameter_its_tests_still_skip(controls: dict[str, A
         text=True,
         check=False,
     )
-    assert done.returncode == 0, done.stdout[-2000:]
+    counted = re.search(r"\b(\d+) deselected\b", done.stdout)
+    deselected = int(counted[1]) if counted else 0
+    # A run whose every node a marker leaves out selects nothing, which pytest exits on with 5.
+    nothing = pytest.ExitCode.NO_TESTS_COLLECTED
+    assert done.returncode == (nothing if deselected == len(nodes) else 0), done.stdout[-2000:]
     outcomes = [line.split()[0] for line in done.stdout.splitlines() if line.endswith(tuple(nodes))]
     outcomes += [line.split()[0] for line in done.stdout.splitlines() if line.startswith("SKIPPED")]
-    assert outcomes == ["SKIPPED"] * len(nodes), done.stdout[-2000:]
+    assert outcomes == ["SKIPPED"] * (len(nodes) - deselected), done.stdout[-2000:]
