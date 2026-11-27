@@ -349,7 +349,7 @@ class BigQueryEngine:
             if persona == PUBLISHER:
                 self.client = self.client or httpx.Client(timeout=60)
                 accounts = chain(service_account(PUBLISHER, self.project), self.project, os.environ)
-                self.opened[persona] = PersonaSession(self.project, mint(accounts), self.client)
+                self.opened[persona] = PersonaSession(self.project, mint(accounts), self.client, 10**9)
             else:
                 self.opened[persona] = self.session(persona)
         return self.opened[persona]
