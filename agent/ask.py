@@ -50,8 +50,8 @@ What `ask` checks, in this order:
   - a call the policy allows to any tool but `run_metric_query` is a `Refusal`, since `ask` runs
     no other tool;
   - only then is a connection opened, by calling `as_persona(persona)`, at most once per `ask`;
-    it is a local engine connection or a BigQuery one (`agent/bigquery.py`), and any other value
-    raises; on BigQuery, before the first query, `agent.bigquery.verify` checks that BigQuery
+    a BigQuery one (`agent/bigquery.py`) is run on BigQuery and any other as a local engine
+    connection; on BigQuery, before the first query, `agent.bigquery.verify` checks that BigQuery
     runs the connection's jobs as the asking persona's own account and raises `WrongIdentity`
     otherwise, so no query runs on another identity;
   - the query is run under the turn's caps (`agent/limits.py`): on the local engine, a query
@@ -461,8 +461,6 @@ def ask(
                     # No query runs until BigQuery shows it runs this connection's jobs as the
                     # asking persona's own account.
                     spent += bigquery.verify(opened, persona, personas, labels, limits, spent)
-                elif not isinstance(opened, duckdb.DuckDBPyConnection):
-                    raise TypeError("the connection-maker returned no connection of either engine")
                 connection = opened
             stage = TOOL_ERROR
             calls += 1
