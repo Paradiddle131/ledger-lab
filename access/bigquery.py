@@ -112,6 +112,38 @@ class Answer:
     # Each row's cells as BigQuery's REST answer gives them: text, or None for a null.
     rows: list[tuple[Any, ...]]
     bytes_processed: int
+    # Each cell's type as the answer's schema names it (`STRING`, `INTEGER`, `NUMERIC` and the
+    # like), empty when the answer carries no schema.
+    types: tuple[str, ...] = ()
+
+
+# BigQuery's reason for a query refused by its bytes-billed cap, which it refuses before running.
+OVER_CAP = "bytesBilledLimitExceeded"
+# The most tables one dataset's listing may return; a listing that runs past it is refused.
+LISTED = 1000
+
+
+def in_parts[T](
+    read: Callable[[tuple[str, ...]], T], columns: Sequence[str], keep: Sequence[str]
+) -> list[tuple[tuple[str, ...], T]]:
+    """`read` over the columns, or, where BigQuery refuses it as over the bytes-billed cap (a
+    query bills every row of each column it names, whatever the row access policies leave), over
+    parts of them split in two, each part keeping the `keep` columns, so the cap stays as it is and
+    no part bills more than it allows. Any other refusal, or a part that cannot be split further,
+    is raised."""
+    whole = tuple(columns)
+    try:
+        return [(whole, read(whole))]
+    except PersonaQueryError as error:
+        kept = tuple(c for c in whole if c in keep)
+        rest = [c for c in whole if c not in keep]
+        if error.reason != OVER_CAP or len(rest) < 2:
+            raise
+        half = len(rest) // 2
+        return [
+            *in_parts(read, (*kept, *rest[:half]), keep),
+            *in_parts(read, (*kept, *rest[half:]), keep),
+        ]
 
 
 class PersonaSession:
@@ -152,7 +184,54 @@ class PersonaSession:
         if answer.get("pageToken"):
             raise PersonaQueryError("the answer runs past one page, more than a persona test reads")
         rows = [tuple(cell.get("v") for cell in row["f"]) for row in answer.get("rows", [])]
-        return Answer(rows, int(answer.get("totalBytesProcessed", "0")))
+        fields = answer.get("schema", {}).get("fields", [])
+        types = tuple(str(f.get("type", "")) for f in fields)
+        return Answer(rows, int(answer.get("totalBytesProcessed", "0")), types)
+
+    def _get(self, path: str) -> dict[str, Any]:
+        """A metadata read (`tables.list`, `tables.get`): free, and refused as a query is."""
+        url = self._url.removesuffix("/queries") + path
+        response = self._client.get(url, headers=self._headers)
+        if response.status_code != httpx.codes.OK:
+            reason = _reason(response)
+            raise PersonaQueryError(
+                f"BigQuery refused the metadata read: HTTP {response.status_code}, reason {reason}",
+                status=response.status_code,
+                reason=reason,
+            )
+        answer = response.json()
+        if not isinstance(answer, dict):
+            raise PersonaQueryError("BigQuery answered the metadata read in an unexpected shape")
+        return answer
+
+    def tables(self, dataset: str) -> list[tuple[str, str]]:
+        """Each table, view or other kind of table a dataset holds, by name with its kind, as
+        BigQuery lists them to this identity (`tables.list`, a free metadata read)."""
+        answer = self._get(f"/datasets/{quote(dataset, safe='')}/tables?maxResults={LISTED}")
+        if answer.get("nextPageToken"):
+            raise PersonaQueryError("the dataset's listing runs past one page")
+        try:
+            return [
+                (str(t["tableReference"]["tableId"]), str(t.get("type", "")))
+                for t in answer.get("tables", [])
+            ]
+        except (KeyError, TypeError):
+            raise PersonaQueryError("the dataset's listing has an unexpected shape") from None
+
+    def table(self, dataset: str, table: str) -> tuple[str, list[tuple[str, str]], str | None]:
+        """A table's kind, its columns with their types in order, and a view's stored query, as
+        BigQuery shows them to this identity (`tables.get`, a free metadata read)."""
+        answer = self._get(
+            f"/datasets/{quote(dataset, safe='')}/tables/{quote(table, safe='')}"
+        )
+        try:
+            fields = answer.get("schema", {}).get("fields", [])
+            columns = [(str(f["name"]), str(f["type"])) for f in fields]
+            view = answer.get("view")
+            stored = str(view["query"]) if isinstance(view, dict) else None
+            return str(answer.get("type", "")), columns, stored
+        except (KeyError, TypeError):
+            raise PersonaQueryError("the table's metadata has an unexpected shape") from None
 
 
 def _reason(response: httpx.Response) -> str | None:
