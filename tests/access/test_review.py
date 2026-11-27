@@ -842,6 +842,25 @@ resource "google_bigquery_dataset_access" "approver_reads_by_friendly_name" {
   role          = "READER"
   user_by_email = google_service_account.persona["approver"].email
 }""",
+    "a persona account named by another of its attributes": """
+resource "google_service_account_iam_member" "proposer_on_approver_by_display_name" {
+  service_account_id = google_service_account.persona["approver"].display_name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${google_service_account.persona["proposer"].email}"
+}""",
+    "a policy tag named by another of its attributes": """
+resource "google_data_catalog_policy_tag_iam_member" "proposer_reads_by_display_name" {
+  policy_tag = google_data_catalog_policy_tag.sensitive["bank-account-number"].display_name
+  role       = "roles/datacatalog.categoryFineGrainedReader"
+  member     = "serviceAccount:${google_service_account.persona["proposer"].email}"
+}""",
+    "a masking rule named by another of its attributes": """
+resource "google_bigquery_datapolicy_data_policy_iam_member" "proposer_masked_by_name" {
+  location       = var.region
+  data_policy_id = google_bigquery_datapolicy_data_policy.masking["bank-account-number"].name
+  role           = "roles/bigquerydatapolicy.maskedReader"
+  member         = "serviceAccount:${google_service_account.persona["proposer"].email}"
+}""",
     "a dataset access entry with a role and no member": """
 resource "google_bigquery_dataset_access" "nobody_reads" {
   dataset_id = google_bigquery_dataset.warehouse["landed"].dataset_id
