@@ -15,27 +15,39 @@ persona querying it, so a persona reads through a view exactly what it read of t
 its source as itself), authorizes each one's views on the datasets its views read, and grants each
 persona data viewer on its purposes' datasets in place of the product's.
 
-Views are DDL, so the owner's login runs them: `python -m access.purpose_views plan` prints the
-statements, `apply` runs them. The project comes from `LEDGER_LAB_GCP_PROJECT` and the location
-from `LEDGER_LAB_BQ_LOCATION`; nothing is written to disk. Views store nothing and creating one
-bills nothing.
+A dataset's authorization covers every view in it, so a view the catalogues no longer give (a
+table a purpose stopped listing) would keep reading its source for the purpose's personas. Each
+run therefore lists what every purpose dataset holds (`bq ls`, its tables and its routines, free
+metadata reads) before it writes: each view the module does not generate is dropped, and anything
+else there that it did not generate (a table, a materialized view, any other kind of table, a
+routine, or a name it cannot write as text, a generated name held by something other than a view
+among them) is refused, never dropped, and stops the run before any view is written. The live
+test (`make bigquery-purposes`) holds each purpose dataset to exactly its generated views, each
+with its generated definition. A purpose removed from the catalogue leaves its dataset to
+`platform/gcp`, whose next apply removes its grants and its authorization.
+
+Views are DDL, so the owner's login runs them: `python -m access.purpose_views plan` lists the
+datasets and prints the statements, the drops first, `apply` runs them. The project comes from
+`LEDGER_LAB_GCP_PROJECT` and the location from `LEDGER_LAB_BQ_LOCATION`; nothing is written to
+disk. Views store nothing, and listing, creating and dropping one bills nothing.
 
 The owner's steps, in order, cost read before and after with `make cost-check`:
 1. a targeted `tofu apply` of the additions alone, with the product grants still in place: the
    purpose datasets (`google_bigquery_dataset.warehouse["<purpose dataset>"]`), their views'
    authorizations (`google_bigquery_dataset_access.purposes_read_sources`) and the purpose grants
    (`google_bigquery_dataset_access.persona_reads_purposes`);
-2. `python -m access.purpose_views apply`;
+2. `python -m access.purpose_views plan`, then `apply`, which also drops each view not generated;
 3. `LEDGER_LAB_PRODUCT_GRANTS=kept make bigquery-purposes`, which skips the one case that needs
    the product grants gone;
 4. the full `tofu apply`, which removes the product grants;
 5. `make bigquery-purposes`, every case.
 """
 
+import json
 import re
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,7 +55,7 @@ from typing import Any
 import yaml
 
 from access.identities import UnknownPersonaError, identity
-from access.row_policies import RowPolicyError, copies, path, query, run_tool
+from access.row_policies import RowPolicyError, bq, copies, path, query, run_tool
 
 ACCESS = Path(__file__).parent
 PERSONAS = ACCESS / "personas.yaml"
@@ -54,6 +66,14 @@ AGGREGATES = ACCESS / "aggregates.yaml"
 LAYERS = ("landed", "intermediate")
 # The statements are built as text, so every column in them is checked against its shape.
 COLUMN = re.compile(r"^[a-z][a-z0-9_]*$")
+# A name found in a purpose dataset that the module can write into a statement, as `path` checks.
+NAME = re.compile(r"^[a-z][a-z0-9_]*$")
+# The most entries one listing returns; a listing that reaches it may leave entries out.
+LISTED = 10000
+VIEW_KIND = "VIEW"
+ROUTINE_KIND = "ROUTINE"
+
+Run = Callable[[Sequence[str]], str]
 
 
 class PurposeError(ValueError):
@@ -76,15 +96,149 @@ class View:
     columns: tuple[str, ...]
     audience: str
 
-    def sql(self, project: str) -> str:
+    def select(self, project: str) -> str:
+        """The view's query: the purpose's columns of its source, and nothing else."""
         for column in self.columns:
             if not COLUMN.fullmatch(column):
                 raise PurposeError(f"{column!r} is not a column name")
         return (
-            f"create or replace view {path(project, self.dataset, self.name)}"  # noqa: S608
-            f" as select {', '.join(self.columns)}"
+            f"select {', '.join(self.columns)}"  # noqa: S608
             f" from {path(project, self.source_dataset, self.source)}"
         )
+
+    def sql(self, project: str) -> str:
+        return f"create or replace view {path(project, self.dataset, self.name)} as " + (
+            self.select(project)
+        )
+
+
+@dataclass(frozen=True)
+class Found:
+    """An entry a purpose dataset holds: its name and kind, a table's type as `bq ls` gives it
+    (`VIEW`, `TABLE`, `MATERIALIZED_VIEW` and the like) or `ROUTINE`."""
+
+    dataset: str
+    name: str
+    kind: str
+
+
+def list_command(project: str, where: str, dataset: str, *kind: str) -> list[str]:
+    return bq(
+        project,
+        where,
+        "--format=json",
+        "ls",
+        *kind,
+        f"--max_results={LISTED}",
+        f"{project}:{dataset}",
+    )
+
+
+def _listed(answer: str, dataset: str, reference: str, key: str, kind: str | None) -> list[Found]:
+    try:
+        entries: Any = json.loads(answer) if answer.strip() else []
+        found = [
+            Found(
+                dataset,
+                str(entry[reference][key]),
+                kind or str(entry["type"]),
+            )
+            for entry in entries
+        ]
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        raise PurposeError(
+            f"the listing of {dataset} has an unexpected shape ({type(error).__name__})"
+        ) from None
+    if len(found) >= LISTED:
+        raise PurposeError(f"the listing of {dataset} may leave entries out: nothing is written")
+    return found
+
+
+def contents(project: str, where: str, dataset: str, run: Run) -> list[Found]:
+    """Every table, view and routine a purpose dataset holds, by `bq ls`."""
+    tables = run(list_command(project, where, dataset))
+    routines = run(list_command(project, where, dataset, "--routines"))
+    return [
+        *_listed(tables, dataset, "tableReference", "tableId", None),
+        *_listed(routines, dataset, "routineReference", "routineId", ROUTINE_KIND),
+    ]
+
+
+@dataclass(frozen=True)
+class Drift:
+    """What the purpose datasets hold beyond the generated views: the views to drop, the entries
+    refused (never dropped) and the generated views missing."""
+
+    stale: tuple[Found, ...]
+    refused: tuple[Found, ...]
+    missing: tuple[View, ...]
+
+    def refusal(self) -> str:
+        """One line naming each refused entry by dataset and kind, and by name where the name is
+        one the module could write; a name outside that shape is only counted."""
+        named = [
+            f"{e.dataset}.{e.name} ({e.kind.lower()})"
+            for e in self.refused
+            if NAME.fullmatch(e.name)
+        ]
+        odd = len(self.refused) - len(named)
+        parts = named + ([f"{odd} more whose names it cannot write"] if odd else [])
+        return (
+            "the purpose datasets hold what this module does not generate and will not drop: "
+            + "; ".join(parts)
+            + ": the owner removes each by hand"
+        )
+
+
+def drift(generated: Sequence[View], found: Sequence[Found]) -> Drift:
+    """The found entries the generated views do not account for: a view of a name the module
+    could write and does not generate is stale, anything else not a generated view is refused."""
+    wanted = {(v.dataset, v.name) for v in generated}
+    stale: list[Found] = []
+    refused: list[Found] = []
+    for entry in found:
+        if not NAME.fullmatch(entry.name) or entry.kind != VIEW_KIND:
+            refused.append(entry)
+        elif (entry.dataset, entry.name) not in wanted:
+            stale.append(entry)
+    present = {(e.dataset, e.name) for e in found if e.kind == VIEW_KIND}
+    missing = tuple(v for v in generated if (v.dataset, v.name) not in present)
+    return Drift(tuple(stale), tuple(refused), missing)
+
+
+def drop_sql(project: str, entry: Found) -> str:
+    return f"drop view if exists {path(project, entry.dataset, entry.name)}"
+
+
+def definition(project: str, where: str, dataset: str, name: str, run: Run) -> str:
+    """A view's stored query, by `bq show`."""
+    answer = run(bq(project, where, "--format=json", "show", f"{project}:{dataset}.{name}"))
+    try:
+        return str(json.loads(answer)["view"]["query"])
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        raise PurposeError(
+            f"{dataset}.{name} has no view definition ({type(error).__name__})"
+        ) from None
+
+
+def same_query(stored: str, generated: str) -> bool:
+    """A stored view query against the generated one, compared without spacing, case or a trailing
+    semicolon."""
+
+    def normal(text: str) -> str:
+        return re.sub(r"\s+", " ", text).strip().rstrip(";").strip().lower()
+
+    return normal(stored) == normal(generated)
+
+
+def survey(generated: Sequence[View], project: str, where: str, run: Run) -> Drift:
+    """Each purpose dataset's contents against its generated views."""
+    found = [
+        entry
+        for dataset in sorted({v.dataset for v in generated})
+        for entry in contents(project, where, dataset, run)
+    ]
+    return drift(generated, found)
 
 
 def load(file: Path) -> dict[str, Any]:
@@ -191,6 +345,24 @@ def plan(
     return [v.sql(project) for v in views(catalogue, columns, purposes, aggregates)]
 
 
+def run_plan(
+    generated: Sequence[View], project: str, where: str, run: Run, write: bool
+) -> tuple[list[str], list[str]]:
+    """The drops of every stale view, then the generated views; with `write`, each is run. The
+    drops run first, so a view the catalogues took away stops reading its source even when the
+    rest is refused; a refused entry stops the run before any view is written."""
+    found = survey(generated, project, where, run)
+    drops = [drop_sql(project, e) for e in found.stale]
+    for statement in drops if write else []:
+        run(query(project, where, statement))
+    if found.refused:
+        raise PurposeError(found.refusal())
+    creates = [v.sql(project) for v in generated]
+    for statement in creates if write else []:
+        run(query(project, where, statement))
+    return drops, creates
+
+
 def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
     from ingest.load import LoadError, lab
 
@@ -200,12 +372,11 @@ def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
         return 2
     try:
         project, where = lab(env)
-        statements = plan(load(PERSONAS), load(COLUMNS), load(PURPOSES), load(AGGREGATES), project)
+        generated = views(load(PERSONAS), load(COLUMNS), load(PURPOSES), load(AGGREGATES))
+        drops, creates = run_plan(generated, project, where, run_tool, write=command == "apply")
         if command == "plan":
-            print("\n".join(statements))
+            print("\n".join([*drops, *creates]))
             return 0
-        for statement in statements:
-            run_tool(query(project, where, statement))
     except (PurposeError, RowPolicyError, LoadError) as error:
         print(f"purpose-views: {error}", file=sys.stderr)
         return 1
@@ -213,7 +384,7 @@ def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
         # bq's message names the project and the accounts: only its exit status is reported.
         print(f"purpose-views: bq failed with exit status {error.returncode}", file=sys.stderr)
         return 1
-    print(f"purpose-views: {len(statements)} views written")
+    print(f"purpose-views: {len(creates)} views written, {len(drops)} not generated dropped")
     return 0
 
 

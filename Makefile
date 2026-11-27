@@ -123,8 +123,9 @@ bigquery-thresholds: sync
 # Each human persona's read of its purposes' views on BigQuery, as the persona: through each view
 # exactly its entities' rows of the copy its tags give it, by count and digest, and none of the
 # other copy; a refusal of every other purpose's views and, once the product grants are removed,
-# of the views' sources (access/purpose_views.py). `LEDGER_LAB_PRODUCT_GRANTS=kept` skips that
-# last case while the product grants are still applied.
+# of the views' sources; and each purpose dataset holding exactly its generated views, each with
+# its generated query (access/purpose_views.py). `LEDGER_LAB_PRODUCT_GRANTS=kept` skips the
+# sources' case while the product grants are still applied.
 bigquery-purposes: sync
 	uv run pytest -m bigquery_persona tests/access/test_purpose_views.py
 

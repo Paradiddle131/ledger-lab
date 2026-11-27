@@ -23,8 +23,10 @@ case skips.
 """
 
 import copy
+import json
 import os
 import re
+import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -35,7 +37,19 @@ import pytest
 from access import purpose_views
 from access.bigquery import PersonaQueryError, PersonaSession, chain, mint, service_account
 from access.identities import identity
-from access.purpose_views import PurposeError, View, main, plan, views
+from access.purpose_views import (
+    Found,
+    PurposeError,
+    View,
+    definition,
+    drift,
+    main,
+    plan,
+    run_plan,
+    same_query,
+    survey,
+    views,
+)
 from access.row_policies import PUBLISHER, RowPolicyError, clear_readers, query, rows, run_tool
 from tests.conftest import load_aggregates, load_purposes
 from tests.platform.test_access_rules import (
@@ -218,20 +232,238 @@ def test_the_command_refuses_a_session_without_the_lab_project(
     assert main(["nothing"], env) == 2
 
 
-def test_apply_runs_each_statement_through_bq_capped(monkeypatch: pytest.MonkeyPatch) -> None:
-    ran: list[Sequence[str]] = []
-    monkeypatch.setattr(purpose_views, "run_tool", lambda command: ran.append(command) or "")
-    env = {"LEDGER_LAB_GCP_PROJECT": PROJECT, "LEDGER_LAB_BQ_LOCATION": "us-central1"}
-    assert main(["apply"], env) == 0
-    assert [c[-1] for c in ran] == plan(
-        purpose_views.load(purpose_views.PERSONAS),
-        purpose_views.load(purpose_views.COLUMNS),
-        purpose_views.load(purpose_views.PURPOSES),
-        purpose_views.load(purpose_views.AGGREGATES),
-        PROJECT,
+WHERE = "us-central1"
+LAB = {"LEDGER_LAB_GCP_PROJECT": PROJECT, "LEDGER_LAB_BQ_LOCATION": WHERE}
+
+
+class Bq:
+    """A stand-in for `bq`: what each purpose dataset holds, as `bq ls` lists its tables and its
+    routines, and each statement it was given, dropping or creating the views they name."""
+
+    def __init__(self, held: dict[str, list[tuple[str, str]]]) -> None:
+        # Each dataset's entries as (name, kind), a routine's kind `ROUTINE`.
+        self.held = {d: list(entries) for d, entries in held.items()}
+        self.commands: list[list[str]] = []
+        self.statements: list[str] = []
+
+    def __call__(self, command: Sequence[str]) -> str:
+        command = list(command)
+        self.commands.append(command)
+        assert command[:3] == ["bq", f"--project_id={PROJECT}", f"--location={WHERE}"]
+        if "ls" in command:
+            assert f"--max_results={purpose_views.LISTED}" in command
+            dataset = command[-1].removeprefix(f"{PROJECT}:")
+            entries = self.held.get(dataset, [])
+            if "--routines" in command:
+                return json.dumps(
+                    [{"routineReference": {"routineId": n}} for n, k in entries if k == "ROUTINE"]
+                )
+            return json.dumps(
+                [
+                    {"tableReference": {"tableId": n}, "type": k}
+                    for n, k in entries
+                    if k != "ROUTINE"
+                ]
+            )
+        assert "query" in command and any(a.startswith("--maximum_bytes_billed=") for a in command)
+        sql = command[-1]
+        self.statements.append(sql)
+        named = re.search(rf"`{PROJECT}\.([a-z_]+)\.([a-z_]+)`", sql)
+        assert named, sql
+        dataset, name = named[1], named[2]
+        if sql.startswith("drop view if exists "):
+            self.held[dataset] = [e for e in self.held.get(dataset, []) if e != (name, "VIEW")]
+        elif sql.startswith("create or replace view "):
+            entries = self.held.setdefault(dataset, [])
+            assert (name, "VIEW") in entries or all(n != name for n, _ in entries), sql
+            if (name, "VIEW") not in entries:
+                entries.append((name, "VIEW"))
+        else:
+            raise AssertionError(sql)
+        return ""
+
+
+def generated_held(found: Sequence[View]) -> dict[str, list[tuple[str, str]]]:
+    held: dict[str, list[tuple[str, str]]] = {}
+    for v in found:
+        held.setdefault(v.dataset, []).append((v.name, "VIEW"))
+    return held
+
+
+def catalogues() -> tuple[Doc, Doc, Doc, Doc]:
+    load = purpose_views.load
+    return (
+        load(purpose_views.PERSONAS),
+        load(purpose_views.COLUMNS),
+        load(purpose_views.PURPOSES),
+        load(purpose_views.AGGREGATES),
     )
-    assert all(c[:2] == ["bq", f"--project_id={PROJECT}"] for c in ran)
-    assert all(any(a.startswith("--maximum_bytes_billed=") for a in c) for c in ran)
+
+
+def test_apply_lists_each_purpose_dataset_then_writes_its_views_capped(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    access, columns, purposes, aggregates = catalogues()
+    stub = Bq({})
+    monkeypatch.setattr(purpose_views, "run_tool", stub)
+    assert main(["apply"], LAB) == 0
+    datasets = sorted({v.dataset for v in views(access, columns, purposes, aggregates)})
+    listed = [c[-1] for c in stub.commands if "ls" in c]
+    assert listed == [f"{PROJECT}:{d}" for d in datasets for _ in ("tables", "routines")]
+    assert stub.statements == plan(access, columns, purposes, aggregates, PROJECT)
+    assert "10 views written, 0 not generated dropped" in capsys.readouterr().out
+    # A second apply over what the first wrote finds nothing to drop.
+    stub.commands.clear()
+    stub.statements.clear()
+    assert main(["apply"], LAB) == 0
+    assert not [s for s in stub.statements if s.startswith("drop ")]
+
+
+def narrowed(purposes: Doc, purpose: str, *tables: str) -> Doc:
+    changed = copy.deepcopy(purposes)
+    (entry,) = [p for p in changed["purposes"] if p["id"] == purpose]
+    for table in tables:
+        del entry["tables"][table]
+    return changed
+
+
+@pytest.mark.parametrize(
+    ("purpose", "tables", "dropped"),
+    [
+        ("group-close", ["group_totals_left_out"], [("group_close", "group_totals_left_out")]),
+        (
+            "group-close",
+            ["payments"],
+            [("group_close", "payments"), ("group_close", "payments_masked")],
+        ),
+        (
+            "audit",
+            ["group_totals", "group_totals_left_out"],
+            [("audit", "group_totals"), ("audit", "group_totals_left_out")],
+        ),
+    ],
+    ids=["one table of a source", "every view of one table", "every table of a source"],
+)
+def test_a_view_a_purpose_no_longer_lists_is_dropped_before_any_view_is_written(
+    purpose: str, tables: list[str], dropped: list[tuple[str, str]]
+) -> None:
+    """The views written before stay in the dataset, under its authorization on the source, until
+    a run drops them: `plan` prints the drops and runs nothing, `apply` runs them first."""
+    access, columns, purposes, aggregates = catalogues()
+    before = views(access, columns, purposes, aggregates)
+    after = views(access, columns, narrowed(purposes, purpose, *tables), aggregates)
+    drops = [f"drop view if exists `{PROJECT}.{d}.{n}`" for d, n in dropped]
+    stub = Bq(generated_held(before))
+    assert run_plan(after, PROJECT, WHERE, stub, write=False) == (
+        drops,
+        [v.sql(PROJECT) for v in after],
+    )
+    assert stub.statements == []
+    run_plan(after, PROJECT, WHERE, stub, write=True)
+    assert stub.statements == [*drops, *(v.sql(PROJECT) for v in after)]
+    assert stub.held == generated_held(after)
+    assert survey(after, PROJECT, WHERE, stub).stale == ()
+
+
+def test_plan_prints_the_drops_first_and_runs_nothing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    access, columns, purposes, aggregates = catalogues()
+    generated = views(access, columns, purposes, aggregates)
+    held = generated_held(generated)
+    held["group_close"].append(("gone", "VIEW"))
+    stub = Bq(held)
+    monkeypatch.setattr(purpose_views, "run_tool", stub)
+    assert main(["plan"], LAB) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        f"drop view if exists `{PROJECT}.group_close.gone`",
+        *(v.sql(PROJECT) for v in generated),
+    ]
+    assert stub.statements == []
+
+
+@pytest.mark.parametrize(
+    ("entry", "said"),
+    [
+        (("copy_of_payments", "TABLE"), "group_close.copy_of_payments (table)"),
+        (("kept", "MATERIALIZED_VIEW"), "group_close.kept (materialized_view)"),
+        (("snap", "SNAPSHOT"), "group_close.snap (snapshot)"),
+        (("reader", "ROUTINE"), "group_close.reader (routine)"),
+        (("group_totals", "TABLE"), "group_close.group_totals (table)"),
+        (("Odd-Name`", "VIEW"), "1 more whose names it cannot write"),
+    ],
+    ids=["a table", "a materialized view", "a snapshot", "a routine", "a generated name", "a name"],
+)
+def test_anything_else_in_a_purpose_dataset_is_refused_never_dropped_and_stops_the_writes(
+    entry: tuple[str, str], said: str
+) -> None:
+    access, columns, purposes, aggregates = catalogues()
+    generated = views(access, columns, purposes, aggregates)
+    held = generated_held(generated)
+    held["group_close"] = [e for e in held["group_close"] if e[0] != entry[0]]
+    # Beside it, a stale view, which is still dropped.
+    held["group_close"] += [entry, ("gone", "VIEW")]
+    stub = Bq(held)
+    with pytest.raises(PurposeError) as refused:
+        run_plan(generated, PROJECT, WHERE, stub, write=True)
+    assert said in str(refused.value) and "\n" not in str(refused.value)
+    assert stub.statements == [f"drop view if exists `{PROJECT}.group_close.gone`"]
+    assert entry in stub.held["group_close"]
+
+
+def test_the_command_reports_a_refusal_or_a_bq_failure_in_one_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    access, columns, purposes, aggregates = catalogues()
+    held = generated_held(views(access, columns, purposes, aggregates))
+    held["audit"].append(("copy", "TABLE"))
+    monkeypatch.setattr(purpose_views, "run_tool", Bq(held))
+    for command in ("plan", "apply"):
+        assert main([command], LAB) == 1
+        (line,) = capsys.readouterr().err.splitlines()
+        assert line.startswith("purpose-views: the purpose datasets hold") and "audit.copy" in line
+
+    def failing(command: Sequence[str]) -> str:
+        raise subprocess.CalledProcessError(2, list(command), "", f"denied on {PROJECT}")
+
+    monkeypatch.setattr(purpose_views, "run_tool", failing)
+    assert main(["apply"], LAB) == 1
+    assert capsys.readouterr().err == "purpose-views: bq failed with exit status 2\n"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    ["not json", json.dumps([{"type": "VIEW"}]), json.dumps({"tableReference": 1})],
+    ids=["not json", "no reference", "not a list"],
+)
+def test_a_listing_of_another_shape_is_refused(answer: str) -> None:
+    with pytest.raises(PurposeError, match="unexpected shape"):
+        purpose_views.contents(PROJECT, WHERE, "audit", lambda _: answer)
+
+
+def test_a_listing_that_may_leave_entries_out_is_refused() -> None:
+    full = json.dumps(
+        [
+            {"tableReference": {"tableId": f"v{i}"}, "type": "VIEW"}
+            for i in range(purpose_views.LISTED)
+        ]
+    )
+    with pytest.raises(PurposeError, match="may leave entries out"):
+        purpose_views.contents(PROJECT, WHERE, "audit", lambda _: full)
+
+
+def test_the_survey_names_the_views_missing_and_a_stored_query_is_compared_as_written() -> None:
+    access, columns, purposes, aggregates = catalogues()
+    generated = views(access, columns, purposes, aggregates)
+    found = [Found(v.dataset, v.name, "VIEW") for v in generated[1:]]
+    assert drift(generated, found).missing == (generated[0],)
+    query_text = generated[0].select(PROJECT)
+    assert same_query(f"  {query_text.upper()} ;\n", query_text)
+    assert not same_query(query_text + " where entity_id = 'chicago'", query_text)
+    shown = json.dumps({"type": "VIEW", "view": {"query": query_text, "useLegacySql": False}})
+    assert definition(PROJECT, WHERE, "payment_review", "payments", lambda _: shown) == query_text
+    with pytest.raises(PurposeError, match="no view definition"):
+        definition(PROJECT, WHERE, "payment_review", "payments", lambda _: "{}")
 
 
 # The live checks, written over a warehouse that answers the summaries they compare, so they run
@@ -665,8 +897,42 @@ def test_each_persona_is_refused_the_source_datasets_the_purpose_views_read(
         pytest.fail("; ".join(failures))
 
 
+@pytest.mark.bigquery_persona
+def test_each_purpose_dataset_holds_exactly_its_generated_views(
+    as_persona_on_bigquery: Callable[[str], PersonaSession],
+) -> None:
+    """Read as the login running the test, by `bq ls` and `bq show`, free metadata reads; the
+    persona fixture is taken, unused, so a failure reports as a persona test's does, in one
+    line."""
+    from ingest.load import lab
+
+    project, where = lab(os.environ)
+    _, _, _, generated = lab_catalogues()
+    try:
+        found = survey(generated, project, where, run_tool)
+        failures = [
+            f"{e.dataset}.{e.name} ({e.kind.lower()}) is not generated" for e in found.stale
+        ]
+        failures += [found.refusal()] if found.refused else []
+        failures += [f"{v.dataset}.{v.name} is missing" for v in found.missing]
+        missing = set(found.missing)
+        for view in (v for v in generated if v not in missing):
+            stored = definition(project, where, view.dataset, view.name, run_tool)
+            if not same_query(stored, view.select(project)):
+                failures.append(
+                    f"{view.dataset}.{view.name} holds another query than its generated one"
+                )
+    except subprocess.CalledProcessError as error:
+        pytest.fail(f"bq failed with exit status {error.returncode}")
+    except PurposeError as error:
+        pytest.fail(str(error))
+    if failures:
+        pytest.fail("; ".join(failures))
+
+
 def test_the_live_tests_carry_their_marker() -> None:
     for test in (
+        test_each_purpose_dataset_holds_exactly_its_generated_views,
         test_each_persona_reads_through_its_purposes_exactly_its_rows_of_its_copy,
         test_each_persona_is_refused_every_other_purposes_views,
         test_each_persona_is_refused_the_source_datasets_the_purpose_views_read,
