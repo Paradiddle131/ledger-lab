@@ -14,12 +14,13 @@ What each observation reads on BigQuery:
   `platform/gcp` declares none.
 - the names: a view of its purposes' datasets (`access/purpose_views.py`) is held as
   `<purpose dataset>.<table>`, the copy its tag treatment gives it (the clear copy's view or
-  `<table>_masked`'s); the other copy's view, which its dataset grant also shows it, is read as
-  the persona and left out only when it returns no row, and is held under its own name, which no
-  purpose lists, when it returns any. An aggregate view (`access/thresholds.py`) is held under its
-  table's name; one under an aggregation threshold analysis rule is held as the one query it
-  admits at its grain, `SELECT WITH AGGREGATION_THRESHOLD`, so its privacy unit column reads as
-  the count of its distinct values under the units' name. Anything else is held as
+  `<table>_masked`'s); the other copy's view, which its dataset grant also shows it, is counted
+  as the persona and left out only when it returns no row or is refused (403), and is held under
+  its own name, which no purpose lists, when it returns any. An aggregate view
+  (`access/thresholds.py`) is held under its table's name; one under an aggregation threshold
+  analysis rule is held as the one query it admits at its grain, `SELECT WITH
+  AGGREGATION_THRESHOLD`, so its privacy unit column reads as the count of its distinct values
+  under the units' name. Anything else is held as
   `<dataset>.<table>`, which no purpose lists. "No views" is held as: every view held is one the
   modules generate, with its generated query.
 - the source with full rights, the reference each cell is read against, never filtered by the
@@ -70,10 +71,11 @@ NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 ENTITY_ID = re.compile(r"^[a-z][a-z0-9-]*$")
 # The dataset of the marts the publisher reads.
 MARTS = "intermediate"
-# What one answer of distinct values may hold, well inside a page's 10 MB, counting each value
-# twice its bytes for the answer's quoting and a row's framing beside it.
-ANSWER_BYTES = 4_000_000
-ROW_FRAMING = 24
+# What one answer of distinct values may hold, inside a page's 10 MB, counting each value at the
+# longest one's bytes and a row's framing beside it; an answer that still runs past one page is
+# refused (`access/bigquery.py`) and fails the run, never cut short.
+ANSWER_BYTES = 6_000_000
+ROW_FRAMING = 32
 # The persona that reads the group totals in its stead when the auditor is the one under test.
 STAND_IN = {"auditor": "group-controller"}
 REFERENCE = "auditor"
@@ -262,9 +264,7 @@ class BigQueryReader:
             table,
             f"SELECT COUNT(DISTINCT {column}), MAX(BYTE_LENGTH({column})) FROM {source}",  # noqa: S608
         )
-        parts = max(
-            1, math.ceil(int(n or 0) * (2 * int(longest or 0) + ROW_FRAMING) / ANSWER_BYTES)
-        )
+        parts = max(1, math.ceil(int(n or 0) * (int(longest or 0) + ROW_FRAMING) / ANSWER_BYTES))
         found: set[Any] = set()
         for part in range(parts):
             bucket = (
@@ -457,7 +457,13 @@ class BigQueryEngine:
             else:
                 place = Place(session, dataset, name)
                 probe = BigQueryReader(self.project, {own: place}, {own: dict(columns)})
-                if probe.count(own, None) == 0:
+                try:
+                    rows = probe.count(own, None)
+                except PersonaQueryError as error:
+                    if error.status != 403:
+                        raise
+                    rows = 0  # refused whole, as a policy tag on its clear columns may refuse it
+                if rows == 0:
                     return  # the other copy's view, of which the persona reads no row
         elif (dataset, name) in aggregates:
             view = aggregates[(dataset, name)]

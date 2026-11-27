@@ -33,9 +33,13 @@ rows and an aggregate that keeps no group are acted out on invented tables, labe
 copy of the build, and are reported as proven on invented tables only.
 
 The engine is a parameter: an engine opens a persona's connection and the source with full rights,
-and every observation is SQL over the persona's own tables and the source's, so the BigQuery twin
-swaps the engine and keeps the cells. Failure messages name persona, place, the expected cell and
-what was observed, in counts and names of tables and columns, never a data value.
+and every observation reads them through the same reader methods (counts, row digests, distinct
+values, groups), each engine writing its own SQL, so the BigQuery twin
+(`tests/access/visibility_on_bigquery.py`, `make bigquery-visibility`) keeps the cells. It cannot
+hold invented tables or rebuild the rules, so there a cell the build holds nothing for is counted
+as left to the local engine, and the tests that rebuild the rules skip. Failure messages name
+persona, place, the expected cell and what was observed, in counts and names of tables and
+columns, never a data value.
 """
 
 import shutil

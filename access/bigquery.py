@@ -16,9 +16,12 @@ carries; the persona queries run off that proxy, on the owner's machine, and eac
 
 A query goes to the `jobs.query` REST method as standard SQL, uncached, under a byte cap fixed in
 code that no setting raises (a persona's, or the publish's in `access/row_policies.py`), and runs
-where the tables it reads are. A refusal reports BigQuery's HTTP status and reason, and a failed
-mint `gcloud`'s exit status, or that it timed out or could not run, never their messages or the
-command, which name the project and the accounts.
+where the tables it reads are; its answer gives each cell as text with its type, in one page or
+not at all, and a query refused as over the cap can be read again in parts of its columns
+(`in_parts`). A dataset's listing and a table's metadata (`tables.list`, `tables.get`) are free
+metadata reads with the same token. A refusal reports BigQuery's HTTP status and reason, and a
+failed mint `gcloud`'s exit status, or that it timed out or could not run, never their messages
+or the command, which name the project and the accounts.
 """
 
 import re
