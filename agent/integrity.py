@@ -72,6 +72,8 @@ Stated limits:
   any non-ASCII letter is withheld; so is a reply naming a query cited twice in the turn, a column
   name outside the grammar or a reference to a run that does not cover the question;
 - a reply that holds prose and no reference is shown on a covering run, though it states no figure;
+- a citation of the agent's BigQuery mode (`agent/bigquery.py`) carries no freshness, so on BigQuery
+  every reply that references a cell is withheld, and only prose is shown;
 - the question must be a verified question's own wording, as `same` compares it: a paraphrase is
   withheld, so with any model the agent answers only the verified questions;
 - the text need not name a metric, a query or a freshness: those are the citations' fields;

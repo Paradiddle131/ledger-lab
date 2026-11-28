@@ -4,6 +4,10 @@ Each test asks through the `as_persona` fixture (`tests/conftest.py`), so a tool
 database compiled for the asking persona over the sample build; the model is the scripted one of
 `agent/model.py`, so nothing here calls a model or GCP. A recording wrapper around `as_persona` and
 around the model shows which personas a connection was opened for and whether the model was asked.
+The two tests that prove the queries run as the asker also run on BigQuery, through the agent's
+BigQuery mode (`agent_on_bigquery`), under the `bigquery_persona` marker a plain run leaves out:
+`make bigquery-agent` runs them on the owner's machine, and `tests/agent/test_bigquery_mode.py`
+runs them offline over a stand-in for the lab's BigQuery.
 """
 
 import os
@@ -14,11 +18,13 @@ from typing import Any
 
 import duckdb
 import pytest
+from gcp_project import lab_project_or_none
 
 from agent import ask as ask_module
 from agent.ask import (
     Answer,
     Audit,
+    Connection,
     NoPersonaError,
     ask,
     load_context,
@@ -41,6 +47,8 @@ from agent.model import (
 from agent.policy.tools import Decision, Entity
 
 AsPersona = Callable[[str], duckdb.DuckDBPyConnection]
+# A connection-maker on either engine.
+OnEngine = Callable[[str], Connection]
 # A verified question over the payments of one entity, Chicago: a persona reading Chicago's rows
 # gets a share, one reading only another entity's rows gets the empty sum's null.
 QUESTION = "What share of the City of Chicago's served payment rows repeat another served row?"
@@ -67,7 +75,7 @@ class Recorder:
     """`as_persona` and a model, each recording its calls (`planned` the turns the model planned
     on, `turns` the turns it stepped on), and the audit log the asks write to."""
 
-    def __init__(self, as_persona: AsPersona, model: Any, audit: Audit) -> None:
+    def __init__(self, as_persona: OnEngine, model: Any, audit: Audit) -> None:
         self.opened: list[str] = []
         self.planned: list[Turn] = []
         self.turns: list[Turn] = []
@@ -79,7 +87,7 @@ class Recorder:
         self.planned.append(turn)
         return self._model.plan(turn)
 
-    def connect(self, persona: str) -> duckdb.DuckDBPyConnection:
+    def connect(self, persona: str) -> Connection:
         self.opened.append(persona)
         return self._as_persona(persona)
 
@@ -88,15 +96,17 @@ class Recorder:
         return self._model.step(turn)
 
 
-@pytest.fixture(params=["local", "bigquery"])
-def engine(request: pytest.FixtureRequest) -> AsPersona:
-    """The connection-maker the agent asks through: `as_persona` on the local engine, or BigQuery,
-    skipped before any build, so the controls test sees it skip quickly; nothing here calls GCP."""
+@pytest.fixture(params=["local", pytest.param("bigquery", marks=pytest.mark.bigquery_persona)])
+def engine(request: pytest.FixtureRequest) -> OnEngine:
+    """The connection-maker the agent asks through: `as_persona` on the local engine, or the
+    agent's BigQuery mode in the lab's own project (`agent/bigquery.py`), each connection carrying
+    a token minted for the asking persona's own account, so the warehouse's grants decide. A plain
+    run leaves BigQuery out by its marker (`make bigquery-agent` runs it on the owner's machine),
+    and it skips with no GCP call without the lab's project."""
     if request.param == "bigquery":
-        pytest.skip(
-            "the agent's BigQuery mode is not built: the persona's warehouse grants are not"
-            " exercised"
-        )
+        if lab_project_or_none() is None:
+            pytest.skip("LEDGER_LAB_GCP_PROJECT is unset: the lab has no BigQuery to act in")
+        return request.getfixturevalue("agent_on_bigquery")
     return request.getfixturevalue("as_persona")
 
 
@@ -115,11 +125,12 @@ def values(answer: Answer) -> list[tuple[Any, ...]]:
 
 
 def test_two_personas_asking_the_same_question_get_different_rows(
-    engine: AsPersona, scripted: Model, request: pytest.FixtureRequest
+    engine: OnEngine, scripted: Model, request: pytest.FixtureRequest
 ) -> None:
-    """The local engine's proof that a query runs as the asker: Chicago's accountant gets a share
-    of Chicago's rows, the UK accountant, whose database holds no Chicago row, the null of an empty
-    sum; each connection was opened for the persona asking, and for no other."""
+    """A query runs as the asker: Chicago's accountant gets a share of Chicago's rows, the UK
+    accountant, who reads no Chicago row (its database holds none on the local engine; on BigQuery
+    the row access policies give its identity none), the null of an empty sum; each connection was
+    opened for the persona asking, and for no other."""
     recorder = Recorder(engine, scripted, request.getfixturevalue("audit"))
     chicago = asked(recorder, CHICAGO)
     uk = asked(recorder, UK)
@@ -137,7 +148,7 @@ MISSING: list[Any] = [None, "", "   ", 7, "nobody", f"{CHICAGO} ", "\u200b"]
 
 
 def test_a_question_without_a_persona_gets_no_answer(
-    engine: AsPersona, scripted: Model, request: pytest.FixtureRequest
+    engine: OnEngine, scripted: Model, request: pytest.FixtureRequest
 ) -> None:
     """No persona raises before the model is asked or a connection is opened, and leaves a record
     refused for no identity, naming no persona and no run."""

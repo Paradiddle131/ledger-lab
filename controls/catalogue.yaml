@@ -19,14 +19,11 @@ controls:
   - id: queries-run-as-the-asker
     layer: Identity and delegation
     owner: agent-operator
-    asserts: Every agent query runs on the asking persona's identity; two personas asking the same question get different rows, and a question without a user identity gets no answer.
+    asserts: Every agent query runs on the asking persona's identity, on the local engine and on BigQuery; two personas asking the same question get different rows, and a question without a user identity gets no answer. On BigQuery the persona's token is minted for each connection and SELECT SESSION_USER() must name the persona's account once, before the connection's first query (tests/agent/test_bigquery_mode.py, offline); the agent account itself still holds the warehouse builder role on the built datasets, which the agent's queries never name.
     proven_by:
       - tests/agent/test_ask.py::test_two_personas_asking_the_same_question_get_different_rows
       - tests/agent/test_ask.py::test_a_question_without_a_persona_gets_no_answer
-    status: not-implemented
-    awaits:
-      parameter: bigquery
-      until_then: "The tests pass on the local engine only: the agent's tool runs on the DuckDB database compiled for the asking persona (access/compile.py), where the Chicago accountant and the UK transport accountant asking the duplicate-payment-rate question get different rows, and a question asked with a value that is not a string, or with a string that is not exactly a persona id of access/personas.yaml (an empty, blank, unknown or space-padded id among those tested), raises before the model is asked or a connection is opened. BigQuery, where the persona's own warehouse grants would decide, is skipped: the agent has no BigQuery mode yet."
+    status: implemented
   - id: no-persona-holds-conflicting-duties
     layer: Identity and delegation
     owner: group-controller
@@ -101,7 +98,7 @@ controls:
       Withheld too: outside its references, any character but an ASCII letter, a space, a line break, one of . , ; : ! ? ' " = _, or a - between two ASCII letters, so any digit, any character outside ASCII (each Unicode digit, numeral, letter that folds to a digit under NFKC, look-alike letter, format character and bidi control), every other ASCII symbol, a brace outside a whole reference and every other control character; a reference not written whole by the grammar, with anything but a space, a line break or the start right before it, or anything but the end, a space, a line break or one of . , ; : ! ? then one of those right after it; two references with no ASCII letter of the model's text between them; a cell the renderer does not write; and an exception raised by the check.
       Each cell is rendered in one fixed format: a number positionally, every digit it carries kept and none rounded, with no thousands separator and no exponent, an ASCII minus below zero and no sign at zero, negative zero included; a NaN, an infinity or a number past 64 characters is not rendered; a null as null, a bool as true or false, a date or time as its ISO text, and a text cell as its own text when it is printable ASCII with no brace and at most 200 characters.
       Re-running the query a record logged, as the record's persona and only when its persona, SQL and bound values are the answer's and the cited query's, in the citations' order, must give the cited run's columns and rows, in any order, and the record's sealed result.
-      Stated limits: the words around a reference are prose that is not read, so a sign, direction or scale in words (minus, a net-loss of, down about, in millions, USD million) is shown beside the cell's own figure and can tell a reader a positive cell is a loss or a cell is in thousands; a figure written in words or in ASCII letters that look like digits is prose and shown; which row, column or metric the prose attributes a rendered figure to is not checked, so swapped references are shown; a text cell's own characters are not read, so a text cell holding digits or a sign shows them; a reply of prose with no reference is shown on a covering run; an honest reply that writes a figure itself, a currency or percent sign, Markdown, parentheses or a non-ASCII letter is withheld, and so is one naming a query cited twice in the turn; a paraphrase of a verified question is withheld, so the agent answers only the verified questions' own wording; the re-run reads whatever database the connection-maker opens and is a verifier's call, not made by ask; a turn stopped at a query's cap, the tool-call cap or the refusal cap shows ask's own fixed message, which names the cap and is not checked; a turn at the refusal cap is not checked and is recorded answered when a planned call returned.
+      Stated limits: the words around a reference are prose that is not read, so a sign, direction or scale in words (minus, a net-loss of, down about, in millions, USD million) is shown beside the cell's own figure and can tell a reader a positive cell is a loss or a cell is in thousands; a figure written in words or in ASCII letters that look like digits is prose and shown; which row, column or metric the prose attributes a rendered figure to is not checked, so swapped references are shown; a text cell's own characters are not read, so a text cell holding digits or a sign shows them; a reply of prose with no reference is shown on a covering run; a BigQuery citation carries no freshness, so on BigQuery every reply that references a cell is withheld and only prose is shown; an honest reply that writes a figure itself, a currency or percent sign, Markdown, parentheses or a non-ASCII letter is withheld, and so is one naming a query cited twice in the turn; a paraphrase of a verified question is withheld, so the agent answers only the verified questions' own wording; the re-run reads whatever database the connection-maker opens and is a verifier's call, not made by ask; a turn stopped at a query's cap, the tool-call cap or the refusal cap shows ask's own fixed message, which names the cap and is not checked; a turn at the refusal cap is not checked and is recorded answered when a planned call returned.
     proven_by:
       - tests/agent/test_answer_integrity.py::test_logged_query_reproduces_the_answer
       - tests/agent/test_answer_integrity.py::test_a_perturbed_number_in_a_scripted_answer_is_caught
@@ -139,6 +136,7 @@ controls:
       - tests/agent/test_answer_integrity.py::test_the_re_run_is_made_as_the_logged_persona
       - tests/agent/test_answer_integrity.py::test_runs_are_compared_with_citations_in_order
       - tests/agent/test_answer_integrity.py::test_a_withheld_reply_keeps_the_refusal_the_turn_records
+      - tests/agent/test_bigquery_mode.py::test_on_bigquery_the_text_shown_is_the_text_recorded_and_a_figure_needs_a_freshness
     status: implemented
   - id: scored-by-execution
     layer: Evaluation and monitoring
@@ -242,12 +240,9 @@ controls:
   - id: spend-is-capped
     layer: Cost and abuse
     owner: agent-operator
-    asserts: Every query and every model call of the own agent has a cap, and a runaway join stops at the byte cap; on BigQuery, every job the own agent runs carries maximum_bytes_billed of the bytes left of the turn's bytes_billed_per_turn (agent/evals/adversarial.yaml).
+    asserts: Every query and every model call of the own agent has a cap; on the local engine a runaway join stops at the byte cap's stand-in with no run, and on BigQuery each query job carries maximum_bytes_billed of the bytes left of the turn's bytes_billed_per_turn (agent/evals/adversarial.yaml), within the persona queries' own cap (access/bigquery.py), and BigQuery's refusal of a runaway join's job at that cap stops the turn; BigQuery bills a join by the columns it reads, so there a runaway join is bounded by the cap, not stopped by it.
     proven_by: [tests/agent/test_cost.py::test_runaway_join_stops_at_the_cap]
-    status: not-implemented
-    awaits:
-      parameter: bigquery
-      until_then: "Proven on the local engine over the sample only, by the cost ceilings of agent/evals/adversarial.yaml: before each query runs, the engine's plan is read, and a query whose estimated rows read, added to the turn's earlier queries', pass the product passes per turn times the rows of the persona's tables is not run, so pairing every payment with every other stops the turn at the byte cap's stand-in with no run; a query still running at the seconds per query is interrupted; a persona's turns are held one at a time, and one whose turns in the 24 hours before a new one, counted in the audit log, reach the turns per person per day is answered with a fixed text, with no model call and no connection; a turn's plan and model steps fit its model calls, and its queries fit its queries per turn. As limits, the row cap reads the engine's estimates, so a query whose plan estimates fewer rows than it reads runs, and is interrupted only if it is still running at the seconds per query; and the 24 hours are read from the records' own times. BigQuery is skipped: the own agent has no BigQuery mode, so no job of it carries maximum_bytes_billed yet."
+    status: implemented
   - id: lab-spend-fenced
     layer: Cost and abuse
     owner: group-controller
