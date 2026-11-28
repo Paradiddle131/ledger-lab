@@ -1393,11 +1393,11 @@ def test_a_small_cell_query_returns_nothing(
     engine: Engine, visibility: Doc, aggregates: Doc
 ) -> None:
     """Each aggregate reader asks its aggregate tables for every group of the source of fewer
-    payees than the minimum, by its grain, and is given none. On BigQuery, where a threshold view
-    answers only an aggregating query, the small cells are `make bigquery-thresholds`' finer
-    grain."""
+    payees than the minimum, by its grain, and is given none. On BigQuery, which runs none of the
+    local engine's SQL, the small cells are `make bigquery-thresholds`': each view's rows are
+    exactly its kept groups, and a column finer than the payments view's grain is refused."""
     if engine.fixed:
-        pytest.skip("on BigQuery the small-cell query is the thresholds test's finer grain")
+        pytest.skip("on BigQuery the small cells are the thresholds tests' kept groups")
     asked: Counter[str] = Counter()
     minimum = aggregates["minimum_group"]
     for persona in PERSONAS:

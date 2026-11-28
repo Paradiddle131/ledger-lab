@@ -132,7 +132,7 @@ def test_the_bigquery_engine_proves_the_local_engines_cells_and_leaves_its_inven
     # Each of the engine's ways of reading a large table was taken, and no read billed past the
     # stand-in's cap.
     assert served.get("over the cap") and served.get("distinct in parts"), served
-    assert served.get("aggregation threshold") and served.get("metadata reads"), served
+    assert served.get("aggregate views") and served.get("metadata reads"), served
 
 
 # Each fault, and the cells of the one persona it touches, which alone go red.
@@ -141,7 +141,7 @@ FAULTS = {
     "unmasked": ("accountant-chicago", {"tag individual-id"}),
     "stray-view": ("group-controller", {"tables"}),
     "changed": ("payables-clerk", {"payments chicago"}),
-    "no-threshold": ("metric-owner", {"payments chicago", "payments uk-transport"}),
+    "no-minimum": ("metric-owner", {"payments chicago", "payments uk-transport"}),
 }
 
 

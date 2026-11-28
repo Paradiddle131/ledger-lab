@@ -1,15 +1,16 @@
 # What a persona with an `aggregate` grant on a data product reads in place of its rows: a fixed set
 # of aggregate tables, each at one stated grain, holding only the groups of at least the minimum
 # group. The local engine materialises them in the persona's database (access/compile.py), so a
-# narrower filter or grain finds no row to sum; BigQuery's twin is an aggregation threshold policy
-# on a view at the same grain. Shape: access/aggregates.schema.json.
+# narrower filter or grain finds no row to sum; BigQuery's twin is a view grouped at the same grain
+# with the same condition in a HAVING (access/thresholds.py), which holds the kept groups only.
+# Shape: access/aggregates.schema.json.
 #
 # Each table names its source table (one of the product's `tables` in access/personas.yaml), the
 # columns it groups by and sums, and its units: what the minimum counts, always payees. A group
 # is kept when its units are at least the minimum. `count_distinct` counts the distinct values of
-# a column over the source rows, as BigQuery's threshold counts distinct privacy units; `max`
-# takes the largest per-row count of distinct payees the source rows already hold, which is never
-# more than the group's distinct payees, so a group it keeps holds at least the minimum.
+# a column over the source rows; `max` takes the largest per-row count of distinct payees the
+# source rows already hold, which is never more than the group's distinct payees, so a group it
+# keeps holds at least the minimum.
 # `entity_rows` says whether the grain keeps each entity apart: when true the table also groups by
 # `entity_group_by` and sums `entity_sum`; when false it gives figures across all entities only.
 # Both products below keep each entity apart.
@@ -23,15 +24,16 @@
 # rates are two equations in the entities' own-currency amounts, which with two entities and the
 # public rates split the group between them. No table here is of that kind, so this applies to
 # none; the tests act it out on a copy of this file with the group totals switched to `false`.
-# Differencing two answers of different grains is not stopped here: within one table each row
-# counts in one group, but two tables can sum the same figures at different grains. The metric
-# owner's payments and group-totals tables sum the same non-repeat payments at grains one level
-# apart, so their difference can give back a group-totals row the minimum dropped, and nothing
-# here stops that.
+# Differencing two answers of different grains is not stopped here: each table, on either engine,
+# holds only its kept groups at its one grain, so no two answers over one table reach a group it
+# dropped, but two tables can sum the same figures at different grains. The metric owner's
+# payments and group-totals tables sum the same non-repeat payments at grains one level apart, so
+# their difference can give back a group-totals row the minimum dropped, and nothing here stops
+# that.
 
 # Ten, a common small-cell threshold, and the one the adversarial cases measure their targets
-# against (agent/evals/adversarial.yaml, held equal by a test); BigQuery states it as the policy's
-# `threshold`.
+# against (agent/evals/adversarial.yaml, held equal by a test); BigQuery's views write it in their
+# HAVING.
 minimum_group: 10
 # Two, for a table of figures across all entities, of which there is none today: a kept group is
 # then the combined figure of at least two entities the persona does not read, which nothing in
@@ -43,7 +45,7 @@ products:
   # The metric owner's payments, by entity and fiscal period: each entity's rows apart, as its
   # grants name entities one by one. The units are distinct payees, the published payee as stored
   # (an organisation's name or a person's keyed hash), since a sum over many payments to one
-  # person is that person's: BigQuery's privacy unit column.
+  # person is that person's; neither engine shows the payee itself.
   payments:
     entity_rows: true
     tables:

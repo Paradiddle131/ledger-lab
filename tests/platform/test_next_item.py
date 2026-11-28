@@ -1,15 +1,16 @@
 """The queue rule of `docs/agents/autopilot.md`, run by `platform/next_item.py` on fixture trackers.
 
-Every tracker here is invented and offline, its issue numbers made up, with a fake `gh api` for
-the live snapshot. Checked: the slice item first, in path order over epic order; the leftovers
-issue of one area as one item, only when no slice item is pickable, before every other item; then
-epic order; closed items and each skip label; live, expired and handed-off claims, read with the
-skill's `claim.sh` patterns from any author; open blockers from the body's section and from the
-relation, apart, and blockers in another repository; an open PR that closes the item, and only
-owner-input PRs from this repository counted; stacking only on a held PR that is not speculative;
-epics and the slice issue never picked; the Roadmap, the slice issue and the Digest read only from
-owner-input issues; the Owner lane stopping the pick; the profile's Queue section naming the
-command, the labels and the order; the live snapshot paged by hand through `gh api` REST calls.
+Every tracker here is invented and offline, its issue numbers made up, with a fake `gh api` for the
+live snapshot. Checked: the slice item first, in path order over epic order; then the other
+sub-issues in epic order, before every leftovers issue, even one from an earlier epic; the leftovers
+issue of one area as one item, only when nothing else is pickable; closed items and each skip label;
+live, expired and handed-off claims, read with the skill's `claim.sh` patterns from any author; open
+blockers from the body's section and from the relation, apart, and blockers in another repository;
+an open PR that closes the item, and only owner-input PRs from this repository counted; stacking
+only on a held PR that is not speculative; epics and the slice issue never picked; the Roadmap, the
+slice issue and the Digest read only from owner-input issues; the Owner lane stopping the pick; the
+profile's Queue section naming the command, the labels and the order; the live snapshot paged by
+hand through `gh api` REST calls.
 """
 
 import re
@@ -171,19 +172,27 @@ def test_a_ready_slice_item_comes_before_a_ready_leftover_in_the_first_epic() ->
     assert (chosen.number, chosen.rule) == (AGENT_STEP, RULE_SLICE)
 
 
-def test_with_no_slice_item_pickable_the_leftovers_of_one_area_are_one_item() -> None:
+def test_with_no_slice_item_pickable_a_roadmap_item_comes_before_the_leftovers() -> None:
+    """The leftovers issue sits before the ordinary item in the first epic."""
     held = replace(AGENT_SLICE, labels=AGENT_SLICE.labels | {"needs-owner"})
     chosen = pick(tracker(LEFTOVERS_ISSUE, GROUND, held), NOW)
-    assert (chosen.number, chosen.rule) == (LEFTOVERS, RULE_LEFTOVER)
+    assert (chosen.number, chosen.rule) == (GROUND_ITEM, RULE_EPIC)
     assert dict(chosen.skipped)[AGENT_STEP] == "labelled `needs-owner`"
 
 
-def test_leftovers_come_before_other_items_even_from_a_later_epic() -> None:
-    """The ordinary item sits first in the first epic; the leftovers issue in a later one."""
-    leftovers = replace(LEFTOVERS_ISSUE, labels=frozenset({"agent", LEFTOVER, "ready"}))
-    placed = {GROUND_RULES: [GROUND_ITEM], AGENT: [LEFTOVERS]}
-    chosen = pick(tracker(leftovers, GROUND, path=(), under=placed), NOW)
+def test_other_items_come_before_leftovers_even_from_a_later_epic() -> None:
+    """The leftovers issue sits in the first epic; the ordinary item in a later one."""
+    item = issue(AGENT_STEP_LATER, "agent", "ready")
+    placed = {GROUND_RULES: [LEFTOVERS], AGENT: [AGENT_STEP_LATER]}
+    chosen = pick(tracker(LEFTOVERS_ISSUE, item, path=(), under=placed), NOW)
+    assert (chosen.number, chosen.rule) == (AGENT_STEP_LATER, RULE_EPIC)
+
+
+def test_with_nothing_else_pickable_the_leftovers_of_one_area_are_one_item() -> None:
+    held = replace(GROUND, labels=GROUND.labels | {"blocked"})
+    chosen = pick(tracker(LEFTOVERS_ISSUE, held, path=()), NOW)
     assert (chosen.number, chosen.rule) == (LEFTOVERS, RULE_LEFTOVER)
+    assert GROUND_ITEM in dict(chosen.skipped)
 
 
 def test_leftovers_go_in_epic_order() -> None:
@@ -677,7 +686,7 @@ def test_the_queue_section_names_the_command_and_the_labels_the_picker_reads() -
     assert (REPO / "platform" / "next_item.py").is_file()
 
 
-def test_the_queue_steps_name_slice_then_leftover_then_the_other_sub_issues() -> None:
+def test_the_queue_steps_name_slice_then_the_other_sub_issues_then_leftover() -> None:
     steps = [line for line in profile_section("## Queue").splitlines() if re.match(r"\d+\. ", line)]
     assert [int(line.split(".")[0]) for line in steps] == list(range(1, len(steps) + 1))
 
@@ -691,9 +700,9 @@ def test_the_queue_steps_name_slice_then_leftover_then_the_other_sub_issues() ->
     leftover = step_naming("labelled `leftover`")
     other = step_naming("the first pickable other sub-issue, in epic order")
     off_path = step_naming("other sub-issue labelled `slice`, off the path")
-    assert roadmap < slice_step < off_path < leftover < other
+    assert roadmap < slice_step < off_path < other < leftover
     assert "in path order" in steps[slice_step]
-    for later in (off_path, leftover, other):
+    for later in (off_path, other, leftover):
         assert steps[later].startswith(f"{later + 1}. Else ")
         assert "in epic order then sub-issue order" in steps[later]
 

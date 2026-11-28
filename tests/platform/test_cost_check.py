@@ -66,6 +66,9 @@ HEALTHY_ROW = {
     "month_rows": "12",
     "all_rows": "40",
     "newest_export": "2026-11-13T10:00Z",
+    "currencies": "1",
+    "rows_without_currency": "0",
+    "currency": "EUR",
 }
 NOT_FOUND = {"error": {"code": 404, "message": "gone", "status": "NOT_FOUND"}}
 
@@ -301,7 +304,7 @@ def test_the_applied_fences_match_their_definitions() -> None:
     gcp = FakeGCP()
     code, out = check(ENV, gcp)
     assert code == 0, out
-    assert "month-to-date cost is $0.00" in out
+    assert "month-to-date cost is 0.00 EUR" in out
     for fence in (
         "billing link",
         "daily query cap",
@@ -442,8 +445,8 @@ def test_a_query_the_dry_run_puts_above_the_cap_is_not_run() -> None:
 def test_any_cost_above_zero_fails() -> None:
     code, out = check(ENV, FakeGCP(cost="0.01"))
     assert code != 0
-    assert "$0.01" in out
-    assert "above $0.00" in out
+    assert "0.01 EUR" in out
+    assert "above 0.00 EUR" in out
     assert out.splitlines()[-1].startswith("cost-check: failed")
 
 
@@ -453,7 +456,7 @@ def test_credits_are_netted_and_a_month_without_rows_yet_is_zero() -> None:
     code, out = check(ENV, FakeGCP(rows=[HEALTHY_ROW | {"month_rows": "0"}]))
     assert code == 0, out
     line = out.splitlines()[0]
-    assert "month-to-date cost is $0.00" in line
+    assert "month-to-date cost is 0.00 EUR" in line
     assert "no rows yet this month" in line
     assert "newest export 2026-11-13T10:00Z" in line
 
@@ -461,19 +464,154 @@ def test_credits_are_netted_and_a_month_without_rows_yet_is_zero() -> None:
 def test_the_cost_line_shows_how_fresh_the_export_is() -> None:
     _, out = check(ENV, FakeGCP())
     line = out.splitlines()[0]
-    assert line.startswith("cost-check: ok month-to-date cost is $0.00")
+    assert line.startswith("cost-check: ok month-to-date cost is 0.00 EUR")
     assert "12 rows this month" in line
     assert "newest export 2026-11-13T10:00Z" in line
 
 
 def test_an_export_with_no_rows_for_the_project_cannot_show_zero() -> None:
-    rows = [{"cost": "0", "month_rows": "0", "all_rows": "0", "newest_export": None}]
+    rows = [
+        {
+            "cost": "0",
+            "month_rows": "0",
+            "all_rows": "0",
+            "newest_export": None,
+            "currencies": "0",
+            "rows_without_currency": "0",
+            "currency": None,
+        }
+    ]
     code, out = check(ENV, FakeGCP(rows=rows))
     assert code != 0
     line = out.splitlines()[0]
     assert line.startswith("cost-check: FAIL cost:")
     assert "no rows" in line
-    assert "$0.00" not in line
+    assert "0.00" not in line
+
+
+# The unit is the export's own: the currency its rows for the lab project carry.
+
+
+@pytest.mark.parametrize("currency", ["EUR", "USD", "JPY"])
+def test_the_cost_lines_show_the_currency_the_exports_rows_carry(currency: str) -> None:
+    row = HEALTHY_ROW | {"currency": currency}
+    code, out = check(ENV, FakeGCP(rows=[row]))
+    assert code == 0, out
+    assert out.splitlines()[0].startswith(f"cost-check: ok month-to-date cost is 0.00 {currency} ")
+    assert out.splitlines()[-1].startswith(f"cost-check: passed: 0.00 {currency} "), out
+    assert "$" not in out
+    code, out = check(ENV, FakeGCP(rows=[row | {"cost": "0.01"}]))
+    assert code != 0
+    assert out.splitlines()[0].startswith(
+        f"cost-check: FAIL month-to-date cost is 0.01 {currency}, above 0.00 {currency}: stop"
+    ), out
+    assert "$" not in out
+
+
+def test_the_currency_is_read_from_the_export_not_from_a_setting() -> None:
+    """No variable names the unit: one that looks like it changes nothing."""
+    env = ENV | {"LEDGER_LAB_BILLING_CURRENCY": "USD", "CURRENCY": "USD"}
+    code, out = check(env, FakeGCP())
+    assert code == 0, out
+    assert "0.00 EUR" in out.splitlines()[0]
+    assert "USD" not in out
+
+
+@pytest.mark.parametrize(
+    ("change", "said"),
+    [
+        ({"currencies": "2"}, "carry 2 currencies"),
+        ({"currencies": "2", "rows_without_currency": "1"}, "carry 2 currencies"),
+        ({"currencies": "0", "rows_without_currency": "40", "currency": None}, "no currency"),
+        ({"currencies": "1", "currency": None}, "no currency"),
+        ({"rows_without_currency": "3"}, "3 of the lab project's rows"),
+        ({"currency": "eur"}, "not a three-letter code"),
+        ({"currency": "EURO"}, "not a three-letter code"),
+        ({"currency": "EU"}, "not a three-letter code"),
+        ({"currency": ""}, "not a three-letter code"),
+        ({"currency": "EUR\n"}, "not a three-letter code"),
+        ({"currency": " EUR"}, "not a three-letter code"),
+        ({"currency": "$"}, "not a three-letter code"),
+        ({"currency": 978}, "no currency"),
+    ],
+    ids=[
+        "two-currencies",
+        "two-and-a-null",
+        "only-nulls",
+        "one-counted-none-given",
+        "some-nulls",
+        "lower-case",
+        "four-letters",
+        "two-letters",
+        "empty",
+        "trailing-newline",
+        "leading-space",
+        "a-sign",
+        "a-number",
+    ],
+)
+def test_rows_without_one_currency_code_do_not_pass(change: dict[str, Any], said: str) -> None:
+    code, out = check(ENV, FakeGCP(rows=[HEALTHY_ROW | change]))
+    assert code != 0, out
+    first, last = out.splitlines()[0], out.splitlines()[-1]
+    assert first.startswith("cost-check: FAIL cost: "), out
+    assert said in first, out
+    assert "no one unit" in first, out
+    assert "0.00" not in first
+    assert last.startswith("cost-check: failed on the cost;"), out
+
+
+def test_mixed_currencies_with_a_cost_above_zero_still_say_stop() -> None:
+    code, out = check(ENV, FakeGCP(rows=[HEALTHY_ROW | {"cost": "0.5", "currencies": "2"}]))
+    assert code != 0
+    assert "stop GCP work" in out.splitlines()[0]
+
+
+@pytest.mark.parametrize(
+    "missing", ["currencies", "rows_without_currency"], ids=["no-count", "no-null-count"]
+)
+def test_a_row_without_its_currency_counts_fails(missing: str) -> None:
+    row = {k: v for k, v in HEALTHY_ROW.items() if k != missing}
+    code, out = check(ENV, FakeGCP(rows=[row]))
+    assert code != 0
+    assert out.splitlines()[0].startswith("cost-check: FAIL cost: the cost query answered"), out
+
+
+@pytest.mark.parametrize("negative", ["currencies", "rows_without_currency"])
+def test_a_negative_currency_count_fails(negative: str) -> None:
+    code, out = check(ENV, FakeGCP(rows=[HEALTHY_ROW | {negative: "-1"}]))
+    assert code != 0
+    assert out.splitlines()[0].startswith("cost-check: FAIL cost: the cost query answered"), out
+
+
+def test_the_currency_is_judged_on_every_row_of_the_project_and_dry_run_with_the_cost() -> None:
+    """The currency columns are not limited to this month, so a currency carried by last month's
+    rows alone cannot stand for this month's; the dry run checks the very query that runs."""
+    sql = month_to_date_sql(PROJECT, "billing.export_v1")
+    for column in (
+        " COUNT(DISTINCT currency) AS currencies,",
+        " COUNTIF(currency IS NULL) AS rows_without_currency,",
+        " MIN(currency) AS currency ",
+    ):
+        assert column in sql, sql
+    assert sql.endswith(" WHERE project.id = @project")
+    gcp = FakeGCP()
+    check(ENV, gcp)
+    dry, run = [c for c in gcp.calls if c[0] == "bq"]
+    assert dry[-1] == run[-1] == sql
+    assert [a for a in dry if a != "--dry_run"] == run
+
+
+# The passed line says what the query covers: the lab project's rows, not the billing account.
+
+
+def test_the_passed_line_states_it_covers_the_lab_project_only() -> None:
+    code, out = check(ENV, FakeGCP())
+    assert code == 0, out
+    assert out.splitlines()[-1] == (
+        "cost-check: passed: 0.00 EUR month-to-date for the lab project only (its rows in the "
+        "billing export), not the whole billing account; 8 fences ok, 1 not checked (budget)"
+    )
 
 
 @pytest.mark.parametrize(
