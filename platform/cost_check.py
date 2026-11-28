@@ -9,6 +9,9 @@ $0.00. With `LEDGER_LAB_GCP_PROJECT` set and no `GCP_PROJECT` it
   the agent account reads the export only through it) through `bq`:
   a dry run first, then the query under a fixed byte cap; a cost above zero fails, and so does an
   answer that is not the query's one row, or an export that holds no rows for the project;
+  the cost is shown in the currency the export's rows for the project carry (credits are in it
+  too), and rows that carry more than one currency, none, or one that is not a three-letter code
+  fail; the cost covers the lab project's rows only, not the whole billing account;
 - reads each applied fence through its REST API (`curl`) and compares it with its declaration in
   `platform/gcp` (`fences.py`); a fence that is missing, differs or answers in an unexpected shape
   fails. Where the environment hands gcloud its token (`CLOUDSDK_AUTH_ACCESS_TOKEN`, as a cloud
@@ -118,7 +121,13 @@ LOGIN_TOKEN_COMMAND = ("gcloud", "auth", "print-access-token")
 
 
 def month_to_date_sql(project: str, export: str) -> str:
-    """One row: the month's cost net of credits, its rows, all rows and the newest export."""
+    """One row: the month's cost net of credits, its rows, all rows, the newest export, and the
+    currencies of all the project's rows (distinct, how many lack one, and the least of them).
+
+    The currency is judged on every row of the project, not this month's alone: a month with no
+    rows yet still has a unit to show, and a subset of rows that all carry one currency carries
+    that one too. COUNT(DISTINCT) is exact in BigQuery and skips NULL, which the second count
+    counts."""
     if not EXPORT_NAME.match(export):
         raise ValueError(f"{EXPORT_VARIABLE} must be dataset.table, got {export!r}")
     if not PROJECT_ID.match(project):
@@ -130,7 +139,10 @@ def month_to_date_sql(project: str, export: str) -> str:
         " + IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) AS c), 0), 0)), 0) AS cost,"
         f" COUNTIF({this_month}) AS month_rows,"
         " COUNT(*) AS all_rows,"
-        " FORMAT_TIMESTAMP('%FT%H:%MZ', MAX(export_time)) AS newest_export"
+        " FORMAT_TIMESTAMP('%FT%H:%MZ', MAX(export_time)) AS newest_export,"
+        " COUNT(DISTINCT currency) AS currencies,"
+        " COUNTIF(currency IS NULL) AS rows_without_currency,"
+        " MIN(currency) AS currency"
         f" FROM `{project}.{export}`"
         " WHERE project.id = @project"
     )
@@ -747,8 +759,24 @@ class Fences:
         return found
 
 
-def cost_row(answer: str) -> tuple[Decimal, int, int, str | None]:
-    """The query's one row: cost, this month's rows, all rows, newest export time."""
+@dataclass(frozen=True)
+class CostRow:
+    """The cost query's one row."""
+
+    cost: Decimal
+    month_rows: int
+    all_rows: int
+    newest: str | None
+    currencies: int
+    rows_without_currency: int
+    currency: str | None
+
+
+CURRENCY_CODE = re.compile(r"[A-Z]{3}")
+
+
+def cost_row(answer: str) -> CostRow:
+    """The query's one row: cost, this month's rows, all rows, newest export time, currencies."""
     try:
         rows = json.loads(answer)
     except json.JSONDecodeError as failed:
@@ -760,49 +788,88 @@ def cost_row(answer: str) -> tuple[Decimal, int, int, str | None]:
         raise Shape("no cost in the row")
     try:
         cost = Decimal(str(row["cost"]))
-        month_rows, all_rows = int(row["month_rows"]), int(row["all_rows"])
+        counts = [
+            int(row[name])
+            for name in ("month_rows", "all_rows", "currencies", "rows_without_currency")
+        ]
     except (KeyError, TypeError, ValueError, InvalidOperation) as failed:
         raise Shape("a row field is not a number") from failed
     if not cost.is_finite():
         raise Shape("the cost is not a number")
-    newest = row.get("newest_export")
-    return cost, month_rows, all_rows, newest if isinstance(newest, str) else None
+    if any(count < 0 for count in counts):
+        raise Shape("a row count is negative")
+    month_rows, all_rows, currencies, rows_without_currency = counts
+    newest, currency = row.get("newest_export"), row.get("currency")
+    return CostRow(
+        cost,
+        month_rows,
+        all_rows,
+        newest if isinstance(newest, str) else None,
+        currencies,
+        rows_without_currency,
+        currency if isinstance(currency, str) else None,
+    )
 
 
-def month_to_date(project: str, export: str, run: Runner) -> tuple[bool, str]:
-    """Whether the cost is $0.00, and the line saying so."""
+def currency_problem(row: CostRow) -> str | None:
+    """Why the rows give the cost no one unit, or None when they all carry one currency code."""
+    rows = "the lab project's rows in the billing export"
+    if row.currencies > 1:
+        return f"{rows} carry {row.currencies} currencies"
+    if row.currencies == 0 or row.currency is None:
+        return f"{rows} carry no currency it can read"
+    if row.rows_without_currency:
+        return f"{row.rows_without_currency} of {rows} carry no currency"
+    if not CURRENCY_CODE.fullmatch(row.currency):
+        return f"{rows} carry a currency that is not a three-letter code"
+    return None
+
+
+def unjudged(reason: str) -> tuple[bool, str, None]:
+    """A cost line that fails before any amount is judged."""
+    return False, f"cost-check: FAIL cost: {reason}", None
+
+
+def month_to_date(project: str, export: str, run: Runner) -> tuple[bool, str, str | None]:
+    """Whether the cost is zero, the line saying so, and the currency it is in (None unless the
+    rows carry one currency code)."""
     try:
         dry = json.loads(run(bq_command(project, export, dry_run=True)))
         scanned = int(field(dry, "statistics", "totalBytesProcessed"))
         if scanned > MAX_BYTES_BILLED:
-            return False, (
-                f"cost-check: FAIL cost: the query would scan {scanned} bytes, above the cap of "
-                f"{MAX_BYTES_BILLED}; not run"
+            return unjudged(
+                f"the query would scan {scanned} bytes, above the cap of {MAX_BYTES_BILLED}; "
+                "not run"
             )
-        cost, month_rows, all_rows, newest = cost_row(run(bq_command(project, export)))
+        row = cost_row(run(bq_command(project, export)))
     except (OSError, subprocess.SubprocessError) as failed:
-        return False, f"cost-check: FAIL cost: the cost query failed (bq {tool_failure(failed)})"
+        return unjudged(f"the cost query failed (bq {tool_failure(failed)})")
     except (KeyError, TypeError, ValueError) as failed:
         shape = failed if isinstance(failed, Shape) else type(failed).__name__
-        return False, f"cost-check: FAIL cost: the cost query answered unexpectedly ({shape})"
-    if all_rows == 0:
-        return False, (
-            "cost-check: FAIL cost: the billing export holds no rows for the lab project, so "
-            "its cost cannot be read from it; check that the export is live"
+        return unjudged(f"the cost query answered unexpectedly ({shape})")
+    if row.all_rows == 0:
+        return unjudged(
+            "the billing export holds no rows for the lab project, so its cost cannot be read "
+            "from it; check that the export is live"
         )
-    cents = cost.quantize(Decimal("0.01"))
-    shown = f"${cents}" if cost == cents else f"${cents} (exactly {cost})"
+    problem = currency_problem(row)
+    if problem is not None or row.currency is None:
+        stop = "; their summed cost is above zero: stop GCP work" if row.cost > 0 else ""
+        return unjudged(f"{problem or 'no currency'}, so the cost has no one unit{stop}")
+    unit = row.currency
+    cents = row.cost.quantize(Decimal("0.01"))
+    shown = f"{cents} {unit}" if row.cost == cents else f"{cents} {unit} (exactly {row.cost})"
     fresh = (
-        f"{month_rows} rows this month" if month_rows else "no rows yet this month"
-    ) + f", newest export {newest or 'unknown'}"
-    if cost > 0:
-        return False, (
-            f"cost-check: FAIL month-to-date cost is {shown}, above $0.00: stop GCP work ({fresh})"
-        )
-    return True, (
-        f"cost-check: ok month-to-date cost is {shown} ({fresh}; dry run first: {scanned} bytes, "
-        f"under the {MAX_BYTES_BILLED}-byte cap)"
+        f"{row.month_rows} rows this month" if row.month_rows else "no rows yet this month"
+    ) + f", newest export {row.newest or 'unknown'}"
+    if row.cost > 0:
+        line = f"FAIL month-to-date cost is {shown}, above 0.00 {unit}: stop GCP work ({fresh})"
+        return False, f"cost-check: {line}", unit
+    line = (
+        f"ok month-to-date cost is {shown} ({fresh}; dry run first: {scanned} bytes, under the "
+        f"{MAX_BYTES_BILLED}-byte cap)"
     )
+    return True, f"cost-check: {line}", unit
 
 
 @contextlib.contextmanager
@@ -845,7 +912,7 @@ def check(
             f"cost-check: set {EXPORT_VARIABLE} to the view over the billing export that the agent "
             "account reads, as dataset.table in the lab project"
         )
-    zero, cost_line = month_to_date(project, export, run)
+    zero, cost_line, unit = month_to_date(project, export, run)
     credential = Credential(env, run)
     try:
         with removed_on_termination(credential):
@@ -859,8 +926,11 @@ def check(
     tally = f"{ok} fences ok, {len(unchecked)} not checked" + (
         f" ({', '.join(unchecked)})" if unchecked else ""
     )
-    if zero and not failed:
-        lines.append(f"cost-check: passed: $0.00, {tally}")
+    if zero and unit is not None and not failed:
+        lines.append(
+            f"cost-check: passed: 0.00 {unit} month-to-date for the lab project only (its rows in "
+            f"the billing export), not the whole billing account; {tally}"
+        )
         return 0, "\n".join(lines)
     reasons = (["the cost"] if not zero else []) + failed
     lines.append(f"cost-check: failed on {', '.join(reasons)}; {tally}")
