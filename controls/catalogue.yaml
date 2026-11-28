@@ -19,7 +19,7 @@ controls:
   - id: queries-run-as-the-asker
     layer: Identity and delegation
     owner: agent-operator
-    asserts: Every agent query runs on the asking persona's identity, on the local engine and on BigQuery, where each connection mints the persona's own token and SELECT SESSION_USER() must name that persona's account before any query runs, and every job is labelled with the agent, the conversation and the turn; two personas asking the same question get different rows, and a question without a user identity gets no answer.
+    asserts: Every agent query runs on the asking persona's identity, on the local engine and on BigQuery; two personas asking the same question get different rows, and a question without a user identity gets no answer. On BigQuery the persona's token is minted for each connection and SELECT SESSION_USER() must name the persona's account once, before the connection's first query (tests/agent/test_bigquery_mode.py, offline); the agent account itself still holds the warehouse builder role on the built datasets, which the agent's queries never name.
     proven_by:
       - tests/agent/test_ask.py::test_two_personas_asking_the_same_question_get_different_rows
       - tests/agent/test_ask.py::test_a_question_without_a_persona_gets_no_answer
@@ -197,7 +197,7 @@ controls:
   - id: spend-is-capped
     layer: Cost and abuse
     owner: agent-operator
-    asserts: Every query and every model call of the own agent has a cap; on the local engine a runaway join stops at the byte cap's stand-in with no run, and on BigQuery every job carries maximum_bytes_billed of the bytes left of the turn's bytes_billed_per_turn (agent/evals/adversarial.yaml), within the persona queries' own cap (access/bigquery.py), and a job refused at it stops the turn at the byte cap; BigQuery bills a join by the columns it reads, so there a runaway join is bounded by the cap, not stopped by it.
+    asserts: Every query and every model call of the own agent has a cap; on the local engine a runaway join stops at the byte cap's stand-in with no run, and on BigQuery each query job carries maximum_bytes_billed of the bytes left of the turn's bytes_billed_per_turn (agent/evals/adversarial.yaml), within the persona queries' own cap (access/bigquery.py), and BigQuery's refusal of a runaway join's job at that cap stops the turn; BigQuery bills a join by the columns it reads, so there a runaway join is bounded by the cap, not stopped by it.
     proven_by: [tests/agent/test_cost.py::test_runaway_join_stops_at_the_cap]
     status: implemented
   - id: lab-spend-fenced
