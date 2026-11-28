@@ -63,7 +63,7 @@ import duckdb
 import yaml
 from jsonschema import Draft202012Validator
 
-from agent.ask import Answer, AsPersona, Audit, ask, run_metric_query
+from agent.ask import Answer, Audit, ask, run_metric_query
 from agent.audit import FileLog
 from agent.model import Citation, Model, VerifiedQuery
 
@@ -73,6 +73,8 @@ SCHEMA = REPO / "agent" / "evals" / "golden.schema.json"
 
 Value = tuple[str, Any]
 Row = tuple[Value, ...]
+# The scorer runs a cited query again on the local engine only.
+LocalAsPersona = Callable[[str], duckdb.DuckDBPyConnection]
 
 
 @dataclass(frozen=True)
@@ -187,7 +189,7 @@ def rerun(connection: duckdb.DuckDBPyConnection, query: str, sql: str) -> Result
 def score(
     cases: Sequence[Case],
     *,
-    as_persona: AsPersona,
+    as_persona: LocalAsPersona,
     audit: Audit,
     model: Model | None = None,
     queries: Mapping[str, VerifiedQuery] | None = None,
