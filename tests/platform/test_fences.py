@@ -41,6 +41,9 @@ ALLOWED = {
     "google_data_catalog_taxonomy_iam_member",
     "google_bigquery_datapolicy_data_policy",
     "google_bigquery_datapolicy_data_policy_iam_member",
+    # Turning on an API bills nothing by itself; the native agent's two (native_agent.tf) bill
+    # per token after the free window, which `agent/native.py` stops calling before.
+    "google_project_service",
 }
 # A service account id: 6 to 30 characters, lowercase letters, digits and hyphens, from a letter.
 ACCOUNT_ID = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
@@ -263,14 +266,15 @@ def test_only_the_agent_mints_tokens_and_only_for_persona_accounts_and_the_publi
     assert unquote(grant["member"]) == AGENT_MEMBER
 
 
-def test_no_project_level_role_reaches_anyone_but_the_kill_switch_and_the_query_role() -> None:
-    # The personas' and the publisher's one project role, to run a query, is checked in
-    # test_access_rules.py.
+def test_no_project_level_role_reaches_anyone_but_the_kill_switch_and_the_query_roles() -> None:
+    # The personas' and the publisher's project roles, to run a query and ask the native agent,
+    # are checked in test_access_rules.py.
     members = [
         unquote(body["member"])
         for (rtype, name), body in blocks("resource").items()
         if rtype == "google_project_iam_member"
-        and name not in {"persona_runs_queries", "publisher_runs_queries"}
+        and name
+        not in {"persona_runs_queries", "publisher_runs_queries", "persona_asks_native_agent"}
     ]
     assert members, "the kill switch's roles are project-level"
     assert set(members) == {"serviceAccount:${google_service_account.kill_switch.email}"}

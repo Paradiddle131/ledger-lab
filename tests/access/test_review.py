@@ -77,6 +77,8 @@ QUERY_PERMISSIONS = {"bigquery.jobs.create", "bigquery.config.get"}
 # and acting as an account among them) and setting anyone's access to anything.
 REFUSED = {*PROJECT_PERMISSIONS, *BILLING_PERMISSIONS, *KILL_SWITCH_ACCOUNT_PERMISSIONS}
 QUERY_ROLE = ("Runs BigQuery queries (custom role)", "the lab project")
+# The native data agent's stateless chat, beside every query role a persona holds.
+NATIVE_AGENT_ROLE = ("roles/geminidataanalytics.dataAgentStatelessUser", "the lab project")
 VIEWER = "roles/bigquery.dataViewer"
 CLEAR = "roles/datacatalog.categoryFineGrainedReader"
 MASKED = "roles/bigquerydatapolicy.maskedReader"
@@ -144,7 +146,7 @@ def expected_roles(persona: str) -> set[tuple[str, str]]:
     grants |= {
         (VIEWER, f"warehouse dataset {d}") for p, d in expected_purpose_grants() if p == persona
     }
-    query = {QUERY_ROLE} if grants else set()
+    query = {QUERY_ROLE, NATIVE_AGENT_ROLE} if grants else set()
     clear = {(CLEAR, f"policy tag {t}") for t, p in expected_readers("clear") if p == persona}
     masked = {(MASKED, f"masking rule {t}") for t, p in expected_readers("masked") if p == persona}
     return grants | query | clear | masked

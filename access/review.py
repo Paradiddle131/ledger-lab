@@ -70,6 +70,7 @@ GRANTS_NOTHING = {
     "google_data_catalog_taxonomy",
     "google_eventarc_trigger",
     "google_project_iam_custom_role",
+    "google_project_service",
     "google_pubsub_topic",
     "google_service_account",
     "google_service_usage_consumer_quota_override",

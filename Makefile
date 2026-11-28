@@ -4,7 +4,7 @@
 LOADOUT ?= $(or $(shell sed -n 's/^The collection .* is cloned at `\([^`]*\)`.*/\1/p' $(HOME)/.claude/CLAUDE.md 2>/dev/null),../loadout)
 GUARDS := $(LOADOUT)/cloud/githooks
 
-.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test warehouse-parity bigquery-personas bigquery-row-policies bigquery-thresholds bigquery-purposes bigquery-visibility bigquery-agent stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
+.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test warehouse-parity bigquery-personas bigquery-row-policies bigquery-thresholds bigquery-purposes bigquery-visibility bigquery-agent bigquery-native stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
 
 check: lint typecheck test ids portable scan contract metric-versions
 	@echo "make check: all passed"
@@ -146,6 +146,13 @@ bigquery-visibility: sync
 # Run it between two `make cost-check` reads.
 bigquery-agent: sync
 	uv run pytest -m bigquery_persona -rA tests/agent/test_ask.py::test_two_personas_asking_the_same_question_get_different_rows tests/agent/test_ask.py::test_a_question_without_a_persona_gets_no_answer tests/agent/test_cost.py::test_runaway_join_stops_at_the_cap tests/agent/test_bigquery_mode.py::test_each_job_of_a_turn_carries_its_labels
+
+# The native data agent (agent/native.py) asked one golden question as its persona, on the persona's
+# own token, its rows compared with the verified query's run as that persona; refused past the free
+# window. Needs the two APIs and the role of platform/gcp/native_agent.tf applied, off the cloud
+# proxy. Run it between two `make cost-check` reads.
+bigquery-native: sync
+	uv run pytest -m bigquery_persona -rA tests/agent/test_native_mode.py::test_one_golden_question_is_answered_as_the_persona_with_the_verified_querys_rows
 
 # The container stack: the shared database always, one more service per PROFILE=<name>.
 # Each checkout is its own Compose project (containers, network, volume) and the database takes a

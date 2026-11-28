@@ -283,6 +283,10 @@
       "resourcemanager.projects.get",
       "resourcemanager.projects.list"
     ],
+    "roles/geminidataanalytics.dataAgentStatelessUser": [
+      "geminidataanalytics.locations.chat",
+      "geminidataanalytics.locations.useDataEngineeringAgent"
+    ],
     "roles/serviceusage.serviceUsageConsumer": [
       "monitoring.timeSeries.list",
       "serviceusage.catalogs.listMembers",

@@ -319,6 +319,9 @@ def test_every_grant_goes_to_a_persona_the_agent_the_publisher_or_the_kill_switc
         assert "condition" not in body, (rtype, name)
 
 
+# The predefined role that holds the stateless chat permission and one other, nothing more.
+NATIVE_AGENT_USER = "roles/geminidataanalytics.dataAgentStatelessUser"
+
 # Each grant of the access rules: (resource, for_each, role, member).
 ACCESS_GRANTS = {
     ("google_data_catalog_taxonomy_iam_member", "agent_reads_taxonomy"): (None, VIEWER, AGENT),
@@ -343,6 +346,11 @@ ACCESS_GRANTS = {
         PERSONA_IN_SET,
     ),
     ("google_project_iam_member", "publisher_runs_queries"): (None, QUERY_RUNNER, PUBLISHER),
+    ("google_project_iam_member", "persona_asks_native_agent"): (
+        "${local.warehouse_readers}",
+        NATIVE_AGENT_USER,
+        PERSONA_IN_SET,
+    ),
 }
 
 
@@ -513,7 +521,7 @@ def test_grants_land_on_the_resource_their_map_names() -> None:
     assert masked["location"] == "${var.region}"
 
 
-def test_project_roles_reach_only_the_kill_switch_and_the_personas_query_role() -> None:
+def test_project_roles_reach_only_the_kill_switch_and_the_personas_query_and_agent_roles() -> None:
     project = {
         name: (unquote(b["role"]), unquote(b["member"]))
         for (t, name), b in blocks("resource").items()
@@ -525,7 +533,17 @@ def test_project_roles_reach_only_the_kill_switch_and_the_personas_query_role() 
         "kill_switch_invokes_workflows": ("roles/workflows.invoker", KILL_SWITCH),
         "persona_runs_queries": (QUERY_RUNNER, PERSONA_IN_SET),
         "publisher_runs_queries": (QUERY_RUNNER, PUBLISHER),
+        "persona_asks_native_agent": (NATIVE_AGENT_USER, PERSONA_IN_SET),
     }
+
+
+def test_the_native_agent_turns_on_its_two_apis_and_keeps_them_on_a_destroy() -> None:
+    service = blocks("resource")[("google_project_service", "native_agent")]
+    assert service["for_each"] == (
+        '${toset(["geminidataanalytics.googleapis.com", "cloudaicompanion.googleapis.com"])}'
+    )
+    assert service["disable_on_destroy"] is False
+    assert [n for t, n in blocks("resource") if t == "google_project_service"] == ["native_agent"]
 
 
 def custom_role(name: str) -> set[str]:
