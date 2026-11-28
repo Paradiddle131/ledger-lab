@@ -8,15 +8,21 @@ governed copy, under row access policies a view would read as its querying perso
 product's own dataset. A view therefore reads its source as itself, and its reader holds no
 grant on the source.
 
-Two kinds of view, by what a table's units count:
-- `count_distinct`: the source rows at the table's grain with the units column, under BigQuery's
-  aggregation threshold analysis rule with that column as the privacy unit and the minimum group
-  as the threshold. A query must aggregate (`SELECT WITH AGGREGATION_THRESHOLD`), at any grain of
-  the shown columns, and BigQuery drops each group of fewer distinct privacy units.
-- `max`: BigQuery's threshold counts distinct privacy units and cannot keep a group by the largest
-  per-row count of payees its rows already hold, so the view is the table itself, grouped at its
-  grain with `HAVING max(<units>) >= <minimum>`, the condition `access/compile.py` writes for the
-  local engine, and carries no analysis rule.
+Every view is the table itself, grouped at its grain (its `group_by` and `entity_group_by`, its
+sums and its units, the columns `access/compile.py` gives the local engine's aggregate table) with
+the minimum in a HAVING, so it holds only the kept groups and no column finer than its grain: each
+of its rows is one kept group, so no filter, coarser grouping or difference of two answers over
+one view reaches a group the minimum dropped (two tables that sum the same figures at different
+grains are `access/aggregates.yaml`'s open point). Two kinds, by what a table's units count:
+- `count_distinct`: `count(distinct <units_of>)` over the source rows, as `<units>`, kept when it
+  is at least the minimum group.
+- `max`: the largest per-row count of payees the source rows already hold, `max(<units_of>)`, kept
+  likewise.
+Both are the condition `access/compile.py` writes for the local engine. BigQuery's HAVING reads a
+bare name as the select list's alias first, so the condition names the source's column
+(`source.<units_of>`). No view carries an analysis rule: the grouping already returns only kept
+groups, and an aggregation threshold over row-level rows checks each query's groups apart, so two
+answers that each pass it can be subtracted to a group under the minimum.
 
 One view per table serves every aggregate reader of its product, so the readers must share one
 set of entities, which the view's filter names; a table whose readers do not is refused. A table
@@ -28,7 +34,6 @@ statements, `apply` runs them. The project comes from `LEDGER_LAB_GCP_PROJECT` a
 from `LEDGER_LAB_BQ_LOCATION`.
 """
 
-import json
 import re
 import subprocess
 import sys
@@ -66,7 +71,7 @@ class View:
     group_by: tuple[str, ...]
     sums: tuple[str, ...]
     units: str
-    # `count_distinct` (an aggregation threshold view) or `max` (a HAVING view), over `units_of`.
+    # `count_distinct` or `max`, over `units_of`: how a group's units are counted.
     count: str
     units_of: str
     minimum: int
@@ -84,27 +89,15 @@ class View:
         if self.entities is not None:
             listed = ", ".join(f"'{e}'" for e in sorted(self.entities)) or "null"
             where = f" where {ENTITY} in ({listed})"
-        if self.count == "count_distinct":
-            rule = {
-                "aggregation_threshold_policy": {
-                    "threshold": self.minimum,
-                    "privacy_unit_column": self.units_of,
-                }
-            }
-            shown = ", ".join([*self.group_by, *self.sums, self.units_of])
-            return (
-                f"create or replace view {view}"  # noqa: S608
-                f" options(privacy_policy = '{json.dumps(rule, sort_keys=True)}')"
-                f" as select {shown} from {source}{where}"
-            )
         # BigQuery's HAVING reads a bare name as the select list's alias first, so `max(payees)`
         # beside `max(payees) as payees` is an aggregate of an aggregate: the name is the source's.
+        units = "count(distinct {})" if self.count == "count_distinct" else "max({})"
         keys = ", ".join(self.group_by)
         sums = "".join(f", sum({c}) as {c}" for c in self.sums)
         return (
             f"create or replace view {view} as select {keys}{sums},"  # noqa: S608
-            f" max({self.units_of}) as {self.units} from {source} as source{where}"
-            f" group by {keys} having max(source.{self.units_of}) >= {self.minimum}"
+            f" {units.format(self.units_of)} as {self.units} from {source} as source{where}"
+            f" group by {keys} having {units.format(f'source.{self.units_of}')} >= {self.minimum}"
         )
 
 

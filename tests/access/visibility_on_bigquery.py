@@ -17,10 +17,8 @@ What each observation reads on BigQuery:
   `<table>_masked`'s); the other copy's view, which its dataset grant also shows it, is counted
   as the persona and left out only when it returns no row or is refused (403), and is held under
   its own name, which no purpose lists, when it returns any. An aggregate view
-  (`access/thresholds.py`) is held under its table's name; one under an aggregation threshold
-  analysis rule is held as the one query it admits at its grain, `SELECT WITH
-  AGGREGATION_THRESHOLD`, so its privacy unit column reads as the count of its distinct values
-  under the units' name. Anything else is held as
+  (`access/thresholds.py`) is held under its table's name, and read as any table: each is grouped
+  at its grain, its units a column of it. Anything else is held as
   `<dataset>.<table>`, which no purpose lists. "No views" is held as: every view held is one the
   modules generate, with its generated query.
 - the source with full rights, the reference each cell is read against, never filtered by the
@@ -139,13 +137,11 @@ def typed(kind: str, value: Any) -> Any:
 
 @dataclass(frozen=True)
 class Place:
-    """Where a table a reader names sits on BigQuery, and the session that reads it; a view under
-    an aggregation threshold analysis rule carries its generated view."""
+    """Where a table a reader names sits on BigQuery, and the session that reads it."""
 
     session: PersonaSession
     dataset: str
     table: str
-    threshold: thresholds.View | None = None
 
 
 def fingerprint(columns: Sequence[str], apart: Mapping[str, str | None]) -> str:
@@ -190,32 +186,9 @@ class BigQueryReader:
 
     def read(self, table: str, columns: Sequence[str]) -> list[Row]:
         checked(*columns)
-        view = self.places[table].threshold
-        if view is None:
-            return self._run(table, f"SELECT {', '.join(columns)} FROM {self._path(table)}")  # noqa: S608
-        shown, keys = [], []
-        for column in columns:
-            if column == view.units:
-                shown.append(f"COUNT(DISTINCT {view.units_of}) AS {column}")
-            elif column in view.sums:
-                shown.append(f"SUM({column}) AS {column}")
-            else:
-                shown.append(column)
-                keys.append(column)
-        return self._run(
-            table,
-            f"SELECT WITH AGGREGATION_THRESHOLD {', '.join(shown)}"  # noqa: S608
-            f" FROM {self._path(table)} GROUP BY {', '.join(keys)}",
-        )
+        return self._run(table, f"SELECT {', '.join(columns)} FROM {self._path(table)}")  # noqa: S608
 
     def count(self, table: str, entities: set[str] | None, column: str | None = None) -> int:
-        view = self.places[table].threshold
-        if view is not None:
-            # The groups its one admitted query returns at its grain, of the entities.
-            grain = list(self.held[table])
-            rows = self.read(table, grain)
-            at = grain.index(ENTITY) if ENTITY in grain else None
-            return sum(1 for r in rows if entities is None or at is None or r[at] in entities)
         what = "COUNT(*)"
         if column is not None:
             checked(column)
@@ -249,17 +222,7 @@ class BigQueryReader:
 
     def distinct(self, table: str, column: str) -> set[Any]:
         checked(column)
-        view = self.places[table].threshold
         source = self._path(table)
-        if view is not None:
-            return {
-                row[0]
-                for row in self._run(
-                    table,
-                    f"SELECT WITH AGGREGATION_THRESHOLD {column},"  # noqa: S608
-                    f" COUNT(DISTINCT {view.units_of}) FROM {source} GROUP BY {column}",
-                )
-            }
         ((n, longest),) = self._run(
             table,
             f"SELECT COUNT(DISTINCT {column}), MAX(BYTE_LENGTH({column})) FROM {source}",  # noqa: S608
@@ -448,7 +411,7 @@ class BigQueryEngine:
             raise PersonaQueryError("the persona holds a table whose name this engine cannot write")
         kind, columns, stored = session.table(dataset, name)
         own = f"{dataset}.{name}"
-        logical, generated, threshold = own, None, None
+        logical, generated = own, None
         if (dataset, name) in purposes:
             view = purposes[(dataset, name)]
             generated = view.select(self.project)
@@ -469,14 +432,9 @@ class BigQueryEngine:
             view = aggregates[(dataset, name)]
             generated = generated_query(view, self.project)
             logical = name
-            if view.count == "count_distinct":
-                threshold = view
-                columns = [
-                    (view.units, "INTEGER") if c == view.units_of else (c, t) for c, t in columns
-                ]
         if logical in reader.held:
             logical = own
-        reader.places[logical] = Place(session, dataset, name, threshold)
+        reader.places[logical] = Place(session, dataset, name)
         reader.held[logical] = dict(columns)
         if kind == "VIEW" and (generated is None or not same_query(stored or "", generated)):
             reader.foreign.add(logical)
