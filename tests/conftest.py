@@ -1,5 +1,6 @@
 """Shared loaders for the catalogues kept as data in the tree, and the persona identities."""
 
+import contextlib
 import json
 import logging
 import os
@@ -24,6 +25,7 @@ from tests import options_check, workers
 from tests.models.dbt_build import SAMPLED_SOURCES, git_out
 
 if TYPE_CHECKING:
+    from agent.bigquery import BigQueryConnection
     from tests.models.dbt_build import Build
 
 REPO = Path(__file__).resolve().parents[1]
@@ -210,17 +212,8 @@ def as_persona_on_bigquery(
     # Imported here: platform/ is on pytest's path, not on a child process's that loads this file.
     from gcp_project import lab_project
 
-    # httpx logs each request's URL, which names the project, to pytest's captured and live logs;
-    # httpcore logs each connection's host and the answer's headers, and a log format with the
-    # record's path prints the checkout's. httpcore logs through child loggers, which a parent's
-    # `disabled` does not reach, so both are held at WARNING, a level every child without its own
-    # inherits.
-    loggers = [logging.getLogger(name) for name in ("httpx", "httpcore")]
-    levels = [logger.level for logger in loggers]
-    for logger in loggers:
-        logger.setLevel(logging.WARNING)
-    project = lab_project()
-    try:
+    with http_logs_held():
+        project = lab_project()
         with httpx.Client(timeout=60) as client:
 
             def act(persona: str) -> PersonaSession:
@@ -228,9 +221,42 @@ def as_persona_on_bigquery(
                 return PersonaSession(project, mint(chain(account, project, os.environ)), client)
 
             yield act
+
+
+@contextlib.contextmanager
+def http_logs_held() -> Iterator[None]:
+    """httpx logs each request's URL, which names the project, to pytest's captured and live logs;
+    httpcore logs each connection's host and the answer's headers, and a log format with the
+    record's path prints the checkout's. httpcore logs through child loggers, which a parent's
+    `disabled` does not reach, so both are held at WARNING, a level every child without its own
+    inherits, until the block ends."""
+    loggers = [logging.getLogger(name) for name in ("httpx", "httpcore")]
+    levels = [logger.level for logger in loggers]
+    for logger in loggers:
+        logger.setLevel(logging.WARNING)
+    try:
+        yield
     finally:
         for logger, level in zip(loggers, levels, strict=True):
             logger.setLevel(level)
+
+
+@pytest.fixture
+def agent_on_bigquery() -> Iterator[Callable[[str], "BigQueryConnection"]]:
+    """The own agent's connection-maker on BigQuery (`agent/bigquery.py`), in the lab's own
+    project: each connection it opens carries a token minted anew for the asking persona's own
+    account, through the agent account, so the warehouse's grants decide what the agent's queries
+    return. It needs what `as_persona_on_bigquery` needs: the lab project, read only through
+    `platform/gcp_project.py`, and a login that may mint the token, off the cloud session's proxy;
+    a test using it carries the `bigquery_persona` marker, so its failure is reported as below."""
+    from gcp_project import lab_project
+
+    from agent.bigquery import connector
+
+    with http_logs_held():
+        project = lab_project()
+        with httpx.Client(timeout=60) as client:
+            yield connector(project, client)
 
 
 def holds_a_persona_token(item: pytest.Item) -> bool:
