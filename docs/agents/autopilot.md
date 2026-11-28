@@ -34,12 +34,13 @@ Exit 1 means the tracker cannot be read as the rule needs (`error: <reason>`): t
 The rule it runs, which `tests/platform/test_next_item.py` proves on fixture trackers:
 
 1. The open issue titled `Roadmap`: its sub-issues are the epics, in order. The open issue titled starting `Thin slice` holds the slice's path: the rows of its "The path" table, in row order, each a step number then `#<n>`.
-2. Take the first pickable issue labelled `slice`, in path order.
+2. Take the first pickable step of the path, in path order, whether or not it is labelled `slice` (the path is owner input; the picker warns about a step without the label).
 3. Else the first pickable other sub-issue labelled `slice`, off the path (such as a leftover that blocks a step), in epic order then sub-issue order, then any open issue labelled `slice` outside every epic, by number.
 4. Else, once the slice has no open item, the first pickable other sub-issue, in epic order then sub-issue order, leaving out the leftovers issues.
 5. Else, once the slice has no open item, the first pickable issue labelled `leftover`, in epic order then sub-issue order: one `Review leftovers: <area>` issue is one item and one PR, its checkboxes the findings it fixes.
 
-The slice has an open item while a step of its path or an issue labelled `slice` is open (an epic and the `Thin slice` issue itself aside).
+The slice's items are the open steps of its path, whatever their labels, and every other open issue labelled `slice`, under an epic or outside every one; an epic and the `Thin slice` issue itself are never one.
+Steps 2 and 3 take only the slice's items, and the slice has an open item exactly while one of them is open.
 While it has one and none is pickable, the picker prints `none: the slice has open items and none is pickable; …` with the open ones, and the wake ends with that line in its handoff: it never turns to off-slice work or leftovers while the slice waits on the owner, the owner's machine or GCP.
 A fix the slice needs to move on (a blocker of a step, a must-fix a slice step's review confirms) gets `slice` when it is filed, so step 3 takes it, under an epic or outside every one; anything else found on the way is filed without `slice` and waits for the slice to finish.
 

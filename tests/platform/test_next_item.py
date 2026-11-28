@@ -271,7 +271,7 @@ def test_a_closed_item_still_labelled_ready_is_not_picked() -> None:
     closed = replace(AGENT_SLICE, state="closed")
     chosen = pick(tracker(closed, AGENT_SLICE_LATER, path=(AGENT_STEP, AGENT_STEP_LATER)), NOW)
     assert chosen.number == AGENT_STEP_LATER
-    assert dict(chosen.skipped)[AGENT_STEP] == "closed"
+    assert AGENT_STEP not in dict(chosen.skipped)  # a closed step is no slice item
     done = replace(GROUND, state="closed")
     assert pick(tracker(done, path=()), NOW).number is None
 
@@ -666,8 +666,33 @@ def test_the_labels_and_the_path_disagreeing_are_warned() -> None:
         f"{ref(AGENT_STEP)} is on the slice path but not labelled" in w for w in chosen.warnings
     )
     assert any(f"{ref(ACCESS_STEP)} is labelled `slice` but not on" in w for w in chosen.warnings)
-    # The labelled one off the path comes after the path's steps, before the other sub-issues.
+    # A path step is taken whatever its labels, before the labelled one off the path.
+    assert (chosen.number, chosen.rule) == (AGENT_STEP, RULE_SLICE)
+    held = replace(unlabelled, labels=unlabelled.labels | {"needs-owner"})
+    chosen = pick(tracker(held, off_path, path=(AGENT_STEP,)), NOW)
     assert (chosen.number, chosen.rule) == (ACCESS_STEP, RULE_SLICE_OFF_PATH)
+
+
+def test_a_path_step_without_the_slice_label_is_picked_rather_than_holding_the_queue() -> None:
+    """It counts toward the hold, so step 2 takes it; held, it holds and is named."""
+    step = issue(AGENT_STEP, "agent", "ready")
+    chosen = pick(tracker(LEFTOVERS_ISSUE, GROUND, step), NOW)
+    assert (chosen.number, chosen.rule) == (AGENT_STEP, RULE_SLICE)
+    held = replace(step, labels=step.labels | {"needs-owner"})
+    chosen = pick(tracker(LEFTOVERS_ISSUE, GROUND, held), NOW)
+    assert chosen.number is None
+    assert chosen.rule == f"{SLICE_WAITS} (open: {ref(AGENT_STEP)})"
+
+
+def test_the_slice_issue_without_the_epic_label_neither_holds_nor_is_picked() -> None:
+    """Labelled `slice` and `ready`, on its own path: it is no slice item, so the queue moves on."""
+    done = replace(AGENT_SLICE, state="closed")
+    t = tracker(LEFTOVERS_ISSUE, GROUND, done, path=(SLICE_ISSUE, AGENT_STEP))
+    bare = replace(t.issues[SLICE_ISSUE], labels=frozenset({"agent", SLICE, "ready"}))
+    t = replace(t, issues=dict(t.issues) | {SLICE_ISSUE: bare})
+    chosen = pick(t, NOW)
+    assert (chosen.number, chosen.rule) == (GROUND_ITEM, RULE_EPIC)
+    assert SLICE_ISSUE not in dict(chosen.skipped)
 
 
 def test_a_slice_issue_off_the_path_that_blocks_a_step_comes_before_leftovers() -> None:
@@ -734,7 +759,7 @@ def test_the_queue_steps_name_slice_then_the_other_sub_issues_then_leftover() ->
         return found[0]
 
     roadmap = step_naming("titled `Roadmap`")
-    slice_step = step_naming("labelled `slice`, in path order")
+    slice_step = step_naming("step of the path, in path order")
     leftover = step_naming("labelled `leftover`")
     other = step_naming("the first pickable other sub-issue, in epic order")
     off_path = step_naming("other sub-issue labelled `slice`, off the path")
@@ -749,6 +774,7 @@ def test_the_queue_steps_name_slice_then_the_other_sub_issues_then_leftover() ->
 
 def test_the_queue_section_says_a_held_slice_stops_the_pick() -> None:
     queue = profile_section("## Queue")
+    assert "Steps 2 and 3 take only the slice's items" in queue
     assert f"`none: {SLICE_WAITS.split(';')[0]};" in queue
     assert "never turns to off-slice work or leftovers" in queue
 
