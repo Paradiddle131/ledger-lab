@@ -49,7 +49,7 @@ Labels: `ready` is the skill's `agent:ready`; `blocked` stands for its `blocked:
 An open PR for an `owner-machine` item carries `needs-local-verify` on the PR itself, put there by whoever opens the PR or labels its issue: the skill's step 2 treats it as held, so wakes leave it even with work to do, `merge.sh` holds on it, and a session on the owner's computer takes it by the skill's § Local resume, removing the label once the item's live runs pass on its head.
 Area labels: `data`, `access`, `semantics`, `agent`, `workflow`, `operations`, `platform`; kind labels: `epic`, `decision`, `research`, `question`, `control`.
 
-**Review nits:** a review's nits stay on the PR's `🤖 Review` record; they are not filed as issues, nor as checkboxes on a `Review leftovers: <area>` issue (this narrows the skill's step 9).
+**Review nits:** a review's nits stay on the PR's `🤖 Review` record; they are not filed as issues, nor as checkboxes on a `Review leftovers: <area>` issue (this narrows the autopilot skill's step 8 and the `review` skill's step 9).
 
 **An item that turns out to need GCP or the owner:** commit nothing half-done; swap `ready` and `agent:claimed` for `needs-gcp` (the step calls GCP while `LEDGER_LAB_GCP_PROJECT` is unset or blank or a `GCP_PROJECT` is non-empty, or while the Digest says `Mode: offline`, or this lab's own project is missing) or `needs-owner` (a decision packet as the last comment); say why on the issue; `git stash -u`; take the next.
 

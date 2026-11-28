@@ -3,9 +3,10 @@
 The review skill's `tier.sh` reads `REVIEW.md` from the default branch, so a change's own edit
 of it is judged here instead: this file parses it by the rules `tier.sh` states (`parse` and
 `glob_re` below, the one copy of them in this repository) and pins the lenses of the paths in
-PINNED (`ingest/individuals.py`, `access/personas.yaml`, `access/thresholds.py`,
-`models/models/marts/payments/payments_masked.sql`, `platform/gcp/warehouse.tf`,
-`platform/gcp/budget.tf`, `platform/fences.py`), one or more from each of its three areas.
+PINNED (`ingest/individuals.py`, `ingest/chicago/table.py`, the payments mart, a Chicago sample,
+`access/personas.yaml`, `access/thresholds.py`, `models/models/marts/payments/payments_masked.sql`,
+`platform/gcp/warehouse.tf`, `platform/gcp/budget.tf`, `platform/fences.py`, `ingest/load.py`,
+`ingest/bucket.py`), several from each of its three areas.
 
 Checked:
 - `REVIEW.md` parses: `parse` raises where `tier.sh` would warn and count every path as
@@ -68,11 +69,16 @@ PINNED = {
     "platform/gcp/warehouse.tf": {"control-prober", "guardrail-reviewer", "leak-hunter"},
     "platform/gcp/budget.tf": {"control-prober", "guardrail-reviewer"},
     "platform/fences.py": {"control-prober", "guardrail-reviewer"},
+    "ingest/chicago/table.py": {"control-prober", "leak-hunter"},
+    "models/models/marts/payments/payments.sql": {"control-prober", "leak-hunter"},
+    "models/seeds/staging/chicago/chicago_payments_sample.csv": {"control-prober", "leak-hunter"},
+    "ingest/load.py": {"control-prober", "guardrail-reviewer"},
+    "ingest/bucket.py": {"control-prober", "guardrail-reviewer"},
 }
 
 # Paths outside the three areas, which no `## Sensitive` item matches.
 LEFT_OUT = (
-    "ingest/load.py",
+    "ingest/ecb/rates.py",
     "platform/cost_check.py",
     "agent/policy/tools.py",
     "tests/conftest.py",
