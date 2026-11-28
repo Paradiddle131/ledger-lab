@@ -19,8 +19,6 @@ accounts:
     declared: data.google_service_account.agent
     duties: The sessions' credential; builds the warehouse models, lands the verified files and acts as any persona in the tests.
     reach: The largest concentration of access in the lab; its declared builder role reads and replaces every table of every warehouse dataset; it reads every tagged column in clear, writes the landing bucket and can act as every persona, its own owner and every other owner among them, and as the publisher; by hand it holds no data role on the project and reads the billing export only through its cost view.
-    project_roles_granted_by_hand:
-      - roles/serviceusage.serviceUsageConsumer
     custom_roles_granted_by_hand:
       - id: labQueryRunner
         title: Runs BigQuery queries
@@ -29,23 +27,33 @@ accounts:
           - bigquery.config.get
           - bigquery.jobs.create
       # The project permissions the fence reads of `make cost-check` need (its READS table): the
-      # project and its IAM policy, the budget topic, its subscription, the kill switch's workflow,
-      # trigger and account; the quota read's permission comes from service usage consumer, and
-      # the budget is read on the billing account.
+      # project and its IAM policy, the BigQuery quota, the budget topic's subscription, the
+      # kill switch's workflow and trigger, and billing a read to the project (service usage's
+      # use, which replaced the predefined service usage consumer role and its 17 other
+      # permissions on 2026-11-22); the budget is read on the billing account, and the budget
+      # topic and the kill switch account on themselves alone, granted in platform/gcp.
+      # serviceusage.quotas.get is at Google's TESTING support level for custom roles.
       - id: labFenceReader
         title: Reads the lab's spend fences
         created: by hand
         permissions:
           - resourcemanager.projects.get
           - resourcemanager.projects.getIamPolicy
-          - pubsub.topics.get
           - pubsub.subscriptions.get
           - workflows.workflows.get
           - eventarc.triggers.get
-          - iam.serviceAccounts.get
-    table_roles_granted_by_hand:
-      - role: roles/bigquery.dataViewer
+          - serviceusage.quotas.get
+          - serviceusage.services.use
+    # The cost query's read of its view: the view and its rows, in place of the predefined data
+    # viewer role (which also held the table's IAM policy, export, snapshots and replication).
+    custom_table_roles_granted_by_hand:
+      - id: labViewReader
+        title: Reads the cost view
+        created: by hand
         view: the billing export's cost view
+        permissions:
+          - bigquery.tables.get
+          - bigquery.tables.getData
     # Each limit is held by a test, of the access rules in tests/platform or of the hand-granted
     # roles in tests/access/test_review.py, except the last, which says what nothing limits.
     limits:

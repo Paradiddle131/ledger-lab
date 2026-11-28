@@ -3,7 +3,8 @@
 other column is left as it is, the masked copy is not touched, and a missing taxonomy, tag or
 column stops before any schema is written. Live, as each human persona (`bigquery_persona`): a
 persona without the clear reader role on a tag is refused that column of the clear copy, even where
-it may read the table's other columns.
+it may read the table's other columns, both through each view of its purposes over the copy
+(`access/purpose_views.py`), which is where a persona reads the copy, and on the copy itself.
 """
 
 import json
@@ -16,7 +17,9 @@ import pytest
 from access import policy_tags
 from access.bigquery import PersonaQueryError, PersonaSession
 from access.policy_tags import TAXONOMY, tag
+from access.purpose_views import views
 from access.row_policies import RowPolicyError
+from tests.conftest import load_aggregates, load_purposes
 
 PROJECT = "the-lab"
 WHERE = "us-central1"
@@ -119,21 +122,31 @@ def test_a_persona_without_a_tags_clear_role_is_refused_its_column_of_the_clear_
 ) -> None:
     from gcp_project import lab_project
 
+    project = lab_project()
     tagged = columns["products"]["payments"]["columns"]
     clear = {t["id"]: set(t["clear"]) for t in columns["tags"]}
-    reads_payments = any(
-        g["persona"] == human and g["product"] == "payments" and g["access"] in ("read", "edit")
-        for g in access["grants"]
-    )
+    purposes = load_purposes()
+    mine = {p["id"] for p in purposes["purposes"] if human in p["personas"]}
+    # The views of the persona's purposes over the clear copy: where it reads the copy's rows.
+    over_clear = [
+        v
+        for v in views(access, columns, purposes, load_aggregates())
+        if v.purpose in mine and (v.source_dataset, v.source) == ("payments", "payments")
+    ]
     session = as_persona_on_bigquery(human)
     for column, tag_id in tagged.items():
-        sql = f"SELECT {column.split('.', 1)[1]} FROM `{lab_project()}.payments.payments` LIMIT 1"  # noqa: S608
+        name = column.split(".", 1)[1]
+        places = [f"{v.dataset}.{v.name}" for v in over_clear if name in v.columns]
         if human in clear[tag_id]:
-            session.query(sql)
+            if not places:
+                pytest.fail("no view of the clear reader's purposes lists a tagged column")
+            for place in places:
+                session.query(f"SELECT {name} FROM `{project}.{place}` LIMIT 1")  # noqa: S608
             continue
-        with pytest.raises(PersonaQueryError) as refused:
-            session.query(sql)
-        if refused.value.status != 403:
-            pytest.fail("a tagged column was not refused to a persona without its clear role")
-    if reads_payments:
-        session.query(f"SELECT entity_id FROM `{lab_project()}.payments.payments` LIMIT 1")  # noqa: S608
+        for place in [*places, "payments.payments"]:
+            with pytest.raises(PersonaQueryError) as refused:
+                session.query(f"SELECT {name} FROM `{project}.{place}` LIMIT 1")  # noqa: S608
+            if refused.value.status != 403:
+                pytest.fail("a tagged column was not refused to a persona without its clear role")
+    for view in over_clear:
+        session.query(f"SELECT entity_id FROM `{project}.{view.dataset}.{view.name}` LIMIT 1")  # noqa: S608

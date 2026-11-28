@@ -4,7 +4,7 @@
 LOADOUT ?= $(or $(shell sed -n 's/^The collection .* is cloned at `\([^`]*\)`.*/\1/p' $(HOME)/.claude/CLAUDE.md 2>/dev/null),../loadout)
 GUARDS := $(LOADOUT)/cloud/githooks
 
-.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test warehouse-parity bigquery-personas bigquery-row-policies stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
+.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test warehouse-parity bigquery-personas bigquery-row-policies bigquery-thresholds bigquery-purposes bigquery-visibility stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
 
 check: lint typecheck test ids portable scan contract metric-versions
 	@echo "make check: all passed"
@@ -36,9 +36,10 @@ typecheck: sync
 # - `own`: the cost read (`platform/cost_check.py`), pytest, then the cost read again, in that
 #   order on one shell line. A failed read before stops pytest from running; the read after also
 #   runs after a failed pytest; the line fails if either read or pytest fails.
-# - `elsewhere` (the lab variable unset or blank, or GCP_PROJECT set): pytest alone.
+# - `elsewhere` (the lab variable unset or blank, or GCP_PROJECT non-empty): pytest alone.
 # - any other output, the empty output of a failed decider included: a message, a failure, no pytest.
-# pytest runs its tests across one worker per CPU this process may use (`-n auto`, pytest-xdist);
+# pytest runs its tests across one worker per CPU this process may use (`-n auto`, pytest-xdist),
+# capped at one per gibibyte of available memory (tests/workers.py);
 # `PYTEST_XDIST_AUTO_NUM_WORKERS=<n>` in the environment sets another count. A plain
 # `uv run pytest` stays in one process.
 # tests/platform/test_cost_read_around_tests.py checks these over a stub `uv`. Limits: an interrupt
@@ -112,6 +113,29 @@ bigquery-personas: sync
 # without the tag's clear role (access/policy_tags.py).
 bigquery-row-policies: sync
 	uv run pytest -m bigquery_persona tests/access/test_row_policies.py tests/access/test_policy_tags.py
+
+# Each aggregate reader's read of its product's aggregate views on BigQuery, as the persona: only
+# the groups of at least the minimum group, no raw read of the privacy unit, and a refusal without
+# the grant (access/thresholds.py).
+bigquery-thresholds: sync
+	uv run pytest -m bigquery_persona tests/access/test_thresholds.py
+
+# Each human persona's read of its purposes' views on BigQuery, as the persona: through each view
+# exactly its entities' rows of the copy its tags give it, by count and digest, and none of the
+# other copy; a refusal of every other purpose's views and, once the product grants are removed,
+# of the views' sources; and each purpose dataset holding exactly its generated views, each with
+# its generated query (access/purpose_views.py). `LEDGER_LAB_PRODUCT_GRANTS=kept` skips the
+# sources' case while the product grants are still applied.
+bigquery-purposes: sync
+	uv run pytest -m bigquery_persona tests/access/test_purpose_views.py
+
+# The visibility matrix acted out on BigQuery, as each persona: every cell the landed data holds
+# something for observed through the persona's own session against the source read with full
+# rights (the payments mart as the publisher reads it, the group totals through the audit purpose's
+# views), and the cells on invented tables named and left to the local engine
+# (tests/access/visibility_on_bigquery.py); `-rP` prints the cells left.
+bigquery-visibility: sync
+	uv run pytest -m bigquery_persona -rP tests/access/test_visibility.py::test_every_persona_sees_its_matrix
 
 # The container stack: the shared database always, one more service per PROFILE=<name>.
 # Each checkout is its own Compose project (containers, network, volume) and the database takes a

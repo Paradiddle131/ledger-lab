@@ -37,6 +37,8 @@ CATALOGUES = {
     "access": ("access/personas.yaml", "access/schema.json"),
     "columns": ("access/columns.yaml", "access/columns.schema.json"),
     "review": ("access/review.yaml", "access/review.schema.json"),
+    "aggregates": ("access/aggregates.yaml", "access/aggregates.schema.json"),
+    "purposes": ("access/purposes.yaml", "access/purposes.schema.json"),
 }
 
 
@@ -83,13 +85,55 @@ TARGETS = {
     "google_data_catalog_taxonomy": ("policy-tag taxonomy", None),
     "google_storage_bucket": ("landing bucket", None),
     "google_service_account": ("account", "service_account_id"),
+    "google_pubsub_topic": ("Pub/Sub topic", "topic"),
 }
+# The permissions that let a holder on a service account act as it: take its tokens or keys, sign
+# as it, attach it, or grant itself any of these. A role on an account holding none of them, a
+# declared custom role whose permissions say so, only reads the account; any predefined role on an
+# account is taken to act as it.
+ACTS_AS = frozenset(
+    {
+        "iam.serviceAccounts.actAs",
+        "iam.serviceAccounts.getAccessToken",
+        "iam.serviceAccounts.getOpenIdToken",
+        "iam.serviceAccounts.implicitDelegation",
+        "iam.serviceAccounts.setIamPolicy",
+        "iam.serviceAccounts.signBlob",
+        "iam.serviceAccounts.signJwt",
+        "iam.serviceAccountKeys.create",
+    }
+)
 PERSONA_ACCOUNTS = "google_service_account.persona"
 CLEAR_READER = "roles/datacatalog.categoryFineGrainedReader"
 MASKED_READER = "roles/bigquerydatapolicy.maskedReader"
 KINDS = {"human": "human persona", "agent": "agent persona", "automation": "automation account"}
-INDEX = re.compile(r'\["([^"]+)"\]')
+# The one declared collection of each target type a grant may name by key, and the attribute it
+# reads: `${<type>.<collection>["<key>"].<attribute>}`, whole, is the only form read as that key,
+# so another resource whose key is the same is never taken for the lab's own.
+COLLECTIONS = {
+    "google_bigquery_dataset": ("warehouse", "dataset_id"),
+    "google_data_catalog_policy_tag": ("sensitive", "name"),
+    "google_bigquery_datapolicy_data_policy": ("masking", "data_policy_id"),
+    "google_service_account": ("persona", "name"),
+}
 CUSTOM_ROLE = re.compile(r"^\$\{google_project_iam_custom_role\.([a-z_]+)\.name\}$")
+# A dataset access entry's role named through the basic form `platform/gcp` maps it to.
+BASIC_ROLE = re.compile(r'^\$\{local\.basic_roles\["([^"]+)"\]\}$')
+# The basic dataset roles, each the predefined role BigQuery documents it as.
+BASIC = {
+    "READER": "roles/bigquery.dataViewer",
+    "WRITER": "roles/bigquery.dataEditor",
+    "OWNER": "roles/bigquery.dataOwner",
+}
+DATASET_ACCESS = "google_bigquery_dataset_access"
+# What a dataset access entry may set: a role and one service account, or an authorization of
+# one dataset's views; any other member (a group, a domain, a special group, an IAM member, a
+# view or routine) is refused.
+ROLE_ENTRY = {"for_each", "dataset_id", "role", "user_by_email"}
+VIEWS_ENTRY = {"for_each", "dataset_id", "dataset"}
+# A permission as a custom role lists it, quoted as the HCL reader returns a literal string: a
+# service, then dot-separated names of letters and digits, and nothing a template could expand.
+PERMISSION_NAME = re.compile(r'^"[a-z][a-zA-Z0-9]*(\.[a-zA-Z][a-zA-Z0-9]*)+"$')
 
 Doc = dict[str, Any]
 Config = Mapping[str, list[Any]]
@@ -140,7 +184,7 @@ class Reviewed:
 
 
 def load_catalogues() -> dict[str, Doc]:
-    """The three catalogues, each refused with every error its schema finds."""
+    """The catalogues, each refused with every error its schema finds."""
     docs: dict[str, Doc] = {}
     for name, (data, schema) in CATALOGUES.items():
         doc = yaml.safe_load((REPO / data).read_text())
@@ -204,6 +248,27 @@ def local_map(config: Config, name: str) -> dict[str, str]:
     return {unquote(k): unquote(v) for k, v in values[0].items()}
 
 
+def purpose_products(access: Doc) -> set[str]:
+    """The products the models build tables of, read only through purposes."""
+    return {p["id"] for p in access["data_products"] if p.get("tables")}
+
+
+def purpose_sources(docs: Mapping[str, Doc]) -> set[tuple[str, str]]:
+    """Each purpose's dataset with the dataset of each table it lists, as `platform/gcp` pairs
+    them: the views and the one source each is authorized on."""
+    products = {
+        table: p["id"].replace("-", "_")
+        for p in docs["access"]["data_products"]
+        for table in p.get("tables", [])
+    }
+    return {
+        (u["id"].replace("-", "_"), products[table])
+        for u in docs["purposes"]["purposes"]
+        for table in u["tables"]
+        if table in products
+    }
+
+
 def instances(
     for_each: str | None, docs: Mapping[str, Doc], config: Config
 ) -> list[dict[str, str]]:
@@ -216,17 +281,59 @@ def instances(
     if for_each is None:
         return [{}]
     access, columns = docs["access"], docs["columns"]
+    aggregated = {p: f"{p.replace('-', '_')}_aggregates" for p in docs["aggregates"]["products"]}
+    aggregate_grants = sorted(
+        {
+            (g["persona"], aggregated[g["product"]])
+            for g in access["grants"]
+            if g["access"] == "aggregate" and g["product"] in aggregated
+        }
+    )
+    if for_each == "${local.aggregate_grants}":
+        return [{"each.value.persona": p, "each.value.dataset": d} for p, d in aggregate_grants]
+    purpose_grants = sorted(
+        {
+            (persona, u["id"].replace("-", "_"))
+            for u in docs["purposes"]["purposes"]
+            for persona in u["personas"]
+        }
+    )
+    if for_each == "${local.purpose_grants}":
+        return [{"each.value.persona": p, "each.value.dataset": d} for p, d in purpose_grants]
+    if for_each == "${local.purpose_sources}":
+        return [
+            {"each.value.views": v, "each.value.source": s}
+            for v, s in sorted(purpose_sources(docs))
+        ]
+    governed = {
+        p["id"].replace("-", "_")
+        for p in access["data_products"]
+        if p["scope"] == "entity" and p.get("tables")
+    }
+    if for_each == "${local.aggregate_sources}":
+        return [
+            {"each.key": d, "each.value": "intermediate" if p.replace("-", "_") in governed else p}
+            for p, d in sorted(aggregated.items())
+        ]
+    if for_each == "${local.built}":
+        built = {"landed", "intermediate"} | {
+            p["id"].replace("-", "_") for p in access["data_products"]
+        }
+        return [{"each.key": d} for d in sorted(built)]
     if for_each == "${local.dataset_grants}" or for_each == "${local.warehouse_readers}":
         roles = local_map(config, "dataset_roles")
+        # A product the models build tables of takes no dataset role: it is read through purposes.
         grants = sorted(
             {
                 (g["persona"], g["product"].replace("-", "_"), roles[g["access"]])
                 for g in access["grants"]
-                if g["access"] in roles
+                if g["access"] in roles and g["product"] not in purpose_products(access)
             }
         )
         if for_each == "${local.warehouse_readers}":
-            return [{"each.key": p} for p in sorted({p for p, _, _ in grants})]
+            readers = {p for p, _, _ in grants} | {p for p, _ in aggregate_grants}
+            readers |= {p for p, _ in purpose_grants}
+            return [{"each.key": p} for p in sorted(readers)]
         return [
             {"each.value.persona": p, "each.value.dataset": d, "each.value.role": r}
             for p, d, r in grants
@@ -239,16 +346,7 @@ def instances(
                 for p in t[kind]
             ]
     if for_each == "${local.governed}":
-        return [
-            {"each.key": d}
-            for d in sorted(
-                {
-                    p["id"].replace("-", "_")
-                    for p in access["data_products"]
-                    if p["scope"] == "entity" and p.get("tables")
-                }
-            )
-        ]
+        return [{"each.key": d} for d in sorted(governed)]
     if for_each == f"${{{PERSONA_ACCOUNTS}}}":
         return [
             {"each.key": p["id"], "each.value.name": f'{PERSONA_ACCOUNTS}["{p["id"]}"].name'}
@@ -260,7 +358,7 @@ def instances(
 
 
 def substitute(expression: str, instance: Mapping[str, str]) -> str:
-    for ref, value in instance.items():
+    for ref, value in sorted(instance.items(), key=lambda item: -len(item[0])):
         if ref.startswith("each."):
             quoted = value if ref == "each.value.name" else f'"{value}"'
             expression = expression.replace(ref, quoted)
@@ -281,6 +379,17 @@ def attribute(member: str, addresses: Mapping[str, str], personas: set[str]) -> 
     return persona if persona in personas else None
 
 
+def keyed(rtype: str, expression: str) -> str | None:
+    """The key an expression names in the declared collection of `rtype`, or None."""
+    if rtype not in COLLECTIONS:
+        return None
+    collection, attribute_name = COLLECTIONS[rtype]
+    named = re.fullmatch(
+        rf'\$\{{{re.escape(rtype)}\.{collection}\["([^"]+)"\]\.{attribute_name}\}}', expression
+    )
+    return named[1] if named else None
+
+
 def target(rtype: str, body: Mapping[str, Any], every: bool, addresses: Mapping[str, str]) -> str:
     noun, attribute_name = TARGETS[rtype]
     if every:
@@ -292,10 +401,13 @@ def target(rtype: str, body: Mapping[str, Any], every: bool, addresses: Mapping[
         for address, identity in addresses.items():
             if expression in (f"${{{address}.name}}", f"${{{address}.id}}"):
                 return f"account {identity}"
-    index = INDEX.search(expression)
-    if index is None:
+    named = re.fullmatch(r"\$\{google_pubsub_topic\.([a-z_]+)\.(?:name|id)\}", expression)
+    if rtype == "google_pubsub_topic" and named:
+        return f"{noun} {named[1]}"
+    key = keyed(rtype, expression)
+    if key is None:
         raise ValueError(f"cannot tell which {noun} {expression} names")
-    return f"{noun} {index[1]}"
+    return f"{noun} {key}"
 
 
 def declared_grants(
@@ -322,25 +434,90 @@ def declared_grants(
             f"access/review.yaml lists undeclared accounts: {listed - service_accounts}"
         )
     addresses = {a["declared"]: a["id"] for a in accounts}
-    roles = {
-        address.split(".")[1]: f"{unquote(body['title'])} (custom role)"
+    custom_roles = {
+        address.split(".")[1]: body
         for address, body in resources.items()
         if address.startswith("google_project_iam_custom_role.")
     }
+    roles = {k: f"{unquote(b['title'])} (custom role)" for k, b in custom_roles.items()}
     refused: list[str] = []
     for address, body in sorted({**resources, **data}.items()):
         rtype = address.rsplit(".", 1)[0]
         grant = re.search(r"_iam_(member|binding)$", rtype)
         if rtype == "google_bigquery_dataset" and "access" in body:
             refused.append(f"{address}: an access block, which the review cannot read")
+        elif rtype == DATASET_ACCESS:
+            keys = set(body) - {"__is_block__"}
+            if keys not in (ROLE_ENTRY, ROLE_ENTRY - {"for_each"}, VIEWS_ENTRY):
+                refused.append(f"{address}: a dataset access entry the review cannot read")
         elif grant is None and rtype not in GRANTS_NOTHING:
             refused.append(f"{address}: a {rtype}, which the review does not know to grant nothing")
         elif grant and rtype[: grant.start()] not in TARGETS:
             refused.append(f"{address}: a grant on a resource the review has no words for")
     found: dict[str, list[CloudGrant]] = {i: [] for i in [*sorted(personas), *addresses.values()]}
     acts_as: dict[str, set[str]] = {i: set() for i in found}
+    # The views datasets the catalogues give and the one or more sources each is authorized on:
+    # each aggregates dataset on its product's source, each purpose dataset on its tables' products.
+    authorized: dict[str, set[str]] = {}
+    for i in instances("${local.aggregate_sources}", docs, config):
+        authorized.setdefault(i["each.key"], set()).add(i["each.value"])
+    for views_dataset, source in purpose_sources(docs):
+        authorized.setdefault(views_dataset, set()).add(source)
     for address, body in sorted(resources.items()):
         rtype, _ = address.split(".", 1)
+        if rtype == DATASET_ACCESS and set(body) - {"__is_block__"} in (
+            ROLE_ENTRY,
+            ROLE_ENTRY - {"for_each"},
+            VIEWS_ENTRY,
+        ):
+            for instance in instances(body.get("for_each"), docs, config):
+                subbed = {
+                    k: substitute(unquote(v), instance)
+                    for k, v in body.items()
+                    if isinstance(v, str) and k != "for_each"
+                }
+                try:
+                    on = target("google_bigquery_dataset", subbed, False, addresses)
+                except ValueError as unread:
+                    refused.append(f"{address}: {unread}")
+                    continue
+                if "dataset" in body:
+                    (entry,) = body["dataset"]
+                    (views,) = entry["dataset"]
+                    of = keyed(
+                        "google_bigquery_dataset",
+                        substitute(unquote(views["dataset_id"]), instance),
+                    )
+                    types = [unquote(t) for t in entry["target_types"]]
+                    # The views of the lab's own aggregates or purpose dataset, on a source the
+                    # catalogues give that dataset, and nothing else.
+                    if (
+                        of not in authorized
+                        or unquote(views.get("project_id", "")) != "${var.project}"
+                        or types != ["VIEWS"]
+                        or on not in {f"warehouse dataset {d}" for d in authorized[of]}
+                    ):
+                        refused.append(f"{address}: an authorization of views it cannot attribute")
+                    continue
+                role = subbed["role"]
+                basic = BASIC_ROLE.fullmatch(role)
+                sent = local_map(config, "basic_roles").get(basic[1]) if basic else None
+                if basic and sent in BASIC:
+                    # Reported as the role the entry sends, the value, never the map's key.
+                    role = BASIC[sent]
+                elif role in BASIC:
+                    role = BASIC[role]
+                elif custom := CUSTOM_ROLE.fullmatch(role):
+                    role = roles.get(custom[1], role)
+                else:
+                    refused.append(f"{address}: a dataset role the review cannot read")
+                    continue
+                who = attribute(f"serviceAccount:{subbed['user_by_email']}", addresses, personas)
+                if who is None:
+                    refused.append(f"{address}: a member the review cannot attribute")
+                    continue
+                found[who].append(CloudGrant(role, on, True))
+            continue
         grant = re.search(r"_iam_(member|binding)$", rtype)
         if grant is None or rtype[: grant.start()] not in TARGETS:
             continue
@@ -350,18 +527,32 @@ def declared_grants(
             role = unquote(substitute(unquote(body["role"]), instance))
             role = role[3:-2] if role.startswith('${"') else role
             custom = CUSTOM_ROLE.fullmatch(role)
+            acts = True
+            if custom is not None and custom[1] in custom_roles:
+                listed = custom_roles[custom[1]]["permissions"]
+                # Only a list of quoted permission names says what the role holds; any other
+                # form (an expression, a template, an escape) may hold an acting permission, so
+                # it counts as acting.
+                plain = isinstance(listed, list) and all(
+                    isinstance(p, str) and PERMISSION_NAME.fullmatch(p) for p in listed
+                )
+                acts = not plain or bool({unquote(p) for p in listed} & ACTS_AS)
             role = roles.get(custom[1], role) if custom else role
             subbed = {
                 k: substitute(unquote(v), instance) for k, v in body.items() if k != "for_each"
             }
-            on = target(base, subbed, "every" in instance, addresses)
+            try:
+                on = target(base, subbed, "every" in instance, addresses)
+            except ValueError as unread:
+                refused.append(f"{address}: {unread}")
+                continue
             for member in members:
                 who = attribute(substitute(unquote(member), instance), addresses, personas)
                 if who is None:
                     refused.append(f"{address}: a member the review cannot attribute")
                     continue
                 found[who].append(CloudGrant(role, on, True))
-                if base == "google_service_account":
+                if base == "google_service_account" and acts:
                     if "every" in instance:
                         refused.append(f"{address}: a role on every account of a collection")
                     else:
@@ -435,6 +626,10 @@ def review(docs: Mapping[str, Doc], config: Config) -> list[Reviewed]:
         by_hand += [
             CloudGrant(grant["role"], grant["view"], False)
             for grant in entry.get("table_roles_granted_by_hand", [])
+        ]
+        by_hand += [
+            CloudGrant(f"{role['title']} (custom role)", role["view"], False)
+            for role in entry.get("custom_table_roles_granted_by_hand", [])
         ]
         rows = sorted(cloud[entry["id"]]) + by_hand
         acting = reachable(acts_as, entry["id"])

@@ -42,7 +42,14 @@ from access.review import (
     review,
     unquote,
 )
-from tests.platform.test_access_rules import RECORDED, expected_dataset_grants, expected_readers
+from tests.platform.test_access_rules import (
+    RECORDED,
+    expected_aggregate_grants,
+    expected_built,
+    expected_dataset_grants,
+    expected_purpose_grants,
+    expected_readers,
+)
 
 Doc = dict[str, Any]
 Config = dict[str, list[Any]]
@@ -51,13 +58,18 @@ Config = dict[str, list[Any]]
 CHECKABLE = {"enter-and-approve-entry"}
 # The roles the owner granted the agent account by hand, as recorded on the tracker after the
 # owner narrowed them; adding one is a reviewed change to the data and to these lines together.
-HAND_GRANTED = ["roles/serviceusage.serviceUsageConsumer"]
+# No predefined role on the project or on a table: narrow custom roles replaced service usage
+# consumer and the cost view's data viewer role (below).
+HAND_GRANTED: list[str] = []
 HAND_GRANTED_CUSTOM = ["labQueryRunner", "labFenceReader"]
-HAND_GRANTED_TABLES = [("roles/bigquery.dataViewer", "the billing export's cost view")]
+HAND_GRANTED_TABLES: list[tuple[str, str]] = []
+HAND_GRANTED_CUSTOM_TABLES = [("labViewReader", "the billing export's cost view")]
+# What a custom role on the cost view may hold: reading the view and its rows.
+VIEW_READ = {"bigquery.tables.get", "bigquery.tables.getData"}
 # The project permissions the cost check's REST reads need, from its own table of every read.
 CHECK_READS = {p for _, p, scope in READS if scope == "project" and p is not None}
-# What service usage consumer gives the check: its quota read and billing a read to the project.
-CONSUMER_SERVES = {"serviceusage.quotas.get", BILLED_READ_PERMISSION}
+# Billing a read to the project, which the check's billed reads need beside its READS.
+BILLED = {BILLED_READ_PERMISSION}
 # The only BigQuery permissions a project-wide hand grant may hold: running jobs, for the cost
 # query, and reading BigQuery's settings.
 QUERY_PERMISSIONS = {"bigquery.jobs.create", "bigquery.config.get"}
@@ -65,6 +77,7 @@ QUERY_PERMISSIONS = {"bigquery.jobs.create", "bigquery.config.get"}
 # and acting as an account among them) and setting anyone's access to anything.
 REFUSED = {*PROJECT_PERMISSIONS, *BILLING_PERMISSIONS, *KILL_SWITCH_ACCOUNT_PERMISSIONS}
 QUERY_ROLE = ("Runs BigQuery queries (custom role)", "the lab project")
+VIEWER = "roles/bigquery.dataViewer"
 CLEAR = "roles/datacatalog.categoryFineGrainedReader"
 MASKED = "roles/bigquerydatapolicy.maskedReader"
 TOKENS = "roles/iam.serviceAccountTokenCreator"
@@ -125,6 +138,12 @@ def expected_roles(persona: str) -> set[tuple[str, str]]:
     grants = {
         (r, f"warehouse dataset {d}") for p, d, r in expected_dataset_grants() if p == persona
     }
+    grants |= {
+        (VIEWER, f"warehouse dataset {d}") for p, d in expected_aggregate_grants() if p == persona
+    }
+    grants |= {
+        (VIEWER, f"warehouse dataset {d}") for p, d in expected_purpose_grants() if p == persona
+    }
     query = {QUERY_ROLE} if grants else set()
     clear = {(CLEAR, f"policy tag {t}") for t, p in expected_readers("clear") if p == persona}
     masked = {(MASKED, f"masking rule {t}") for t, p in expected_readers("masked") if p == persona}
@@ -167,17 +186,21 @@ def test_the_agent_account_shows_its_roles_its_reach_and_the_conflict_it_holds(
     personas = [p["id"] for p in docs["access"]["personas"]]
     rows = roles(section)
     assert {k for k, source in rows.items() if source == "declared"} == {
-        ("Builds the warehouse models (custom role)", "every warehouse dataset"),
+        *{
+            ("Builds the warehouse models (custom role)", f"warehouse dataset {d}")
+            for d in expected_built()
+        },
         (CLEAR, "every policy tag"),
         ("roles/datacatalog.viewer", "the policy-tag taxonomy"),
         ("roles/storage.objectUser", "the landing bucket"),
         *{(TOKENS, f"account {p}") for p in [*personas, "publisher"]},
+        ("Reads one Pub/Sub topic (custom role)", "Pub/Sub topic budget"),
+        ("Reads one service account (custom role)", "account kill-switch"),
     }
     assert {k for k, source in rows.items() if source == "granted by hand, not declared"} == {
-        *((role, "the lab project") for role in HAND_GRANTED),
         ("Runs BigQuery queries (custom role)", "the lab project"),
         ("Reads the lab's spend fences (custom role)", "the lab project"),
-        *HAND_GRANTED_TABLES,
+        ("Reads the cost view (custom role)", "the billing export's cost view"),
     }
     acts = ", ".join(f"`{p}`" for p in sorted([*personas, "publisher"]))
     assert f"- Acts as: {acts}, holding each one's grants in turn\n" in section
@@ -197,6 +220,29 @@ def test_the_agent_account_shows_its_roles_its_reach_and_the_conflict_it_holds(
         "draft ledger as `proposer`; post ledger as `approver`\n"
     ) in section
     assert "- Conflicts: none" not in section
+
+
+def test_a_purpose_persona_reaches_its_purposes_views_and_no_product_dataset_with_tables(
+    written: str, docs: dict[str, Doc]
+) -> None:
+    """Each persona's section names the purpose datasets it reads, and none of the datasets of a
+    product with tables, which its purposes' views read for it."""
+    found = sections(written)
+    tabled = {
+        f"warehouse dataset {p['id'].replace('-', '_')}"
+        for p in docs["access"]["data_products"]
+        if p.get("tables")
+    }
+    for persona in docs["access"]["personas"]:
+        reached = {on for _, on in roles(found[persona["id"]])}
+        purposes = {
+            f"warehouse dataset {u['id'].replace('-', '_')}"
+            for u in docs["purposes"]["purposes"]
+            if persona["id"] in u["personas"]
+        }
+        assert purposes <= reached, persona["id"]
+        assert not reached & tabled, persona["id"]
+    assert tabled == {"warehouse dataset payments", "warehouse dataset group_totals"}
 
 
 def test_the_publisher_writes_the_governed_copies_reads_the_marts_and_acts_as_nobody(
@@ -291,6 +337,7 @@ HAND_FIELDS = (
     "project_roles_granted_by_hand",
     "custom_roles_granted_by_hand",
     "table_roles_granted_by_hand",
+    "custom_table_roles_granted_by_hand",
 )
 
 
@@ -301,11 +348,19 @@ def agent_entry(docs: dict[str, Doc]) -> Doc:
 
 def test_the_hand_granted_roles_are_the_recorded_narrow_set(docs: dict[str, Doc]) -> None:
     agent = agent_entry(docs)
-    assert agent["project_roles_granted_by_hand"] == HAND_GRANTED
+    assert agent.get("project_roles_granted_by_hand", []) == HAND_GRANTED
     assert [r["id"] for r in agent["custom_roles_granted_by_hand"]] == HAND_GRANTED_CUSTOM
     assert [
-        (g["role"], g["view"]) for g in agent["table_roles_granted_by_hand"]
+        (g["role"], g["view"]) for g in agent.get("table_roles_granted_by_hand", [])
     ] == HAND_GRANTED_TABLES
+    assert [
+        (g["id"], g["view"]) for g in agent["custom_table_roles_granted_by_hand"]
+    ] == HAND_GRANTED_CUSTOM_TABLES
+
+
+def test_the_cost_views_custom_role_only_reads_the_view(docs: dict[str, Doc]) -> None:
+    for role in agent_entry(docs)["custom_table_roles_granted_by_hand"]:
+        assert set(role["permissions"]) <= VIEW_READ, role["id"]
     others = [a for a in docs["review"]["accounts"] if a["id"] != "agent"]
     assert all(field not in a for a in others for field in HAND_FIELDS)
 
@@ -328,7 +383,11 @@ def test_a_declared_custom_role_granted_by_hand_is_recorded_as_declared(
     """A hand grant of a role platform/gcp declares carries its declared title and permissions;
     a role created by hand is one platform/gcp does not declare."""
     declared = declared_custom_roles(config)
-    for role in agent_entry(docs)["custom_roles_granted_by_hand"]:
+    agent = agent_entry(docs)
+    for role in [
+        *agent["custom_roles_granted_by_hand"],
+        *agent.get("custom_table_roles_granted_by_hand", []),
+    ]:
         if role["created"] == "declared":
             assert role["id"] in declared, role["id"]
             assert role["title"] == declared[role["id"]]["title"]
@@ -340,14 +399,13 @@ def test_a_declared_custom_role_granted_by_hand_is_recorded_as_declared(
 def test_the_fence_reader_holds_what_the_cost_checks_reads_need_and_nothing_else(
     docs: dict[str, Doc],
 ) -> None:
-    """The fence reader holds the project permissions of the cost check's listed reads, less those
-    service usage consumer serves, which the recorded consumer role holds; the cost check refuses
-    a read its table does not list (tests/platform/test_cost_check.py)."""
+    """The fence reader holds the project permissions of the cost check's listed reads and billing
+    a read to the project; the cost check refuses a read its table does not list
+    (tests/platform/test_cost_check.py)."""
     (reader,) = [
         r for r in agent_entry(docs)["custom_roles_granted_by_hand"] if r["id"] == "labFenceReader"
     ]
-    assert set(reader["permissions"]) == CHECK_READS - CONSUMER_SERVES
-    assert set(RECORDED["roles/serviceusage.serviceUsageConsumer"]) >= CONSUMER_SERVES
+    assert set(reader["permissions"]) == CHECK_READS | BILLED
 
 
 def hand_granted_permissions(docs: dict[str, Doc]) -> dict[str, set[str]]:
@@ -355,9 +413,10 @@ def hand_granted_permissions(docs: dict[str, Doc]) -> dict[str, set[str]]:
     role holds a marker the pin and the token and access checks refuse."""
     agent = agent_entry(docs)
     held = {r["id"]: set(r["permissions"]) for r in agent["custom_roles_granted_by_hand"]}
+    held |= {r["id"]: set(r["permissions"]) for r in agent["custom_table_roles_granted_by_hand"]}
     for role in [
-        *agent["project_roles_granted_by_hand"],
-        *(g["role"] for g in agent["table_roles_granted_by_hand"]),
+        *agent.get("project_roles_granted_by_hand", []),
+        *(g["role"] for g in agent.get("table_roles_granted_by_hand", [])),
     ]:
         held[role] = set(RECORDED.get(role, ["<no recorded permission list>"]))
     return held
@@ -438,7 +497,7 @@ def test_a_hand_made_custom_role_holds_only_the_checks_reads_and_running_queries
     """An allowlist: a custom role granted by hand on the project holds only permissions the cost
     check's listed reads need or the two that run queries, so a token, access or data permission
     cannot be added to one without a row in the cost check's READS."""
-    allowed = CHECK_READS | QUERY_PERMISSIONS
+    allowed = CHECK_READS | QUERY_PERMISSIONS | BILLED
     for role in agent_entry(docs)["custom_roles_granted_by_hand"]:
         assert set(role["permissions"]) <= allowed, role["id"]
 
@@ -490,17 +549,59 @@ def test_a_custom_role_minting_tokens_or_setting_access_is_refused(
         )
 
 
-def test_a_consumer_role_lacking_the_quota_read_is_refused(
-    docs: dict[str, Doc], monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("missing", ["serviceusage.quotas.get", BILLED_READ_PERMISSION])
+def test_a_fence_reader_lacking_a_service_usage_permission_is_refused(
+    docs: dict[str, Doc], missing: str
 ) -> None:
-    consumer = "roles/serviceusage.serviceUsageConsumer"
-    lacking = {
-        **RECORDED,
-        consumer: [p for p in RECORDED[consumer] if p != "serviceusage.quotas.get"],
-    }
-    monkeypatch.setattr(sys.modules[__name__], "RECORDED", lacking)
+    planted = copy.deepcopy(docs)
+    for role in agent_entry(planted)["custom_roles_granted_by_hand"]:
+        if role["id"] == "labFenceReader":
+            role["permissions"].remove(missing)
     with pytest.raises(AssertionError):
-        test_the_fence_reader_holds_what_the_cost_checks_reads_need_and_nothing_else(docs)
+        test_the_fence_reader_holds_what_the_cost_checks_reads_need_and_nothing_else(planted)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    ["bigquery.tables.export", "bigquery.tables.getIamPolicy", "bigquery.tables.updateData"],
+)
+def test_a_cost_view_role_beyond_reading_is_refused(docs: dict[str, Doc], extra: str) -> None:
+    planted = copy.deepcopy(docs)
+    agent_entry(planted)["custom_table_roles_granted_by_hand"][0]["permissions"].append(extra)
+    with pytest.raises(AssertionError):
+        test_the_cost_views_custom_role_only_reads_the_view(planted)
+
+
+def test_a_cost_view_role_recorded_as_declared_but_not_declared_is_refused(
+    docs: dict[str, Doc], config: Config
+) -> None:
+    planted = copy.deepcopy(docs)
+    agent_entry(planted)["custom_table_roles_granted_by_hand"][0]["created"] = "declared"
+    with pytest.raises(AssertionError):
+        test_a_declared_custom_role_granted_by_hand_is_recorded_as_declared(planted, config)
+
+
+def test_a_hand_made_cost_view_role_that_platform_gcp_declares_wider_is_refused(
+    docs: dict[str, Doc], config: Config
+) -> None:
+    widened = copy.deepcopy(config)
+    widened.setdefault("resource", []).append(
+        {
+            "google_project_iam_custom_role": {
+                "view_reader": {
+                    "role_id": "labViewReader",
+                    "title": "Reads and exports the cost view",
+                    "permissions": [
+                        "bigquery.tables.get",
+                        "bigquery.tables.getData",
+                        "bigquery.tables.export",
+                    ],
+                }
+            }
+        }
+    )
+    with pytest.raises(AssertionError):
+        test_a_declared_custom_role_granted_by_hand_is_recorded_as_declared(docs, widened)
 
 
 def test_a_hand_made_role_that_platform_gcp_declares_is_refused(
@@ -521,14 +622,16 @@ def test_a_hand_made_role_that_platform_gcp_declares_is_refused(
         lambda r: r["custom_roles_granted_by_hand"][0].pop("created"),
         lambda r: r["custom_roles_granted_by_hand"][0].update(created="maybe"),
         lambda r: r["custom_roles_granted_by_hand"][0].pop("permissions"),
-        lambda r: r["table_roles_granted_by_hand"][0].pop("view"),
-        lambda r: r["table_roles_granted_by_hand"][0].pop("role"),
-        lambda r: r["table_roles_granted_by_hand"][0].update(role="bigquery.dataViewer"),
+        lambda r: r["custom_table_roles_granted_by_hand"][0].pop("view"),
+        lambda r: r["custom_table_roles_granted_by_hand"][0].pop("permissions"),
+        lambda r: r.update(
+            table_roles_granted_by_hand=[{"role": "bigquery.dataViewer", "view": "x"}]
+        ),
         lambda r: r["custom_roles_granted_by_hand"][0]["permissions"].append(
             "BigQuery.tables.getData"
         ),
         lambda r: r["custom_roles_granted_by_hand"][0].update(permission=["x.y.get"]),
-        lambda r: r["table_roles_granted_by_hand"][0].update(table="x.y"),
+        lambda r: r["custom_table_roles_granted_by_hand"][0].update(table="x.y"),
     ],
 )
 def test_a_malformed_hand_grant_is_refused_by_the_schema(break_it: Callable[[Doc], None]) -> None:
@@ -548,12 +651,14 @@ def refused_permissions(role: str) -> set[str]:
     return (held & REFUSED) | {p for p in held if p.endswith(".setIamPolicy")}
 
 
-@pytest.mark.parametrize("role", [*HAND_GRANTED, *(r for r, _ in HAND_GRANTED_TABLES)])
-def test_no_hand_granted_role_mints_tokens_sets_access_or_moves_a_fence(role: str) -> None:
-    assert refused_permissions(role) == set()
+def test_no_hand_granted_predefined_role_mints_tokens_sets_access_or_moves_a_fence() -> None:
+    for role in [*HAND_GRANTED, *(r for r, _ in HAND_GRANTED_TABLES)]:
+        assert refused_permissions(role) == set(), role
 
 
-@pytest.mark.parametrize("role", HAND_GRANTED_CUSTOM)
+@pytest.mark.parametrize(
+    "role", [*HAND_GRANTED_CUSTOM, *(r for r, _ in HAND_GRANTED_CUSTOM_TABLES)]
+)
 def test_no_hand_granted_custom_role_mints_tokens_sets_access_or_moves_a_fence(
     docs: dict[str, Doc], role: str
 ) -> None:
@@ -612,10 +717,278 @@ resource "google_bigquery_dataset_iam_member" "someone" {
   role       = "roles/bigquery.dataOwner"
   member     = "user:${var.someone}"
 }""",
-    "a dataset access block grant": """
-resource "google_bigquery_dataset_access" "agent_owns" {
+    "a dataset access entry for a special group": """
+resource "google_bigquery_dataset_access" "everyone_reads" {
   dataset_id    = google_bigquery_dataset.warehouse["payments"].dataset_id
-  role          = "OWNER"
+  role          = "READER"
+  special_group = "allAuthenticatedUsers"
+}""",
+    "a dataset access entry for a person": """
+resource "google_bigquery_dataset_access" "someone_reads" {
+  dataset_id    = google_bigquery_dataset.warehouse["payments"].dataset_id
+  role          = "READER"
+  user_by_email = var.someone
+}""",
+    "a dataset access entry authorizing one view": """
+resource "google_bigquery_dataset_access" "one_view" {
+  dataset_id = google_bigquery_dataset.warehouse["intermediate"].dataset_id
+  view {
+    project_id = var.project
+    dataset_id = google_bigquery_dataset.warehouse["landed"].dataset_id
+    table_id   = "anything"
+  }
+}""",
+    "an authorization of views outside the aggregates datasets": """
+resource "google_bigquery_dataset_access" "landed_reads_marts" {
+  dataset_id = google_bigquery_dataset.warehouse["intermediate"].dataset_id
+  dataset {
+    dataset {
+      project_id = var.project
+      dataset_id = google_bigquery_dataset.warehouse["landed"].dataset_id
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
+    "another project's views authorized on a source": """
+resource "google_bigquery_dataset_access" "foreign_views" {
+  for_each   = local.aggregate_sources
+  dataset_id = google_bigquery_dataset.warehouse[each.value].dataset_id
+  dataset {
+    dataset {
+      project_id = var.another_project
+      dataset_id = google_bigquery_dataset.warehouse[each.key].dataset_id
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
+    "the aggregates views authorized on a dataset that is not their source": """
+resource "google_bigquery_dataset_access" "views_read_landed" {
+  for_each   = local.aggregate_sources
+  dataset_id = google_bigquery_dataset.warehouse["landed"].dataset_id
+  dataset {
+    dataset {
+      project_id = var.project
+      dataset_id = google_bigquery_dataset.warehouse[each.key].dataset_id
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
+    "another dataset's views keyed by an aggregates name, authorized on a source": """
+resource "google_bigquery_dataset" "shadow" {
+  for_each   = local.aggregate_sources
+  dataset_id = "shadow_${each.key}"
+}
+resource "google_bigquery_dataset_access" "shadow_views" {
+  for_each   = local.aggregate_sources
+  dataset_id = google_bigquery_dataset.warehouse[each.value].dataset_id
+  dataset {
+    dataset {
+      project_id = var.project
+      dataset_id = google_bigquery_dataset.shadow[each.key].dataset_id
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
+    "a role on another dataset keyed by a warehouse name": """
+resource "google_bigquery_dataset" "shadow" {
+  for_each   = local.aggregate_sources
+  dataset_id = "shadow_${each.key}"
+}
+resource "google_bigquery_dataset_access" "approver_reads_shadow" {
+  dataset_id    = google_bigquery_dataset.shadow["payments_aggregates"].dataset_id
+  role          = "READER"
+  user_by_email = google_service_account.persona["approver"].email
+}""",
+    "the aggregates routines authorized on a source": """
+resource "google_bigquery_dataset_access" "aggregates_routines" {
+  for_each   = local.aggregate_sources
+  dataset_id = google_bigquery_dataset.warehouse[each.value].dataset_id
+  dataset {
+    dataset {
+      project_id = var.project
+      dataset_id = google_bigquery_dataset.warehouse[each.key].dataset_id
+    }
+    target_types = ["ROUTINES"]
+  }
+}""",
+    "a dataset that is no aggregates authorized on a source by a for_each": """
+resource "google_bigquery_dataset_access" "landed_views_on_sources" {
+  for_each   = local.aggregate_sources
+  dataset_id = google_bigquery_dataset.warehouse[each.value].dataset_id
+  dataset {
+    dataset {
+      project_id = var.project
+      dataset_id = google_bigquery_dataset.warehouse["landed"].dataset_id
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
+    "the aggregates views authorized with no project": """
+resource "google_bigquery_dataset_access" "views_no_project" {
+  for_each   = local.aggregate_sources
+  dataset_id = google_bigquery_dataset.warehouse[each.value].dataset_id
+  dataset {
+    dataset {
+      dataset_id = google_bigquery_dataset.warehouse[each.key].dataset_id
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
+    "views of a dataset named by a plain string authorized on a source": """
+resource "google_bigquery_dataset_access" "views_by_name" {
+  for_each   = local.aggregate_sources
+  dataset_id = google_bigquery_dataset.warehouse[each.value].dataset_id
+  dataset {
+    dataset {
+      project_id = var.project
+      dataset_id = "some_dataset"
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
+    "a role on another dataset keyed by a warehouse name, granted as an IAM member": """
+resource "google_bigquery_dataset" "shadow" {
+  for_each   = local.aggregate_sources
+  dataset_id = "shadow_${each.key}"
+}
+resource "google_bigquery_dataset_iam_member" "approver_reads_shadow" {
+  dataset_id = google_bigquery_dataset.shadow["payments_aggregates"].dataset_id
+  role       = "roles/bigquery.dataViewer"
+  member     = "serviceAccount:${google_service_account.persona["approver"].email}"
+}""",
+    "the purpose views authorized on the marts, which carry no row access policy": """
+resource "google_bigquery_dataset_access" "purposes_read_marts" {
+  for_each   = local.purpose_sources
+  dataset_id = google_bigquery_dataset.warehouse["intermediate"].dataset_id
+  dataset {
+    dataset {
+      project_id = var.project
+      dataset_id = google_bigquery_dataset.warehouse[each.value.views].dataset_id
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
+    "one purpose's views authorized on a source only another purpose reads": """
+resource "google_bigquery_dataset_access" "payment_review_reads_group_totals" {
+  for_each   = local.purpose_sources
+  dataset_id = google_bigquery_dataset.warehouse["group_totals"].dataset_id
+  dataset {
+    dataset {
+      project_id = var.project
+      dataset_id = google_bigquery_dataset.warehouse["payment_review"].dataset_id
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
+    "a product dataset's views authorized on a purpose's source": """
+resource "google_bigquery_dataset_access" "group_totals_views_read_payments" {
+  for_each   = local.purpose_sources
+  dataset_id = google_bigquery_dataset.warehouse["payments"].dataset_id
+  dataset {
+    dataset {
+      project_id = var.project
+      dataset_id = google_bigquery_dataset.warehouse["group_totals"].dataset_id
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
+    "another project's purpose views authorized on their sources": """
+resource "google_bigquery_dataset_access" "foreign_purpose_views" {
+  for_each   = local.purpose_sources
+  dataset_id = google_bigquery_dataset.warehouse[each.value.source].dataset_id
+  dataset {
+    dataset {
+      project_id = var.another_project
+      dataset_id = google_bigquery_dataset.warehouse[each.value.views].dataset_id
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
+    "the purpose routines authorized on their sources": """
+resource "google_bigquery_dataset_access" "purpose_routines" {
+  for_each   = local.purpose_sources
+  dataset_id = google_bigquery_dataset.warehouse[each.value.source].dataset_id
+  dataset {
+    dataset {
+      project_id = var.project
+      dataset_id = google_bigquery_dataset.warehouse[each.value.views].dataset_id
+    }
+    target_types = ["ROUTINES"]
+  }
+}""",
+    "another dataset's views keyed by a purpose name, authorized on its sources": """
+resource "google_bigquery_dataset" "shadow" {
+  for_each   = local.purpose_sources
+  dataset_id = "shadow_${each.value.views}"
+}
+resource "google_bigquery_dataset_access" "shadow_purpose_views" {
+  for_each   = local.purpose_sources
+  dataset_id = google_bigquery_dataset.warehouse[each.value.source].dataset_id
+  dataset {
+    dataset {
+      project_id = var.project
+      dataset_id = google_bigquery_dataset.shadow[each.value.views].dataset_id
+    }
+    target_types = ["VIEWS"]
+  }
+}""",
+    "a role on another dataset keyed by a purpose's name": """
+resource "google_bigquery_dataset" "shadow" {
+  dataset_id = "shadow"
+}
+resource "google_bigquery_dataset_access" "controller_reads_shadow" {
+  for_each      = local.purpose_grants
+  dataset_id    = google_bigquery_dataset.shadow[each.value.dataset].dataset_id
+  role          = local.basic_roles["roles/bigquery.dataViewer"]
+  user_by_email = google_service_account.persona[each.value.persona].email
+}""",
+    "a purpose grant to an account of another collection keyed by a persona's name": """
+resource "google_bigquery_dataset_access" "others_read_purposes" {
+  for_each      = local.purpose_grants
+  dataset_id    = google_bigquery_dataset.warehouse[each.value.dataset].dataset_id
+  role          = local.basic_roles["roles/bigquery.dataViewer"]
+  user_by_email = google_service_account.other[each.value.persona].email
+}""",
+    "a role on an account of another collection keyed by a persona's name": """
+resource "google_service_account_iam_member" "proposer_on_other" {
+  service_account_id = google_service_account.other["approver"].name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${google_service_account.persona["proposer"].email}"
+}""",
+    "a dataset named by another of the warehouse dataset's attributes": """
+resource "google_bigquery_dataset_access" "approver_reads_by_friendly_name" {
+  dataset_id    = google_bigquery_dataset.warehouse["landed"].friendly_name
+  role          = "READER"
+  user_by_email = google_service_account.persona["approver"].email
+}""",
+    "a persona account named by another of its attributes": """
+resource "google_service_account_iam_member" "proposer_on_approver_by_display_name" {
+  service_account_id = google_service_account.persona["approver"].display_name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${google_service_account.persona["proposer"].email}"
+}""",
+    "a policy tag named by another of its attributes": """
+resource "google_data_catalog_policy_tag_iam_member" "proposer_reads_by_display_name" {
+  policy_tag = google_data_catalog_policy_tag.sensitive["bank-account-number"].display_name
+  role       = "roles/datacatalog.categoryFineGrainedReader"
+  member     = "serviceAccount:${google_service_account.persona["proposer"].email}"
+}""",
+    "a masking rule named by another of its attributes": """
+resource "google_bigquery_datapolicy_data_policy_iam_member" "proposer_masked_by_name" {
+  location       = var.region
+  data_policy_id = google_bigquery_datapolicy_data_policy.masking["bank-account-number"].name
+  role           = "roles/bigquerydatapolicy.maskedReader"
+  member         = "serviceAccount:${google_service_account.persona["proposer"].email}"
+}""",
+    "a dataset access entry with a role and no member": """
+resource "google_bigquery_dataset_access" "nobody_reads" {
+  dataset_id = google_bigquery_dataset.warehouse["landed"].dataset_id
+  role       = "READER"
+}""",
+    "a dataset role the review cannot read": """
+resource "google_bigquery_dataset_access" "agent_some_role" {
+  dataset_id    = google_bigquery_dataset.warehouse["payments"].dataset_id
+  role          = local.unknown_role
   user_by_email = data.google_service_account.agent.email
 }""",
     "an authoritative project policy": f"""
@@ -656,10 +1029,10 @@ resource "google_bigquery_dataset" "side" {
   }
 }""",
     "a grant on a resource the review has no words for": f"""
-resource "google_pubsub_topic_iam_member" "agent_publishes" {{
-  topic  = google_pubsub_topic.budget.name
-  role   = "roles/pubsub.publisher"
-  member = "{AGENT}"
+resource "google_workflows_workflow_iam_member" "agent_invokes" {{
+  workflow = google_workflows_workflow.kill_switch.name
+  role     = "roles/workflows.invoker"
+  member   = "{AGENT}"
 }}""",
 }
 
@@ -734,6 +1107,61 @@ resource "google_service_account_iam_member" "agent_acts_as_ks" {{
         "agent",
         "`kill-switch`",
     ),
+    "the agent holding a custom acting role on the kill switch": (
+        f"""
+resource "google_project_iam_custom_role" "reads_and_acts" {{
+  role_id     = "labReadsAndActs"
+  title       = "Reads and acts as an account"
+  permissions = ["iam.serviceAccounts.get", "iam.serviceAccounts.actAs"]
+}}
+resource "google_service_account_iam_member" "agent_reads_and_acts" {{
+  service_account_id = google_service_account.kill_switch.name
+  role               = google_project_iam_custom_role.reads_and_acts.name
+  member             = "{AGENT}"
+}}""",
+        "agent",
+        "`kill-switch`",
+    ),
+    "the agent holding a custom role on the kill switch whose permissions are an expression": (
+        f"""
+locals {{
+  more = ["iam.serviceAccounts.actAs"]
+}}
+resource "google_project_iam_custom_role" "reads_and_more" {{
+  role_id     = "labReadsAndMore"
+  title       = "Reads an account and more"
+  permissions = concat(["iam.serviceAccounts.get"], local.more)
+}}
+resource "google_service_account_iam_member" "agent_reads_and_more" {{
+  service_account_id = google_service_account.kill_switch.name
+  role               = google_project_iam_custom_role.reads_and_more.name
+  member             = "{AGENT}"
+}}""",
+        "agent",
+        "`kill-switch`",
+    ),
+    **{
+        f"the agent holding a custom role on the kill switch written as {form}": (
+            f"""
+resource "google_project_iam_custom_role" "reads_and_hides" {{
+  role_id     = "labReadsAndHides"
+  title       = "Reads an account and hides more"
+  permissions = ["iam.serviceAccounts.get", {element}]
+}}
+resource "google_service_account_iam_member" "agent_reads_and_hides" {{
+  service_account_id = google_service_account.kill_switch.name
+  role               = google_project_iam_custom_role.reads_and_hides.name
+  member             = "{AGENT}"
+}}""",
+            "agent",
+            "`kill-switch`",
+        )
+        for form, element in {
+            "a template directive": '"%{ if true }iam.serviceAccounts.actAs%{ endif }"',
+            "a unicode escape": '"iam.serviceAccounts.act\\u0041s"',
+            "an interpolation": '"${local.acting}"',
+        }.items()
+    },
     "the kill switch minting every persona's token": (
         """
 resource "google_service_account_iam_member" "ks_mints" {
@@ -755,6 +1183,36 @@ resource "google_service_account_iam_member" "ks_acts_as_agent" {
         "kill-switch",
         "`agent`, `agent-operator`, `approver`",
     ),
+    "the agent as owner of a dataset through its access list": (
+        """
+resource "google_bigquery_dataset_access" "agent_owns" {
+  dataset_id    = google_bigquery_dataset.warehouse["payments"].dataset_id
+  role          = "OWNER"
+  user_by_email = data.google_service_account.agent.email
+}""",
+        "agent",
+        "| roles/bigquery.dataOwner | warehouse dataset payments | declared |",
+    ),
+    "the approver reading the payments aggregates": (
+        """
+resource "google_bigquery_dataset_access" "approver_aggregates" {
+  dataset_id    = google_bigquery_dataset.warehouse["payments_aggregates"].dataset_id
+  role          = local.basic_roles["roles/bigquery.dataViewer"]
+  user_by_email = google_service_account.persona["approver"].email
+}""",
+        "approver",
+        "| roles/bigquery.dataViewer | warehouse dataset payments_aggregates | declared |",
+    ),
+    "the approver reading the group close views": (
+        """
+resource "google_bigquery_dataset_access" "approver_group_close" {
+  dataset_id    = google_bigquery_dataset.warehouse["group_close"].dataset_id
+  role          = local.basic_roles["roles/bigquery.dataViewer"]
+  user_by_email = google_service_account.persona["approver"].email
+}""",
+        "approver",
+        "| roles/bigquery.dataViewer | warehouse dataset group_close | declared |",
+    ),
     "the agent as masked reader of every rule": (
         f"""
 resource "google_bigquery_datapolicy_data_policy_iam_member" "agent_masked" {{
@@ -767,6 +1225,34 @@ resource "google_bigquery_datapolicy_data_policy_iam_member" "agent_masked" {{
         "| roles/bigquerydatapolicy.maskedReader | every masking rule | declared |",
     ),
 }
+
+
+def test_a_basic_role_is_reported_as_the_value_the_entry_sends(
+    docs: dict[str, Doc], config: Config
+) -> None:
+    """`local.basic_roles` maps a predefined role to the basic form an entry sends; the review
+    reports what is sent, so a map that sends OWNER for data viewer shows data owner."""
+    changed = copy.deepcopy(config)
+    for entry in changed["locals"]:
+        if "basic_roles" in entry:
+            entry["basic_roles"] = {k: '"OWNER"' for k in entry["basic_roles"]}
+    report = render(docs, review(docs, changed))
+    line = "| roles/bigquery.dataOwner | warehouse dataset payments_aggregates | declared |"
+    assert line in sections(report)["metric-owner"]
+    assert "roles/bigquery.dataViewer" not in sections(report)["metric-owner"]
+
+
+def test_a_basic_role_whose_value_is_no_basic_role_stops_the_report(
+    docs: dict[str, Doc], config: Config
+) -> None:
+    """A `local.basic_roles` value BigQuery would not read as a basic role is refused, never
+    reported as the map's key."""
+    changed = copy.deepcopy(config)
+    for entry in changed["locals"]:
+        if "basic_roles" in entry:
+            entry["basic_roles"] = {k: '"roles/bigquery.dataOwner"' for k in entry["basic_roles"]}
+    with pytest.raises(ValueError, match="a dataset role the review cannot read"):
+        review(docs, changed)
 
 
 @pytest.mark.parametrize("plant", sorted(SHOWN_PLANTS))

@@ -2,8 +2,8 @@
 
 With no lab project the lab spends nothing by construction: the check says so and calls no GCP
 tool. In a session that carries another lab's `GCP_PROJECT` it calls no GCP tool either, since the
-credential is that lab's, and fails, since it has read nothing that shows the lab's cost is $0.00.
-With `LEDGER_LAB_GCP_PROJECT` set and no `GCP_PROJECT` it
+credential may be that lab's, and fails, since it has read nothing that shows the lab's cost is
+$0.00. With `LEDGER_LAB_GCP_PROJECT` set and no `GCP_PROJECT` it
 - reads this month's cost, credits included, and the newest export time from the Cloud Billing
   export through the view `LEDGER_LAB_BILLING_EXPORT` names (`dataset.table` in the lab project;
   the agent account reads the export only through it) through `bq`:
@@ -357,11 +357,12 @@ def not_readable(fence: str, error: ReadError) -> Finding | None:
 
 # Every Google API read the fence checks make, by the URL's shape, with the permission it needs
 # and where that permission is held: `project` reads are what the agent account holds on the lab
-# project, `billing account` reads are on the linked billing account, and `none` methods
-# (`testIamPermissions`) need no permission. A read whose URL matches no row is refused before it
-# is sent, so a new read cannot be made without a row here, where the tests of the agent account's
-# hand-granted roles read it. A read sent with `bill_to` also needs `serviceusage.services.use` on
-# the project it bills.
+# project, `budget topic` and `kill switch account` reads are held on that one resource alone
+# (declared in platform/gcp), `billing account` reads are on the linked billing account, and
+# `none` methods (`testIamPermissions`) need no permission. A read whose URL matches no row is
+# refused before it is sent, so a new read cannot be made without a row here, where the tests of
+# the agent account's hand-granted roles and of the access rules read it. A read sent with
+# `bill_to` also needs `serviceusage.services.use` on the project it bills.
 API = r"https://[a-z]+\.googleapis\.com/v1(beta1)?/"
 P = r"projects/[^/:]+"
 READS: tuple[tuple[str, str | None, str], ...] = (
@@ -371,11 +372,11 @@ READS: tuple[tuple[str, str | None, str], ...] = (
         "serviceusage.quotas.get",
         "project",
     ),
-    (rf"{API}{P}/topics/[^/]+", "pubsub.topics.get", "project"),
+    (rf"{API}{P}/topics/[^/]+", "pubsub.topics.get", "budget topic"),
     (rf"{API}{P}/subscriptions/[^/]+", "pubsub.subscriptions.get", "project"),
     (rf"{API}{P}/locations/[^/]+/workflows/[^/]+", "workflows.workflows.get", "project"),
     (rf"{API}{P}/locations/[^/]+/triggers/[^/]+", "eventarc.triggers.get", "project"),
-    (rf"{API}{P}/serviceAccounts/[^/:]+", "iam.serviceAccounts.get", "project"),
+    (rf"{API}{P}/serviceAccounts/[^/:]+", "iam.serviceAccounts.get", "kill switch account"),
     (rf"{API}{P}:getIamPolicy", "resourcemanager.projects.getIamPolicy", "project"),
     (rf"{API}{P}", "resourcemanager.projects.get", "project"),
     (rf"{API}billingAccounts/[^/]+/budgets", "billing.budgets.list", "billing account"),

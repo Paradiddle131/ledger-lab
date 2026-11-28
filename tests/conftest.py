@@ -20,7 +20,7 @@ from access.compile import open_persona
 from access.identities import identity
 from agent.ask import Audit
 from agent.audit import FileLog
-from tests import options_check
+from tests import options_check, workers
 from tests.models.dbt_build import SAMPLED_SOURCES, git_out
 
 if TYPE_CHECKING:
@@ -66,6 +66,16 @@ def load_access() -> dict[str, Any]:
 @pytest.fixture(scope="session")
 def access() -> dict[str, Any]:
     return load_access()
+
+
+@pytest.hookimpl(tryfirst=True, optionalhook=True)
+def pytest_xdist_auto_num_workers(config: pytest.Config) -> int | None:
+    """`-n auto`'s worker count, capped by the memory available (`tests/workers.py`); with
+    `PYTEST_XDIST_AUTO_NUM_WORKERS` set to a count, xdist's own reading of it decides. Optional,
+    so a run without xdist does not stop on a hook it does not know."""
+    if workers.count_set(os.environ):
+        return None
+    return workers.auto_workers(workers.usable_cpus(), workers.available_memory())
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -224,7 +234,12 @@ def as_persona_on_bigquery(
 
 
 def holds_a_persona_token(item: pytest.Item) -> bool:
-    return isinstance(item, pytest.Function) and "as_persona_on_bigquery" in item.fixturenames
+    """A test that takes the persona sessions, or one marked `bigquery_persona`, which may take
+    them from a fixture of its own (the visibility matrix's BigQuery engine)."""
+    return isinstance(item, pytest.Function) and (
+        "as_persona_on_bigquery" in item.fixturenames
+        or item.get_closest_marker("bigquery_persona") is not None
+    )
 
 
 def persona_test_id(item: pytest.Item) -> str:

@@ -23,6 +23,7 @@ FREE_MONTHLY_QUERY_MIB = 1024 * 1024  # 1 TiB
 ALLOWED = {
     "google_billing_budget",
     "google_pubsub_topic",
+    "google_pubsub_topic_iam_member",
     "google_service_usage_consumer_quota_override",
     "google_service_account",
     "google_project_iam_member",
@@ -32,7 +33,7 @@ ALLOWED = {
     "google_storage_bucket",
     "google_storage_bucket_iam_member",
     "google_bigquery_dataset",
-    "google_bigquery_dataset_iam_member",
+    "google_bigquery_dataset_access",
     "google_project_iam_custom_role",
     "google_data_catalog_taxonomy",
     "google_data_catalog_policy_tag",
@@ -238,7 +239,17 @@ def test_only_the_agent_mints_tokens_and_only_for_persona_accounts_and_the_publi
     grants = {
         n: b for (t, n), b in blocks("resource").items() if t == "google_service_account_iam_member"
     }
-    assert set(grants) == {"agent_mints_persona_tokens", "agent_mints_publisher_token"}
+    assert set(grants) == {
+        "agent_mints_persona_tokens",
+        "agent_mints_publisher_token",
+        "agent_reads_kill_switch_account",
+    }
+    reads = grants["agent_reads_kill_switch_account"]
+    assert reads["service_account_id"] == "${google_service_account.kill_switch.name}"
+    assert unquote(reads["role"]) == "${google_project_iam_custom_role.account_reader.name}"
+    assert unquote(reads["member"]) == AGENT_MEMBER
+    reader = blocks("resource")[("google_project_iam_custom_role", "account_reader")]
+    assert [unquote(p) for p in reader["permissions"]] == ["iam.serviceAccounts.get"]
     publisher = grants["agent_mints_publisher_token"]
     assert attributes(publisher) == {"service_account_id", "role", "member"}
     assert publisher["service_account_id"] == "${google_service_account.publisher.name}"
