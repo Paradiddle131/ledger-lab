@@ -24,12 +24,18 @@ Checked, by those cases only:
 - the line starting OWN_ANCHOR holds OWN_BEFORE once, and the condition right after it, up to
   the next `;`, read the same way, is true exactly on those cases;
 - each word of WORDS answers WORD_CASES as listed;
-- the own-environment paragraph (from the one line starting OWN_ANCHOR to the next blank line)
-  is one line: OWN_ANCHOR, a space, OWN_BEFORE, that condition, then OWN_TAIL (what blank means,
-  and which answer the decider prints where);
-- the paragraph starting GIVEBACK_ANCHOR is GIVEBACK_PARAGRAPH line for line (its second line,
-  WAKE_COMMENT, says a wake's comment starts with `🤖` and is by an author in OWNER_INPUT), and
-  OWNER_INPUT is the owner, member and collaborator set;
+- the own-environment paragraph (from the one line starting OWN_ANCHOR to the next line that is
+  empty or only spaces and tabs) is one line: OWN_ANCHOR, a space, OWN_BEFORE, that condition,
+  then OWN_TAIL (what blank means, and which answer the decider prints where);
+- the paragraph starting GIVEBACK_ANCHOR, read the same way, is GIVEBACK_PARAGRAPH line for line
+  (its second line, WAKE_COMMENT, says a wake's comment starts with `🤖` and is by an author in
+  OWNER_INPUT), and OWNER_INPUT is the owner, member and collaborator set;
+- for those two paragraphs, the line directly above the anchor is empty: a line holding any
+  character there fails, whether Markdown would join it to the paragraph (a sentence, a list
+  item or quote line it continues lazily) or not (a line of only spaces or tabs, which Markdown
+  reads as blank), and an anchor on the file's first line fails too. For these reads the file is
+  split at the line endings Markdown reads (LF, CRLF and CR), so a form feed or another
+  separator that `str.splitlines` breaks at stays inside its line;
 - the reader refuses the clauses in REFUSED_CLAUSES, and SHELL_CHECK refuses the checks in
   REFUSED_CHECKS; the run helper refuses one of them before bash starts, leaving no file behind;
 - `AGENTS.md` has, under `## Guardrails`, a line starting `- **Own project only:**` holding each
@@ -38,7 +44,12 @@ Checked, by those cases only:
 Not checked:
 - the wording on those lines outside the pinned phrases and the extracted condition, and the rest
   of the guardrail line's prose;
-- text about the own environment or the give-back rule outside those two paragraphs;
+- text about the own environment or the give-back rule outside those two paragraphs, one that
+  contradicts them included;
+- any line above the one directly above each anchor: a block opened earlier and still open at
+  the anchor (an HTML comment `<!--` closed after the paragraph, a fenced code block, an HTML
+  block) can hide the paragraph or show it as code while each line still matches;
+- how the file renders: no Markdown parser reads it, the pins compare lines of text;
 - that a wake follows the give-back paragraph when it reads an issue's comments: the rule is
   prose, and no code gives an item back;
 - a `needs-gcp` label put back with no comment, which the give-back rule does not read;
@@ -178,10 +189,26 @@ def line_starting(lines: list[str], anchor: str, where: str) -> str:
     return found[0]
 
 
+def markdown_lines(path: Path) -> list[str]:
+    """The file's lines as Markdown splits them: `read_text` turns CRLF and CR into LF, and the
+    text is split at LF only (`str.splitlines` would also break at a form feed and other
+    separators, which Markdown keeps inside a line)."""
+    return path.read_text().split("\n")
+
+
+def is_blank(line: str) -> bool:
+    """Empty or only spaces and tabs: a line that ends a Markdown paragraph."""
+    return re.fullmatch(r"[ \t]*", line) is not None
+
+
 def paragraph_at(lines: list[str], anchor: str, where: str) -> list[str]:
-    """The lines from the one line starting `anchor` up to the next blank line."""
+    """The lines from the one line starting `anchor` up to the next blank line, after checking
+    that the line directly above the anchor is empty, so no line above joins its paragraph."""
     start = lines.index(line_starting(lines, anchor, where))
-    end = next((i for i in range(start, len(lines)) if not lines[i].strip()), len(lines))
+    above = lines[start - 1] if start else None
+    found = "the file's start" if above is None else repr(above)
+    assert above == "", f"{where}: expected an empty line directly above {anchor!r}, found {found}"
+    end = next((i for i in range(start, len(lines)) if is_blank(lines[i])), len(lines))
     return lines[start:end]
 
 
@@ -324,8 +351,9 @@ def test_each_word_means_what_it_says(word: str) -> None:
 
 def test_the_own_environment_paragraph_is_its_condition_between_pinned_words() -> None:
     """The definition is one line: OWN_ANCHOR, OWN_BEFORE, the condition the reader checks, then
-    OWN_TAIL (what blank means and which answer the decider prints where), and nothing else."""
-    lines = paragraph_at(AUTOPILOT.read_text().splitlines(), OWN_ANCHOR, "autopilot.md")
+    OWN_TAIL (what blank means and which answer the decider prints where), with an empty line
+    directly above and no other line in its paragraph."""
+    lines = paragraph_at(markdown_lines(AUTOPILOT), OWN_ANCHOR, "autopilot.md")
     assert len(lines) == 1, f"expected the own-environment paragraph on one line: {lines}"
     line = lines[0]
     head = f"{OWN_ANCHOR} {OWN_BEFORE}"
@@ -336,7 +364,70 @@ def test_the_own_environment_paragraph_is_its_condition_between_pinned_words() -
 
 def test_the_give_back_paragraph_is_as_written() -> None:
     """The give-back rule, a wake's comment's author set included, is GIVEBACK_PARAGRAPH line for
-    line, and the set it names is the one the picker reads as owner input."""
-    lines = paragraph_at(AUTOPILOT.read_text().splitlines(), GIVEBACK_ANCHOR, "autopilot.md")
+    line, with an empty line directly above, and the set it names is the one the picker reads as
+    owner input."""
+    lines = paragraph_at(markdown_lines(AUTOPILOT), GIVEBACK_ANCHOR, "autopilot.md")
     assert lines == list(GIVEBACK_PARAGRAPH), "the give-back paragraph differs from the pin"
     assert frozenset({"OWNER", "MEMBER", "COLLABORATOR"}) == OWNER_INPUT
+
+
+ABOVE_AN_ANCHOR = {
+    "a sentence": "A session with a non-empty `GCP_PROJECT` also counts.",
+    "only spaces": "   ",
+    "only a tab": "\t",
+    "trailing spaces": "A sentence.  ",
+    "a list item": "- A list item.",
+    "a quote": "> A quote.",
+    "an HTML comment opener": "<!--",
+}
+
+
+@pytest.mark.parametrize("ending", ["\n", "\r\n", "\r"], ids=["LF", "CRLF", "CR"])
+@pytest.mark.parametrize("line", ABOVE_AN_ANCHOR.values(), ids=ABOVE_AN_ANCHOR.keys())
+def test_a_line_directly_above_an_anchor_fails_the_pin(
+    tmp_path: Path, line: str, ending: str
+) -> None:
+    path = tmp_path / "profile.md"
+    path.write_bytes(ending.join(["Before.", "", line, f"{OWN_ANCHOR} text.", ""]).encode())
+    with pytest.raises(AssertionError, match="directly above"):
+        paragraph_at(markdown_lines(path), OWN_ANCHOR, "a probe")
+
+
+@pytest.mark.parametrize("ending", ["\n", "\r\n", "\r"], ids=["LF", "CRLF", "CR"])
+def test_an_empty_line_above_an_anchor_passes_the_pin(tmp_path: Path, ending: str) -> None:
+    """The control for the failures above: the same file with the line left out reads cleanly."""
+    path = tmp_path / "profile.md"
+    path.write_bytes(ending.join(["Before.", "", f"{OWN_ANCHOR} text.", "", "After."]).encode())
+    assert paragraph_at(markdown_lines(path), OWN_ANCHOR, "a probe") == [f"{OWN_ANCHOR} text."]
+
+
+def test_an_anchor_on_the_first_line_fails_the_pin(tmp_path: Path) -> None:
+    path = tmp_path / "profile.md"
+    path.write_text(f"{OWN_ANCHOR} text.\n")
+    with pytest.raises(AssertionError, match="found the file's start"):
+        paragraph_at(markdown_lines(path), OWN_ANCHOR, "a probe")
+
+
+@pytest.mark.parametrize("separator", ["\f", "\v", "\x1c", "\x85", "\u2028"], ids=repr)
+def test_a_separator_markdown_keeps_inside_a_line_joins_it(tmp_path: Path, separator: str) -> None:
+    """`str.splitlines` breaks at these, which would put an empty line above the anchor; Markdown
+    does not, so the inserted line stays above the anchor on the same line and the pin fails."""
+    path = tmp_path / "profile.md"
+    path.write_text(f"Before.\n\nA sentence.\n{separator}{OWN_ANCHOR} text.\n")
+    assert f"A sentence.\n{separator}{OWN_ANCHOR}".splitlines()[-2] == ""
+    with pytest.raises(AssertionError, match="expected one line starting"):
+        paragraph_at(markdown_lines(path), OWN_ANCHOR, "a probe")
+
+
+@pytest.mark.parametrize("separator", ["\f", "\v", "\x85", "\u00a0"], ids=repr)
+def test_a_line_of_other_whitespace_does_not_end_the_paragraph(
+    tmp_path: Path, separator: str
+) -> None:
+    """Markdown ends a paragraph only at a line that is empty or only spaces and tabs."""
+    path = tmp_path / "profile.md"
+    path.write_text(f"Before.\n\n{OWN_ANCHOR} text.\n{separator}\nA sentence.\n")
+    assert paragraph_at(markdown_lines(path), OWN_ANCHOR, "a probe") == [
+        f"{OWN_ANCHOR} text.",
+        separator,
+        "A sentence.",
+    ]
