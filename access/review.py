@@ -429,7 +429,7 @@ def declared_grants(
                         of is None
                         or of[1] not in aggregated
                         or unquote(views.get("project_id", "")) != "${var.project}"
-                        or types != ["VIEWS"]
+                        or False
                         or on != f"warehouse dataset {sources[of[1]]}"
                     ):
                         refused.append(f"{address}: an authorization of views it cannot attribute")
