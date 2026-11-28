@@ -294,7 +294,5 @@ def test_make_bigquery_native_runs_the_live_golden_question_under_its_marker() -
     (target,) = [word for word in recipe if word.startswith("tests/")]
     path, name = target.split("::")
     assert (REPO / path).is_file()
-    assert (
-        name
-        == test_one_golden_question_is_answered_as_the_persona_with_the_verified_querys_rows.__name__
-    )
+    live = test_one_golden_question_is_answered_as_the_persona_with_the_verified_querys_rows
+    assert name == live.__name__
