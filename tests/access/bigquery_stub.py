@@ -16,11 +16,26 @@ a query over its bytes cap, here one naming more than `CAP_COLUMNS` distinct col
 payments, and pages an answer of more than `PAGE_ROWS` rows; the engine's answer budget is
 lowered so its distinct values come in several parts.
 
+It also serves the own agent's BigQuery mode (`agent/bigquery.py`, run by
+`tests/agent/test_bigquery_mode.py`): `SELECT SESSION_USER()` answers the account whose token the
+request carries; named query parameters are bound; each job bills, as BigQuery does at least, 10
+MiB for each table its SQL names and nothing for one that names none, and a job whose bill is past
+its `maximumBytesBilled` is refused before it runs (`bytesBilledLimitExceeded`); every job's cap
+must be a whole number of bytes above zero and within the persona queries' cap; each answer names
+its job, whose labels its creator reads back (`jobs.get`). `STUB_JOBS` is where it appends, one
+JSON line per job, who ran it and with which cap, labels and bill, and how it ended; `STUB_BUILD`
+is the folder of the sample build `STUB_WAREHOUSE` was built in, which the child's session build
+then is, so the child builds nothing.
+
 `STUB_FAULT` plants one fault: `leak` gives the Chicago accountant's policy on the masked copy the
 UK entity's rows too; `unmasked` stores the clear person key in the masked copy it reads;
 `stray-view` adds a view of its own to the group close dataset; `changed` adds one to an amount of
 the clear copy as the payables clerk reads it; `no-minimum` serves the payments aggregate view
-with its HAVING's minimum at zero, its stored query still the generated one.
+with its HAVING's minimum at zero, its stored query still the generated one; `rows-open` gives the
+UK transport accountant's policies every entity's rows; `cap-ignored` runs a job past its cap; and
+of the mint: `agent-token` mints the token of the chain's first account, the agent's, as the cloud
+proxy's replacement would carry, `cached-token` hands every mint after the first the first one's
+token, and `mint-fails` fails every mint.
 `STUB_PROVEN` is the local engine's tally over the same build, which the BigQuery run must then
 reach. `STUB_LOG` is where it writes how many reads of each kind it served.
 """
@@ -33,6 +48,7 @@ import socket
 import subprocess
 from collections import Counter
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -44,7 +60,9 @@ import yaml
 from sqlglot import exp
 
 import tests.access.visibility_on_bigquery as engine
+import tests.models.dbt_build
 from access import purpose_views, thresholds
+from access.bigquery import MAX_BYTES_BILLED
 from access.identities import identity
 from access.row_policies import PUBLISHER, clear_readers
 from tests.conftest import REPO
@@ -59,6 +77,9 @@ socket.create_connection = _no_network  # type: ignore[assignment]
 
 PROJECT = os.environ["LEDGER_LAB_GCP_PROJECT"]
 FAULT = os.environ.get("STUB_FAULT", "")
+# The least BigQuery bills for each table a query reads.
+TABLE_BYTES = 10 * 2**20
+LOCATION = "EU"
 CAP_COLUMNS = 10
 PAGE_ROWS = 60
 TAGGED = {"vendor_name", "document_number", "vendor_person_key"}
@@ -117,6 +138,8 @@ def rows_of(who: str, table: str) -> str:
         entities = set()
     if FAULT == "leak" and who == "accountant-chicago" and table == "payments_masked":
         entities.add("uk-transport")
+    if FAULT == "rows-open" and who == "accountant-uk-transport" and entities:
+        return "true"
     listed = ", ".join(f"'{e}'" for e in sorted(entities)) or "null"
     return f"entity_id in ({listed})"
 
@@ -238,7 +261,7 @@ class Warehouse:
             answer["view"] = {"query": self.views[(dataset, table)]}
         return answer
 
-    def query(self, who: str, sql: str) -> dict[str, Any]:
+    def query(self, who: str, sql: str, parameters: dict[str, Any] | None = None) -> dict[str, Any]:
         tree = sqlglot.parse_one(sql, read="bigquery")
         named = {c.name for c in tree.find_all(exp.Column)}
         # Only the payments are large enough for a query of them to reach the cap.
@@ -259,7 +282,7 @@ class Warehouse:
         if "MOD(FARM_FINGERPRINT(" in sql:
             SERVED["distinct in parts"] += 1
         try:
-            cursor = self.db.execute(resolved(sql, who, False))
+            cursor = self.db.execute(resolved(sql, who, False), parameters or None)
         except duckdb.CatalogException:
             raise Refused(403, "accessDenied") from None
         found = cursor.fetchall()
@@ -302,6 +325,71 @@ def rendered(value: Any) -> str | None:
 
 
 WAREHOUSE: Warehouse | None = None
+# Each job by its id, as `jobs.get` reads it back, and the first token minted.
+JOBS: dict[str, dict[str, Any]] = {}
+MINTED: list[str] = []
+
+if "STUB_BUILD" in os.environ:
+
+    def _built(tmp_path: Any, source_rows: str, landing: Any = None) -> Any:
+        """The sample build the stand-in serves, made by the parent run, in place of a new one."""
+        assert (source_rows, landing) == ("sample", None)
+        warehouse, folder = Path(os.environ["STUB_WAREHOUSE"]), Path(os.environ["STUB_BUILD"])
+        return tests.models.dbt_build.Build("", warehouse, {}, {}, folder)
+
+    tests.models.dbt_build.built = _built
+
+
+def bound(body: dict[str, Any]) -> dict[str, Any]:
+    """A job's named parameters as values, as BigQuery binds them."""
+    kinds = {"STRING": str, "INT64": int}
+    return {
+        p["name"]: kinds[p["parameterType"]["type"]](p["parameterValue"]["value"])
+        for p in body.get("queryParameters", [])
+    }
+
+
+def ran(job: dict[str, Any]) -> None:
+    if "STUB_JOBS" in os.environ:
+        with open(os.environ["STUB_JOBS"], "a") as log:
+            log.write(json.dumps(job) + "\n")
+
+
+def run_job(warehouse: Warehouse, account: str, who: str, body: dict[str, Any]) -> dict[str, Any]:
+    """One `jobs.query` call: capped, billed and logged as BigQuery would run it."""
+    cap = body.get("maximumBytesBilled")
+    assert isinstance(cap, str) and cap.isdigit(), body
+    assert 0 < int(cap) <= MAX_BYTES_BILLED, body
+    sql = body["query"]
+    bill = TABLE_BYTES * len(re.findall(rf"`{re.escape(PROJECT)}\.[a-z_]+\.[a-z_]+`", sql))
+    job: dict[str, Any] = {
+        "who": who,
+        "cap": int(cap),
+        "labels": body.get("labels"),
+        "creation": body.get("jobCreationMode"),
+        "bill": bill,
+        "query": sql,
+    }
+    try:
+        if bill > int(cap) and FAULT != "cap-ignored":
+            SERVED["over the cap"] += 1
+            raise Refused(400, "bytesBilledLimitExceeded")
+        if sql == "SELECT SESSION_USER()":
+            answer: dict[str, Any] = {
+                "jobComplete": True,
+                "schema": {"fields": [{"name": "f0_", "type": "STRING"}]},
+                "rows": [{"f": [{"v": account}]}],
+            }
+        else:
+            answer = warehouse.query(who, sql, bound(body))
+    except Refused as refusal:
+        ran({**job, "ended": refusal.reason})
+        raise
+    job_id = f"job_{len(JOBS) + 1}"
+    JOBS[job_id] = job
+    ran({**job, "ended": "done"})
+    reference = {"projectId": PROJECT, "location": LOCATION, "jobId": job_id}
+    return {**answer, "jobReference": reference, "totalBytesBilled": str(bill)}
 
 
 @pytest.fixture(autouse=True)
@@ -310,24 +398,40 @@ def _stubs(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> I
     if WAREHOUSE is None:
         WAREHOUSE = Warehouse(os.environ["STUB_WAREHOUSE"])
     warehouse = WAREHOUSE
-    proven = json.loads(os.environ["STUB_PROVEN"])
-    # The test module as pytest imported it, which is not the one this plugin imports by name.
-    monkeypatch.setattr(request.module, "LANDED_PROVEN", proven)
+    if "STUB_PROVEN" in os.environ:
+        # The test module as pytest imported it, which is not the one this plugin imports by name.
+        proven = json.loads(os.environ["STUB_PROVEN"])
+        monkeypatch.setattr(request.module, "LANDED_PROVEN", proven)
     monkeypatch.setattr(engine, "ANSWER_BYTES", 1500)
+    real_run = subprocess.run
 
     def run(command: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        token = "stub-token:" + command[3].rsplit(",", 1)[-1]
+        if list(command[1:3]) != ["auth", "print-access-token"]:
+            # Not a mint (git, for the audit record's release): the child's PATH holds no gcloud
+            # but the one that logs its call and fails.
+            return real_run(command, *args, **kwargs)
+        if FAULT == "mint-fails":
+            return subprocess.CompletedProcess(command, 1, "", "denied")
+        accounts = command[3].split("=", 1)[1].split(",")
+        token = "stub-token:" + (accounts[0] if FAULT == "agent-token" else accounts[-1])
+        MINTED.append(token)
+        if FAULT == "cached-token":
+            token = MINTED[0]
         return subprocess.CompletedProcess(command, 0, token, "")
 
     def handle(self: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
-        account = request.headers["authorization"].rsplit(":", 1)[-1]
+        account = request.headers["authorization"].split("stub-token:", 1)[-1]
         who = account.split("@", 1)[0]
         path = [unquote(p) for p in urlparse(str(request.url)).path.split("/")]
         try:
             if request.method == "POST":
                 body = json.loads(request.content)
-                assert body["maximumBytesBilled"] == "100000000", body
-                return httpx.Response(200, json=warehouse.query(who, body["query"]))
+                return httpx.Response(200, json=run_job(warehouse, account, who, body))
+            if "jobs" in path:
+                job = JOBS.get(path[path.index("jobs") + 1])
+                if job is None or job["who"] != who:
+                    raise Refused(404, "notFound")
+                return httpx.Response(200, json={"configuration": {"labels": job["labels"]}})
             SERVED["metadata reads"] += 1
             at = path.index("datasets")
             if len(path) == at + 3:

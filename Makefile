@@ -4,7 +4,7 @@
 LOADOUT ?= $(or $(shell sed -n 's/^The collection .* is cloned at `\([^`]*\)`.*/\1/p' $(HOME)/.claude/CLAUDE.md 2>/dev/null),../loadout)
 GUARDS := $(LOADOUT)/cloud/githooks
 
-.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test warehouse-parity bigquery-personas bigquery-row-policies bigquery-thresholds bigquery-purposes bigquery-visibility stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
+.PHONY: check sync lint typecheck test ids portable scan contract metric-versions contract-test warehouse-parity bigquery-personas bigquery-row-policies bigquery-thresholds bigquery-purposes bigquery-visibility bigquery-agent stack-up stack-down stack-test cost-check fresh-clone reconcile-landed reconcile-accept tofu fences-validate
 
 check: lint typecheck test ids portable scan contract metric-versions
 	@echo "make check: all passed"
@@ -136,6 +136,16 @@ bigquery-purposes: sync
 # (tests/access/visibility_on_bigquery.py); `-rP` prints the cells left.
 bigquery-visibility: sync
 	uv run pytest -m bigquery_persona -rP tests/access/test_visibility.py::test_every_persona_sees_its_matrix
+
+# The own agent's questions on BigQuery through its BigQuery mode (agent/bigquery.py), as the asking
+# persona: the Chicago and the UK transport accountants asking the same question get different rows,
+# each job run as the asker's own account (SESSION_USER() checked before the first query) and
+# labelled with the agent, the conversation and the turn; a question without a persona mints no
+# token; and a runaway join's job is refused by BigQuery at the bytes left of the turn, the turn
+# stopped with no run.
+# Run it between two `make cost-check` reads.
+bigquery-agent: sync
+	uv run pytest -m bigquery_persona -rA tests/agent/test_ask.py::test_two_personas_asking_the_same_question_get_different_rows tests/agent/test_ask.py::test_a_question_without_a_persona_gets_no_answer tests/agent/test_cost.py::test_runaway_join_stops_at_the_cap tests/agent/test_bigquery_mode.py::test_each_job_of_a_turn_carries_its_labels
 
 # The container stack: the shared database always, one more service per PROFILE=<name>.
 # Each checkout is its own Compose project (containers, network, volume) and the database takes a
