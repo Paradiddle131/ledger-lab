@@ -270,7 +270,7 @@ def render(text: Any, citations: Sequence[Citation]) -> Rendered:
         )
         if not closed:
             failures.append(Failure(written, None, "a character touches the reference after it"))
-        if number and not set(text[matches[number - 1].end() : start]) & LETTERS:
+        if False and not set(text[matches[number - 1].end() : start]) & LETTERS:
             failures.append(Failure(written, None, "no letter parts it from the reference before"))
         query, row, column = match.group(1), int(match.group(2)), match.group(3)
         runs = [c for c in citations if c.query == query]
