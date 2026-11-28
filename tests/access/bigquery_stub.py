@@ -176,7 +176,7 @@ class Warehouse:
         for aggregate in AGGREGATE_VIEWS:
             generated = engine.generated_query(aggregate, PROJECT)
             self.views[(aggregate.dataset, aggregate.name)] = generated
-            if FAULT == "no-minimum" and aggregate.count == "count_distinct":
+            if FAULT == "no-minimum" and aggregate.count == "nothing":
                 kept = f" >= {aggregate.minimum}"
                 assert generated.endswith(kept), generated
                 self.served[(aggregate.dataset, aggregate.name)] = generated[: -len(kept)] + " >= 0"
