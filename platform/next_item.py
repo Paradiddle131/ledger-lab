@@ -5,8 +5,8 @@ that chose it, or no item and the reason. The order:
 1. an issue the routine prompt names, when it is pickable;
 2. the first pickable issue labelled `slice`, in the order of the rows of the path table in the
    body of the open issue titled starting `Thin slice`;
-3. else the first pickable other sub-issue labelled `slice` (one off the path, such as a leftover
-   that blocks a step), in epic order then sub-issue order;
+3. else the first pickable other issue labelled `slice` (one off the path, such as a leftover
+   that blocks a step), in epic order then sub-issue order, then any outside every epic by number;
 4. else, once the slice has no open item, the first pickable other sub-issue not labelled
    `leftover`, in epic order then sub-issue order;
 5. else, once the slice has no open item, the first pickable issue labelled `leftover`, in epic
@@ -378,6 +378,19 @@ def _sub_issues(tracker: Tracker) -> Iterator[int]:
         yield from tracker.sub_issues.get(epic, ())
 
 
+def _slice_elsewhere(tracker: Tracker) -> Iterator[int]:
+    """The epics' sub-issues in order, then each other open issue labelled `slice` outside every
+    epic, by number: a slice issue counts toward the slice's hold wherever it sits, so step 3
+    reaches it wherever it sits."""
+    yield from _sub_issues(tracker)
+    placed = set(_sub_issues(tracker))
+    yield from sorted(
+        n
+        for n, issue in tracker.issues.items()
+        if n not in placed and issue.state == "open" and SLICE in issue.labels
+    )
+
+
 def pick(tracker: Tracker, now: datetime, named: int | None = None) -> Pick:
     """The next item by the queue rule; see the module's docstring."""
     lane = (tracker.owner_lane or "").strip()
@@ -424,7 +437,7 @@ def pick(tracker: Tracker, now: datetime, named: int | None = None) -> Pick:
         if issue is not None and issue.state == "open" and SLICE not in issue.labels:
             warnings.append(f"#{n} is on the slice path but not labelled `{SLICE}`")
     chosen = first(path, lambda issue: SLICE in issue.labels, RULE_SLICE) or first(
-        _sub_issues(tracker), lambda issue: SLICE in issue.labels, RULE_SLICE_OFF_PATH
+        _slice_elsewhere(tracker), lambda issue: SLICE in issue.labels, RULE_SLICE_OFF_PATH
     )
     if chosen:
         return chosen
@@ -563,7 +576,7 @@ def build_tracker(repo: str, get: Get, named: int | None = None) -> Tracker:
     path = slice_path(the_slice.body) if the_slice else ()
     candidates = dict.fromkeys(
         n
-        for n in (*([named] if named is not None else []), *path, *_sub_issues(labels_only))
+        for n in (*([named] if named is not None else []), *path, *_slice_elsewhere(labels_only))
         if n in issues
         and issues[n].state == "open"
         and READY in issues[n].labels

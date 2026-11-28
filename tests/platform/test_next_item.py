@@ -189,6 +189,25 @@ def test_an_open_slice_labelled_item_off_the_path_also_holds_off_slice_work() ->
     assert chosen.rule == f"{SLICE_WAITS} (open: {ref(ACCESS_STEP)})"
 
 
+def test_a_slice_issue_outside_every_epic_is_picked_rather_than_holding_the_queue() -> None:
+    """It counts toward the hold, so step 3 takes it: a hold no step can lift would stall every
+    wake."""
+    done = replace(AGENT_SLICE, state="closed")
+    orphan = issue(OTHER, "platform", SLICE, "ready")
+    chosen = pick(tracker(LEFTOVERS_ISSUE, GROUND, done, orphan), NOW)
+    assert (chosen.number, chosen.rule) == (OTHER, RULE_SLICE_OFF_PATH)
+    held = replace(orphan, labels=orphan.labels | {"needs-owner"})
+    chosen = pick(tracker(LEFTOVERS_ISSUE, GROUND, done, held), NOW)
+    assert chosen.number is None
+    assert dict(chosen.skipped)[OTHER] == "labelled `needs-owner`"
+
+
+def test_a_slice_issue_in_an_epic_comes_before_one_outside_every_epic() -> None:
+    orphan = issue(OTHER, "platform", SLICE, "ready")
+    chosen = pick(tracker(ACCESS_SLICE, orphan, path=()), NOW)
+    assert (chosen.number, chosen.rule) == (ACCESS_STEP, RULE_SLICE_OFF_PATH)
+
+
 def test_once_every_slice_item_is_closed_a_roadmap_item_comes_before_the_leftovers() -> None:
     """The leftovers issue sits before the ordinary item in the first epic."""
     done = replace(AGENT_SLICE, state="closed")
@@ -902,6 +921,19 @@ def test_the_live_snapshot_is_read_page_by_page_and_picks_by_the_rule() -> None:
     chosen = pick(build_tracker(REPO_NAME, FakeGitHub(routes)), NOW)
     assert chosen.number is None
     assert chosen.rule.startswith(SLICE_WAITS)
+
+
+def test_a_live_slice_issue_outside_every_epic_is_read_and_picked() -> None:
+    """Its comments and blockers are read like a sub-issue's, so its claim is seen."""
+    orphan = 970
+    routes = live_routes() | {f"issues/{BLOCKER}": raw(BLOCKER)}
+    routes["issues"] = [*routes["issues"], raw(orphan, SLICE, "ready")]
+    routes[f"issues/{orphan}/comments"] = []
+    routes[f"issues/{orphan}/dependencies/blocked_by"] = []
+    github = FakeGitHub(routes)
+    chosen = pick(build_tracker(REPO_NAME, github), NOW)
+    assert (chosen.number, chosen.rule) == (orphan, RULE_SLICE_OFF_PATH)
+    assert any(p.split("?")[0].endswith(f"issues/{orphan}/comments") for p in github.asked)
 
 
 def test_the_live_relation_blocker_is_read() -> None:
