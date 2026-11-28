@@ -115,8 +115,8 @@ bigquery-row-policies: sync
 	uv run pytest -m bigquery_persona tests/access/test_row_policies.py tests/access/test_policy_tags.py
 
 # Each aggregate reader's read of its product's aggregate views on BigQuery, as the persona: only
-# the groups of at least the minimum group, no raw read of the privacy unit, and a refusal without
-# the grant (access/thresholds.py).
+# the groups of at least the minimum group, no column finer than the payments view's grain, and a
+# refusal without the grant (access/thresholds.py).
 bigquery-thresholds: sync
 	uv run pytest -m bigquery_persona tests/access/test_thresholds.py
 
