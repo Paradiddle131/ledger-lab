@@ -492,17 +492,23 @@ def test_a_word_of_digit_shaped_letters_with_a_point_or_beside_a_reference_is_wi
         "The share is .S now.",
         "The share is O.O'S.",
         "The spend was lO'OOO.",
+        "The share is O_OS.",
+        "The share is O=OS.",
+        'The share is O"OS.',
+        "The spend was lO:OO.",
+        f"The spend was {cell('b')} lO'OOO.",
         "The spend was forty-two thousand.",
         f"The share is {cell('a')}, and the spend was OO-OO.",
     ],
 )
-def test_a_number_word_or_a_look_alike_not_beside_a_reference_and_with_no_point_is_shown(
+def test_a_word_the_look_alike_rule_does_not_withhold_is_shown(
     as_persona: AsPersona, audit: Audit, text: str
 ) -> None:
-    """Stated limits: number words are not read, and a word of digit-shaped letters holding no `.`
-    or `,` between two of its letters (a point at either end is left out, and a `'` inside skips
-    the word) and not beside a reference is prose, so each of these is shown."""
-    assert shown(text, as_persona, audit) == text.replace(cell("a"), "12.25")
+    """Stated limits: number words are not read; a word holding a character other than the
+    digit-shaped letters, `.` and `,` inside it is not tested, beside a reference or not; and a
+    tested word with no inner `.` or `,` is withheld only beside a reference. These are shown."""
+    expected = text.replace(cell("a"), "12.25").replace(cell("b"), "1")
+    assert shown(text, as_persona, audit) == expected
 
 
 def test_an_honest_word_of_digit_shaped_letters_beside_a_reference_is_withheld(

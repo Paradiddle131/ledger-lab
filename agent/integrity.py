@@ -29,10 +29,10 @@ What `check` requires; the reply is withheld when any of these fails:
   start of the reply right before it, and right after it the end of the reply, a space, a line
   break, or one of `. , ; : ! ?` followed by one of those; so no character but one closing mark
   before a space, a line break or the end touches a rendered figure;
-- no prose word (a run between white space, the characters of `PROSE` at its ends left out) is
-  made only of the letters of `DIGIT_SHAPED` (`O o l I S Z B`) and either holds a `.` or `,` between
-  two of its letters (`O.OS`) or is the word right before or after a reference (`{..} OOO`); a `.`
-  or `,` at either end of a word is left out before that test;
+- a prose word (a run between white space) is tested only when, with the characters of `PROSE` at
+  its two ends removed, each character left is a letter of `DIGIT_SHAPED` (`O o l I S Z B`) or a
+  `.` or `,`; a tested word is withheld when it holds a `.` or `,` between two of its letters
+  (`O.OS`) or is the word right before or after a reference (`{..} OOO`);
 - between two references the model's text holds at least one ASCII letter, so no two rendered
   cells read as one figure (`1 000`, `1,250`, `12.25`);
 - each reference names a query cited exactly once in this turn, by a run that covers the question
@@ -68,12 +68,10 @@ Stated limits:
   is in thousands; the figure itself is always the cell's own, with the cell's own sign;
 - a figure written in words (`forty-two thousand`) is prose to the check and is shown: no word list
   is read;
-- a word of ASCII letters shaped like digits is withheld only in the two forms above: the point
-  test reads only a `.` or `,` between two of the letters, so a word that starts or ends with a
-  point (`.OS`, `.S`) or holds no point (`lOO thousand`, `It is OOO.`) is shown unless it sits
-  beside a reference, and so is a word with a `'`, `_`, `=` or `"` inside it (`O.O'S`, `lO'OOO`),
-  a look-alike using any other ASCII letter (`g` for 9) or a hyphen (`OO-OO`); an honest word of
-  those letters beside a reference (`{..}, I think`) is withheld;
+- a word the rule above does not withhold is shown, beside a reference or not: for example a word
+  holding another character inside it (`lO'OOO`, `OO-OO`), or a tested word with no `.` or `,`
+  between two of its letters that is not beside a reference (`lOO thousand`, `.OS`, whose only
+  point is at its start); an honest tested word beside a reference (`{..}, I think`) is withheld;
 - which row, column or metric the prose attributes a rendered figure to is not checked: two
   references swapped in the prose are shown as written;
 - a text cell is rendered as its own text and its characters are not read, so a text cell holding
@@ -247,10 +245,10 @@ def _prose(char: str) -> str | None:
 
 
 def _look_alike_words(text: str) -> list[Failure]:
-    """The prose words made only of `DIGIT_SHAPED` letters that hold a `.` or `,` between two of
-    their letters (`O.OS`), or that are the word right before or after a reference with only white
-    space and a closing mark between (`{..} OOO`); a word is a run of characters between white
-    space, with the characters of `PROSE` at either end left out."""
+    """The prose words withheld as look-alikes; see the module's docstring. A word is a run between
+    white space; it is tested when, with the characters of `PROSE` at its two ends removed, each
+    character left is a letter of `DIGIT_SHAPED` or a `.` or `,`, and withheld when it then holds a
+    `.` or `,` between two letters or is the word right before or after a reference."""
     marked = REFERENCE.sub("\0", text)
     words = marked.split()
     failures: list[Failure] = []
