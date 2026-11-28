@@ -722,7 +722,7 @@ def test_the_queue_steps_name_slice_then_the_other_sub_issues_then_leftover() ->
     assert roadmap < slice_step < off_path < other < leftover
     assert "in path order" in steps[slice_step]
     for later in (off_path, other, leftover):
-        assert steps[later].startswith(f"{later + 1}. Else ")
+        assert re.match(rf"{later + 1}\. Else[ ,]", steps[later])
         assert "in epic order then sub-issue order" in steps[later]
     for after_slice in (other, leftover):
         assert "once the slice has no open item" in steps[after_slice]
