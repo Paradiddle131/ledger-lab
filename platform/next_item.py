@@ -3,13 +3,20 @@
 `pick(tracker, now)` is pure: it reads a snapshot of the tracker and answers the item and the rule
 that chose it, or no item and the reason. The order:
 1. an issue the routine prompt names, when it is pickable;
-2. the first pickable issue labelled `slice`, in the order of the rows of the path table in the
-   body of the open issue titled starting `Thin slice`;
-3. else the first pickable other sub-issue labelled `slice` (one off the path, such as a leftover
-   that blocks a step), in epic order then sub-issue order;
-4. else the first pickable other sub-issue not labelled `leftover`, in epic order then sub-issue
-   order;
-5. else the first pickable issue labelled `leftover`, in epic order then sub-issue order.
+2. the first pickable step of the slice's path, in the order of the rows of the path table in the
+   body of the open issue titled starting `Thin slice`, whether or not it is labelled `slice`
+   (the path is owner input; a step without the label is warned);
+3. else the first pickable other issue labelled `slice` (one off the path, such as a leftover
+   that blocks a step), in epic order then sub-issue order, then any outside every epic by number;
+4. else, once the slice has no open item, the first pickable other sub-issue not labelled
+   `leftover`, in epic order then sub-issue order;
+5. else, once the slice has no open item, the first pickable issue labelled `leftover`, in epic
+   order then sub-issue order.
+The slice's items (`slice_items`) are the open steps of its path and every other open issue
+labelled `slice`, an epic and the slice issue itself aside: steps 2 and 3 take only these, and the
+slice has an open item exactly while one of them is open; while it has one and none is pickable,
+the pick is no item, naming them, so a wake never turns to off-slice work or leftovers while the
+slice waits on the owner or on GCP.
 The epics are the sub-issues of the open issue titled `Roadmap`, in order. An epic (label `epic`)
 and the slice issue itself are never picked.
 
@@ -54,6 +61,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from itertools import chain
 from typing import Any
 
 COMMAND = "uv run python platform/next_item.py"
@@ -72,10 +80,13 @@ CLAIM_LIFE = timedelta(hours=3)
 GH_TIMEOUT_S = 60
 
 RULE_NAMED = "named by the prompt"
-RULE_SLICE = "the first pickable slice item in path order"
+RULE_SLICE = "the first pickable step of the slice's path, in path order"
 RULE_SLICE_OFF_PATH = "no step of the path pickable: the first pickable slice item off the path"
-RULE_EPIC = "no slice item pickable: the first pickable other sub-issue in epic order"
-RULE_LEFTOVER = "no slice item or other sub-issue pickable: the first pickable leftovers issue"
+RULE_EPIC = "the slice has no open item: the first pickable other sub-issue in epic order"
+RULE_LEFTOVER = (
+    "the slice has no open item, nor any other sub-issue pickable: the first leftovers issue"
+)
+SLICE_WAITS = "the slice has open items and none is pickable; off-slice work waits for the slice"
 
 _CLAIM = re.compile(r"(?:🤖 )?(?:claimed|still on it) ([0-9T:Z-]+) [0-9a-f]+")
 _HANDOFF = re.compile(r"(?:🤖 |## )?handoff", re.IGNORECASE)
@@ -371,6 +382,36 @@ def _sub_issues(tracker: Tracker) -> Iterator[int]:
         yield from tracker.sub_issues.get(epic, ())
 
 
+def slice_items(
+    tracker: Tracker, path: Sequence[int], slice_number: int | None
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """The slice's items, the one set both its pick steps and its hold read: on the path, its open
+    steps in row order whatever their labels; off it, every other open issue labelled `slice`,
+    the epics' sub-issues in epic then sub-issue order, then any outside every epic by number. An
+    epic and the slice issue itself are never one."""
+
+    def item(n: int) -> bool:
+        issue = tracker.issues.get(n)
+        return (
+            issue is not None
+            and issue.state == "open"
+            and EPIC not in issue.labels
+            and n != slice_number
+        )
+
+    on_path = tuple(n for n in path if item(n))
+    placed = list(_sub_issues(tracker))
+    elsewhere = sorted(n for n in tracker.issues if n not in placed)
+    off_path = tuple(
+        dict.fromkeys(
+            n
+            for n in (*placed, *elsewhere)
+            if n not in path and item(n) and SLICE in tracker.issues[n].labels
+        )
+    )
+    return on_path, off_path
+
+
 def pick(tracker: Tracker, now: datetime, named: int | None = None) -> Pick:
     """The next item by the queue rule; see the module's docstring."""
     lane = (tracker.owner_lane or "").strip()
@@ -416,12 +457,21 @@ def pick(tracker: Tracker, now: datetime, named: int | None = None) -> Pick:
         issue = tracker.issues.get(n)
         if issue is not None and issue.state == "open" and SLICE not in issue.labels:
             warnings.append(f"#{n} is on the slice path but not labelled `{SLICE}`")
-    chosen = (
-        first(path, lambda issue: SLICE in issue.labels, RULE_SLICE)
-        or first(_sub_issues(tracker), lambda issue: SLICE in issue.labels, RULE_SLICE_OFF_PATH)
-        or first(_sub_issues(tracker), lambda issue: LEFTOVER not in issue.labels, RULE_EPIC)
-        or first(_sub_issues(tracker), lambda issue: LEFTOVER in issue.labels, RULE_LEFTOVER)
+    on_path, off_path = slice_items(tracker, path, slice_number)
+    chosen = first(on_path, lambda _: True, RULE_SLICE) or first(
+        off_path, lambda _: True, RULE_SLICE_OFF_PATH
     )
+    if chosen:
+        return chosen
+    open_items = sorted({*on_path, *off_path})
+    if open_items:
+        listed = ", ".join(f"#{n}" for n in open_items)
+        return Pick(
+            None, f"{SLICE_WAITS} (open: {listed})", (), tuple(skipped.items()), tuple(warnings)
+        )
+    chosen = first(
+        _sub_issues(tracker), lambda issue: LEFTOVER not in issue.labels, RULE_EPIC
+    ) or first(_sub_issues(tracker), lambda issue: LEFTOVER in issue.labels, RULE_LEFTOVER)
     if chosen:
         return chosen
     return Pick(None, "nothing pickable", (), tuple(skipped.items()), tuple(warnings))
@@ -541,7 +591,11 @@ def build_tracker(repo: str, get: Get, named: int | None = None) -> Tracker:
     path = slice_path(the_slice.body) if the_slice else ()
     candidates = dict.fromkeys(
         n
-        for n in (*([named] if named is not None else []), *path, *_sub_issues(labels_only))
+        for n in (
+            *([named] if named is not None else []),
+            *chain(*slice_items(labels_only, path, the_slice.number if the_slice else None)),
+            *_sub_issues(labels_only),
+        )
         if n in issues
         and issues[n].state == "open"
         and READY in issues[n].labels

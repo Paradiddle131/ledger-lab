@@ -32,6 +32,7 @@ from next_item import (
     RULE_SLICE,
     RULE_SLICE_OFF_PATH,
     SLICE,
+    SLICE_WAITS,
     Comment,
     Issue,
     PullRequest,
@@ -172,12 +173,46 @@ def test_a_ready_slice_item_comes_before_a_ready_leftover_in_the_first_epic() ->
     assert (chosen.number, chosen.rule) == (AGENT_STEP, RULE_SLICE)
 
 
-def test_with_no_slice_item_pickable_a_roadmap_item_comes_before_the_leftovers() -> None:
-    """The leftovers issue sits before the ordinary item in the first epic."""
+def test_while_the_slice_has_an_open_item_none_pickable_nothing_off_the_slice_is_picked() -> None:
+    """A held step keeps the wake off the ordinary item and the leftovers alike."""
     held = replace(AGENT_SLICE, labels=AGENT_SLICE.labels | {"needs-owner"})
     chosen = pick(tracker(LEFTOVERS_ISSUE, GROUND, held), NOW)
-    assert (chosen.number, chosen.rule) == (GROUND_ITEM, RULE_EPIC)
+    assert chosen.number is None
+    assert chosen.rule == f"{SLICE_WAITS} (open: {ref(AGENT_STEP)})"
     assert dict(chosen.skipped)[AGENT_STEP] == "labelled `needs-owner`"
+
+
+def test_an_open_slice_labelled_item_off_the_path_also_holds_off_slice_work() -> None:
+    off_path = replace(ACCESS_SLICE, labels=ACCESS_SLICE.labels | {"needs-gcp"})
+    chosen = pick(tracker(LEFTOVERS_ISSUE, GROUND, off_path, path=()), NOW)
+    assert chosen.number is None
+    assert chosen.rule == f"{SLICE_WAITS} (open: {ref(ACCESS_STEP)})"
+
+
+def test_a_slice_issue_outside_every_epic_is_picked_rather_than_holding_the_queue() -> None:
+    """It counts toward the hold, so step 3 takes it: a hold no step can lift would stall every
+    wake."""
+    done = replace(AGENT_SLICE, state="closed")
+    orphan = issue(OTHER, "platform", SLICE, "ready")
+    chosen = pick(tracker(LEFTOVERS_ISSUE, GROUND, done, orphan), NOW)
+    assert (chosen.number, chosen.rule) == (OTHER, RULE_SLICE_OFF_PATH)
+    held = replace(orphan, labels=orphan.labels | {"needs-owner"})
+    chosen = pick(tracker(LEFTOVERS_ISSUE, GROUND, done, held), NOW)
+    assert chosen.number is None
+    assert dict(chosen.skipped)[OTHER] == "labelled `needs-owner`"
+
+
+def test_a_slice_issue_in_an_epic_comes_before_one_outside_every_epic() -> None:
+    orphan = issue(OTHER, "platform", SLICE, "ready")
+    chosen = pick(tracker(ACCESS_SLICE, orphan, path=()), NOW)
+    assert (chosen.number, chosen.rule) == (ACCESS_STEP, RULE_SLICE_OFF_PATH)
+
+
+def test_once_every_slice_item_is_closed_a_roadmap_item_comes_before_the_leftovers() -> None:
+    """The leftovers issue sits before the ordinary item in the first epic."""
+    done = replace(AGENT_SLICE, state="closed")
+    chosen = pick(tracker(LEFTOVERS_ISSUE, GROUND, done), NOW)
+    assert (chosen.number, chosen.rule) == (GROUND_ITEM, RULE_EPIC)
 
 
 def test_other_items_come_before_leftovers_even_from_a_later_epic() -> None:
@@ -236,7 +271,7 @@ def test_a_closed_item_still_labelled_ready_is_not_picked() -> None:
     closed = replace(AGENT_SLICE, state="closed")
     chosen = pick(tracker(closed, AGENT_SLICE_LATER, path=(AGENT_STEP, AGENT_STEP_LATER)), NOW)
     assert chosen.number == AGENT_STEP_LATER
-    assert dict(chosen.skipped)[AGENT_STEP] == "closed"
+    assert AGENT_STEP not in dict(chosen.skipped)  # a closed step is no slice item
     done = replace(GROUND, state="closed")
     assert pick(tracker(done, path=()), NOW).number is None
 
@@ -452,7 +487,7 @@ def test_a_speculative_pr_closes_its_issue_only_by_a_closing_keyword(
     """A speculative PR only refers to its issue: its `claude/<n>-…` branch closes nothing."""
     assert (AGENT_STEP in closes(change, REPO_NAME)) == closing
     chosen = pick(tracker(AGENT_SLICE, LEFTOVERS_ISSUE, pulls=[change]), NOW)
-    assert chosen.number == (LEFTOVERS if closing else AGENT_STEP)
+    assert chosen.number == (None if closing else AGENT_STEP)
 
 
 @pytest.mark.parametrize(
@@ -617,6 +652,9 @@ def test_no_slice_issue_leaves_every_slice_item_off_the_path_and_says_so() -> No
     assert any("no open issue titled" in w for w in chosen.warnings)
     held = replace(AGENT_SLICE, labels=AGENT_SLICE.labels | {"needs-owner"})
     t = replace(t, issues=dict(t.issues) | {AGENT_STEP: held})
+    assert pick(t, NOW).number is None
+    done = replace(AGENT_SLICE, state="closed")
+    t = replace(t, issues=dict(t.issues) | {AGENT_STEP: done})
     assert pick(t, NOW).number == LEFTOVERS
 
 
@@ -628,8 +666,33 @@ def test_the_labels_and_the_path_disagreeing_are_warned() -> None:
         f"{ref(AGENT_STEP)} is on the slice path but not labelled" in w for w in chosen.warnings
     )
     assert any(f"{ref(ACCESS_STEP)} is labelled `slice` but not on" in w for w in chosen.warnings)
-    # The labelled one off the path comes after the path's steps, before the other sub-issues.
+    # A path step is taken whatever its labels, before the labelled one off the path.
+    assert (chosen.number, chosen.rule) == (AGENT_STEP, RULE_SLICE)
+    held = replace(unlabelled, labels=unlabelled.labels | {"needs-owner"})
+    chosen = pick(tracker(held, off_path, path=(AGENT_STEP,)), NOW)
     assert (chosen.number, chosen.rule) == (ACCESS_STEP, RULE_SLICE_OFF_PATH)
+
+
+def test_a_path_step_without_the_slice_label_is_picked_rather_than_holding_the_queue() -> None:
+    """It counts toward the hold, so step 2 takes it; held, it holds and is named."""
+    step = issue(AGENT_STEP, "agent", "ready")
+    chosen = pick(tracker(LEFTOVERS_ISSUE, GROUND, step), NOW)
+    assert (chosen.number, chosen.rule) == (AGENT_STEP, RULE_SLICE)
+    held = replace(step, labels=step.labels | {"needs-owner"})
+    chosen = pick(tracker(LEFTOVERS_ISSUE, GROUND, held), NOW)
+    assert chosen.number is None
+    assert chosen.rule == f"{SLICE_WAITS} (open: {ref(AGENT_STEP)})"
+
+
+def test_the_slice_issue_without_the_epic_label_neither_holds_nor_is_picked() -> None:
+    """Labelled `slice` and `ready`, on its own path: it is no slice item, so the queue moves on."""
+    done = replace(AGENT_SLICE, state="closed")
+    t = tracker(LEFTOVERS_ISSUE, GROUND, done, path=(SLICE_ISSUE, AGENT_STEP))
+    bare = replace(t.issues[SLICE_ISSUE], labels=frozenset({"agent", SLICE, "ready"}))
+    t = replace(t, issues=dict(t.issues) | {SLICE_ISSUE: bare})
+    chosen = pick(t, NOW)
+    assert (chosen.number, chosen.rule) == (GROUND_ITEM, RULE_EPIC)
+    assert SLICE_ISSUE not in dict(chosen.skipped)
 
 
 def test_a_slice_issue_off_the_path_that_blocks_a_step_comes_before_leftovers() -> None:
@@ -696,15 +759,24 @@ def test_the_queue_steps_name_slice_then_the_other_sub_issues_then_leftover() ->
         return found[0]
 
     roadmap = step_naming("titled `Roadmap`")
-    slice_step = step_naming("labelled `slice`, in path order")
+    slice_step = step_naming("step of the path, in path order")
     leftover = step_naming("labelled `leftover`")
     other = step_naming("the first pickable other sub-issue, in epic order")
     off_path = step_naming("other sub-issue labelled `slice`, off the path")
     assert roadmap < slice_step < off_path < other < leftover
     assert "in path order" in steps[slice_step]
     for later in (off_path, other, leftover):
-        assert steps[later].startswith(f"{later + 1}. Else ")
+        assert re.match(rf"{later + 1}\. Else[ ,]", steps[later])
         assert "in epic order then sub-issue order" in steps[later]
+    for after_slice in (other, leftover):
+        assert "once the slice has no open item" in steps[after_slice]
+
+
+def test_the_queue_section_says_a_held_slice_stops_the_pick() -> None:
+    queue = profile_section("## Queue")
+    assert "Steps 2 and 3 take only the slice's items" in queue
+    assert f"`none: {SLICE_WAITS.split(';')[0]};" in queue
+    assert "never turns to off-slice work or leftovers" in queue
 
 
 def test_the_pickable_line_names_every_skip_label_and_the_stacking_rule() -> None:
@@ -869,11 +941,25 @@ def test_the_live_snapshot_is_read_page_by_page_and_picks_by_the_rule() -> None:
     assert len(t.issues[AGENT_STEP_LATER].comments) == 1
     assert t.pulls[0].head_repo == REPO_NAME and t.pulls[0].author_association == "OWNER"
     # The first step's blocker is closed, so it is picked; with it open, the later step is
-    # claimed, so the leftovers issue is.
+    # claimed, so nothing is: the slice's open steps hold the leftovers issue back.
     assert pick(t, NOW).number == AGENT_STEP
     routes = live_routes() | {f"issues/{BLOCKER}": raw(BLOCKER)}
     chosen = pick(build_tracker(REPO_NAME, FakeGitHub(routes)), NOW)
-    assert (chosen.number, chosen.rule) == (LEFTOVERS, RULE_LEFTOVER)
+    assert chosen.number is None
+    assert chosen.rule.startswith(SLICE_WAITS)
+
+
+def test_a_live_slice_issue_outside_every_epic_is_read_and_picked() -> None:
+    """Its comments and blockers are read like a sub-issue's, so its claim is seen."""
+    orphan = 970
+    routes = live_routes() | {f"issues/{BLOCKER}": raw(BLOCKER)}
+    routes["issues"] = [*routes["issues"], raw(orphan, SLICE, "ready")]
+    routes[f"issues/{orphan}/comments"] = []
+    routes[f"issues/{orphan}/dependencies/blocked_by"] = []
+    github = FakeGitHub(routes)
+    chosen = pick(build_tracker(REPO_NAME, github), NOW)
+    assert (chosen.number, chosen.rule) == (orphan, RULE_SLICE_OFF_PATH)
+    assert any(p.split("?")[0].endswith(f"issues/{orphan}/comments") for p in github.asked)
 
 
 def test_the_live_relation_blocker_is_read() -> None:
@@ -884,7 +970,7 @@ def test_the_live_relation_blocker_is_read() -> None:
     assert t.issues[AGENT_STEP].blocked_by == (BLOCKER + 1,)
     assert t.issues[BLOCKER + 1].state == "open"
     chosen = pick(t, NOW)
-    assert chosen.number == LEFTOVERS
+    assert chosen.number is None
     assert dict(chosen.skipped)[AGENT_STEP] == f"blocked by {ref(BLOCKER + 1)}, open"
 
 
@@ -929,7 +1015,7 @@ def test_live_prs_keep_their_author_and_head_repository() -> None:
     ]
     assert pick(t, NOW).number == AGENT_STEP
     routes["pulls"] = [raw_pr(963, f"Closes {ref(AGENT_STEP)}", "claude/x")]
-    assert pick(build_tracker(REPO_NAME, FakeGitHub(routes)), NOW).number == LEFTOVERS
+    assert pick(build_tracker(REPO_NAME, FakeGitHub(routes)), NOW).number is None
 
 
 @pytest.mark.parametrize("title", ["Roadmap", "Autopilot digest", "Thin slice: a second"])
@@ -996,7 +1082,8 @@ def test_the_cli_says_none_when_nothing_is_pickable(capsys: pytest.CaptureFixtur
         for r in routes["issues"]
     ]
     assert main([], get=FakeGitHub(routes)) == 3
-    assert capsys.readouterr().out == "none: nothing pickable\n"
+    out = capsys.readouterr().out
+    assert out == f"none: {SLICE_WAITS} (open: {ref(AGENT_STEP)}, {ref(AGENT_STEP_LATER)})\n"
 
 
 def test_gh_is_called_once_for_one_page_through_rest(monkeypatch: pytest.MonkeyPatch) -> None:
