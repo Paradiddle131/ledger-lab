@@ -1,18 +1,23 @@
-"""Answer integrity (`agent/integrity.py`): each number of an answer's text traced to a cell of a
-run it cites, the logged query re-run as the asking persona, and no number shown where none is
-traced.
+"""Answer integrity (`agent/integrity.py`): the model writes no figure, `ask` renders each one from
+a cell of a run the turn cites, the logged query is re-run as the asking persona, and a reply that
+cannot be shown that way is withheld and recorded as withheld.
 
 The asks run on the scripted model (`agent/model.py`) or a hand-written one, through the
 `as_persona` fixture (`tests/conftest.py`), so every query runs on a database compiled for the
-asking persona over the sample build; nothing here calls a model or GCP. The pure checks run on
-hand-made citations and on a small database of invented tables.
+asking persona over the sample build; a verified query of invented figures (`INVENTED`) returns
+chosen cells there. Nothing here calls a model or GCP. The pure checks run on hand-made citations
+and on a small database of invented tables.
 """
 
 import json
 import re
 import shutil
+import sys
+import unicodedata
+import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -24,8 +29,19 @@ import agent.integrity
 from access.compile import quote
 from agent.ask import CAPPED, MAX_TOOL_CALLS, Answer, Audit, ask, load_context
 from agent.audit import FileLog, bind, cell_text, new_salt, read_log, seal, sealed_result
-from agent.integrity import WITHHELD, Logged, logged, numbers, reproduce, same, trace
-from agent.model import Citation, Model, Reply, ToolCall, Turn, model_from_config
+from agent.integrity import (
+    REFERENCE,
+    WITHHELD,
+    Logged,
+    Unrendered,
+    check,
+    logged,
+    render,
+    rendered,
+    reproduce,
+    same,
+)
+from agent.model import Citation, Model, Reply, ToolCall, Turn, VerifiedQuery, model_from_config
 
 AsPersona = Callable[[str], duckdb.DuckDBPyConnection]
 CHICAGO = "accountant-chicago"
@@ -33,6 +49,10 @@ AUDITOR = "auditor"
 UK = "accountant-uk-transport"
 QUESTION = "What share of the City of Chicago's served payment rows repeat another served row?"
 BY_YEAR = "What was spent on each basis in each fiscal year, in euros at constant rates?"
+BY_BASIS = "What was spent on each basis, in euros at constant rates?"
+BY_ENTITY = (
+    "What did each entity spend, in euros at constant rates, where all its figures share one basis?"
+)
 BY_MONTH = (
     "By month of payment date, what share of the City of Chicago's served payment rows repeat"
     " another served row?"
@@ -40,12 +60,32 @@ BY_MONTH = (
 QUERY_OF = {
     QUESTION: "duplicate-payment-rate",
     BY_YEAR: "constant-currency-spend-by-basis-and-fiscal-year",
+    BY_BASIS: "constant-currency-spend-by-basis",
+    BY_ENTITY: "constant-currency-spend-by-entity",
     BY_MONTH: "duplicate-payment-rate-by-month",
 }
+SHARE = "{duplicate-payment-rate:1:duplicate_payment_rate}"
 OUTSIDE = "Which vendor was paid the most?"
 # A question whose verified query reads a table no persona's database holds, so its run fails.
 UNREADABLE = "What share of the City of Chicago's fixed contract awards has been paid?"
 WRITTEN = datetime(2020, 1, 2, 3, 4, 5, tzinfo=UTC)
+# A verified query of invented figures, put to the tool policy as a metric Chicago's accountant
+# may read, so a test chooses the cells a run returns on the persona's own database.
+INVENTED_QUESTION = "What are the invented figures?"
+INVENTED_SQL = (
+    "select cast('12.25' as double) as a, 1 as b, 0 as c, 12250 as d,"
+    " cast('52.21' as double) as e, cast('-12.25' as double) as f"
+)
+INVENTED = {
+    "invented-figures": VerifiedQuery(
+        "invented-figures", INVENTED_QUESTION, "duplicate_payment_rate", 1, INVENTED_SQL
+    )
+}
+
+
+def cell(column: str) -> str:
+    """A reference to a cell of the invented figures' one row."""
+    return f"{{invented-figures:1:{column}}}"
 
 
 def records(audit: Audit) -> list[dict[str, Any]]:
@@ -63,10 +103,18 @@ def last_logged(audit: Audit) -> tuple[Logged, ...]:
     return logged(record, kept(audit, record["seq"]))
 
 
+def recorded_answer(audit: Audit) -> Any:
+    """The answer text the turn's record seals, as the kept value opens it."""
+    record = records(audit)[-1]
+    salt, value = kept(audit, record["seq"])["answer"]
+    assert seal(salt, value) == record["answer"]
+    return value
+
+
 class Saying:
     """Runs the query it is given (none for None), then replies with a fixed text."""
 
-    def __init__(self, query: str | None, text: str) -> None:
+    def __init__(self, query: str | None, text: Any) -> None:
         self._query, self._text = query, text
 
     def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
@@ -78,11 +126,12 @@ class Saying:
         return ToolCall(self._query)
 
 
-class Perturbing:
-    """The scripted model, with a digit added to the last number of its reply."""
+class Recording:
+    """A model's steps unchanged, with the text of its reply kept (`said`) and, when `change` is
+    given, that text changed by it before `ask` sees it."""
 
-    def __init__(self, model: Model) -> None:
-        self._model = model
+    def __init__(self, model: Model, change: Callable[[str], str] | None = None) -> None:
+        self._model, self._change = model, change
         self.said = ""
 
     def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
@@ -92,15 +141,8 @@ class Perturbing:
         step = self._model.step(turn)
         if isinstance(step, ToolCall):
             return step
-        self.said = perturbed(step.text, -1)
+        self.said = step.text if self._change is None else self._change(step.text)
         return Reply(self.said)
-
-
-def perturbed(text: str, index: int) -> str:
-    """`text` with a 7 written after its `index`-th number, as `numbers` reads them: the same
-    number with one more digit, so it names another value."""
-    _, end = numbers(text)[index]
-    return text[:end] + "7" + text[end:]
 
 
 @pytest.fixture
@@ -108,76 +150,112 @@ def scripted() -> Model:
     return model_from_config({}, load_context())
 
 
+def shown(text: str, as_persona: AsPersona, audit: Audit) -> str:
+    """What `ask` shows for a reply of `text` to the invented figures' question, the recorded
+    answer checked to be that same text."""
+    model = Saying("invented-figures", text)
+    answer = ask(
+        CHICAGO,
+        INVENTED_QUESTION,
+        as_persona=as_persona,
+        audit=audit,
+        model=model,
+        queries=INVENTED,
+    )
+    assert len(answer.citations) == 1
+    assert recorded_answer(audit) == answer.text
+    expected = "abstained" if answer.text == WITHHELD else "answered"
+    assert records(audit)[-1]["outcome"] == expected
+    return answer.text
+
+
 # The logged query reproduces the answer
 
 
 @pytest.mark.parametrize(
     ("asker", "question"),
-    [(CHICAGO, QUESTION), (AUDITOR, BY_YEAR), (AUDITOR, BY_MONTH)],
-    ids=["a-share", "decimals-years-and-coded-text", "months-and-zeros"],
+    [
+        (CHICAGO, QUESTION),
+        (AUDITOR, BY_YEAR),
+        (AUDITOR, BY_BASIS),
+        (AUDITOR, BY_ENTITY),
+        (AUDITOR, BY_MONTH),
+    ],
+    ids=[
+        "a-share",
+        "decimals-years-and-coded-text",
+        "decimals-and-text",
+        "text-and-a-null",
+        "months-and-zeros",
+    ],
 )
 def test_logged_query_reproduces_the_answer(
     as_persona: AsPersona, scripted: Model, audit: Audit, asker: str, question: str
 ) -> None:
-    """An answer of the scripted model: each number of its text is a cell of the run it cites,
-    and the query its record logged, re-run as the record's persona, returns that run's rows and
-    matches the record's sealed result."""
-    answer = ask(asker, question, as_persona=as_persona, audit=audit)
+    """An answer of the scripted model: its reply names every cell of the run it cites by a
+    reference and writes no digit; the text shown and recorded is that reply with each reference
+    rendered from its cell; and the query its record logged, re-run as the record's persona,
+    returns that run's rows and matches the record's sealed result."""
+    model = Recording(scripted)
+    answer = ask(asker, question, as_persona=as_persona, audit=audit, model=model)
     assert records(audit)[-1]["outcome"] == "answered"
     (citation,) = answer.citations
     assert citation.rows, "a run with no rows proves nothing here"
-    report = trace(answer.text, answer.citations)
-    assert report.failures == ()
-    # Each number cell of the run is written in the text and traced to the run's citation.
-    traced = {
-        Decimal(t.number.replace(",", "")) for t in report.traced if t.query == QUERY_OF[question]
+    assert not re.search(r"[0-9]", REFERENCE.sub("", model.said))
+    result = check(question, model.said, answer.citations, load_context())
+    assert result.failures == ()
+    assert answer.text == result.text == recorded_answer(audit)
+    named = {(r.row, r.column): r.rendered for r in result.references}
+    assert named == {
+        (number, column): rendered(value)
+        for number, row in enumerate(citation.rows, start=1)
+        for column, value in zip(citation.columns, row, strict=True)
     }
-    cells = {
-        Decimal(repr(v) if isinstance(v, float) else v)
-        for row in citation.rows
-        for v in row
-        if isinstance(v, int | float | Decimal) and not isinstance(v, bool)
-    }
-    assert cells and cells <= traced
     rerun = reproduce(answer, last_logged(audit), as_persona)
     assert rerun.failures == ()
     assert rerun.reproduced == (citation.query,)
 
 
-def test_each_number_of_a_many_row_answer_is_caught_with_a_digit_appended(
-    as_persona: AsPersona, scripted: Model, audit: Audit
-) -> None:
-    """Each number of the auditor's answer by basis and fiscal year, with a 7 appended to it on
-    its own, is reported by that changed text; the unchanged text passes."""
-    answer = ask(AUDITOR, BY_YEAR, as_persona=as_persona, audit=audit)
-    assert trace(answer.text, answer.citations).failures == ()
-    found = numbers(answer.text)
-    assert len(found) >= 6
-    for index in range(len(found)):
-        text = perturbed(answer.text, index)
-        start, end = numbers(text)[index]
-        failures = trace(text, answer.citations).failures
-        assert text[start:end] in [f.number for f in failures], text
-
-
 def test_a_perturbed_number_in_a_scripted_answer_is_caught(
     as_persona: AsPersona, scripted: Model, audit: Audit
 ) -> None:
-    """The scripted reply with a 7 appended to its figure: `trace` names the changed number,
-    and `ask` shows no number, recording the turn as abstained with the run it made."""
-    model = Perturbing(scripted)
-    answer = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=model)
-    (citation,) = answer.citations
-    ((share,),) = citation.rows
-    start, end = numbers(model.said)[-1]
-    changed = model.said[start:end]
-    assert changed == f"{share!r}7"
-    (failure,) = trace(model.said, answer.citations).failures
-    assert (failure.number, failure.query) == (changed, None)
-    assert answer.text == WITHHELD and not re.search(r"\d", answer.text)
-    record = records(audit)[-1]
-    assert (record["outcome"], len(record["runs"])) == ("abstained", 1)
-    assert kept(audit, record["seq"])["answer"][1] == WITHHELD
+    """The scripted reply with its reference replaced by the figure written out and a 7 appended,
+    or by the exact figure written out, or with the reference's row or column changed: each is
+    withheld, the turn recorded abstained with the run it made."""
+    share = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit).citations[0].rows[0][0]
+    changes = [
+        lambda text: text.replace(SHARE, f"{share!r}7"),
+        lambda text: text.replace(SHARE, repr(share)),
+        lambda text: text.replace(SHARE, SHARE.replace(":1:", ":2:")),
+        lambda text: text.replace(SHARE, SHARE.replace("_rate}", "_rates}")),
+    ]
+    for change in changes:
+        model = Recording(scripted, change)
+        answer = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=model)
+        assert model.said and model.said != answer.text
+        assert answer.text == WITHHELD and not re.search(r"\d", answer.text)
+        record = records(audit)[-1]
+        assert (record["outcome"], len(record["runs"])) == ("abstained", 1)
+        assert recorded_answer(audit) == WITHHELD
+
+
+def test_each_figure_of_a_many_row_answer_written_by_the_model_is_withheld(
+    as_persona: AsPersona, scripted: Model, audit: Audit
+) -> None:
+    """Each reference of the auditor's answer by basis and fiscal year, replaced on its own by its
+    own rendering or by that rendering with a 7 appended, gets the reply withheld; the reply as
+    the model wrote it renders."""
+    model = Recording(scripted)
+    answer = ask(AUDITOR, BY_YEAR, as_persona=as_persona, audit=audit, model=model)
+    queries = load_context()
+    references = check(BY_YEAR, model.said, answer.citations, queries).references
+    assert len(references) >= 9
+    figures = [r for r in references if re.search(r"[0-9]", r.rendered)]
+    assert len(figures) >= 6
+    for reference in figures:
+        for written in (reference.rendered, reference.rendered + "7"):
+            text = model.said.replace(reference.written, written, 1)
+            assert check(BY_YEAR, text, answer.citations, queries).text is None, text
 
 
 def test_a_changed_warehouse_is_caught_on_re_run(
@@ -212,13 +290,7 @@ def test_a_changed_warehouse_is_caught_on_re_run(
     assert report.reproduced == ()
 
 
-# No number where no verified query covers the question
-
-
-def share_of_chicago(as_persona: AsPersona, audit: Audit) -> float:
-    """The figure the verified duplicate-payment query returns for Chicago's accountant."""
-    ((share,),) = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit).citations[0].rows
-    return share
+# No figure where no verified query covers the question
 
 
 @pytest.mark.parametrize("model", ["scripted", "quotes-another-query"])
@@ -226,13 +298,12 @@ def test_a_question_outside_the_metrics_gets_an_abstention(
     as_persona: AsPersona, audit: Audit, model: str
 ) -> None:
     """A question no verified query is worded as: the scripted model calls no tool; a model that
-    runs an unrelated verified query and quotes its cell gets the reply withheld. Either way no
-    digit is shown and the turn is abstained."""
-    share = share_of_chicago(as_persona, audit)
+    runs an unrelated verified query and references its cell gets the reply withheld. Either way
+    no digit is shown and the turn is abstained."""
     chosen = (
         model_from_config({}, load_context())
         if model == "scripted"
-        else Saying("duplicate-payment-rate", f"The top vendor was paid {share!r}.")
+        else Saying("duplicate-payment-rate", f"The top vendor was paid {SHARE}.")
     )
     answer = ask(CHICAGO, OUTSIDE, as_persona=as_persona, audit=audit, model=chosen)
     assert answer.text == WITHHELD and not re.search(r"\d", answer.text)
@@ -243,28 +314,33 @@ def test_only_a_verified_question_as_worded_is_answered(
     as_persona: AsPersona, audit: Audit
 ) -> None:
     """The verified question with its case, white space and compatibility forms changed is
-    answered; a paraphrase of it, with the same run and figure, is withheld."""
-    share = share_of_chicago(as_persona, audit)
+    answered; a paraphrase of it, with the same run and reference, is withheld."""
     # Upper case, doubled spaces and a fullwidth letter, which NFKC makes the plain one.
-    reworded = "  " + QUESTION.upper().replace(" ", "  ").replace("ROWS", "\uff32OWS")
+    reworded = "  " + QUESTION.upper().replace(" ", "  ").replace("ROWS", "ＲOWS")
     assert same(reworded, QUESTION)
     paraphrase = "How often does a served Chicago payment row repeat another?"
-    for question, shown in [(reworded, True), (paraphrase, False)]:
-        model = Saying("duplicate-payment-rate", f"The share is {share!r}.")
+    for question, answered in [(reworded, True), (paraphrase, False)]:
+        model = Saying("duplicate-payment-rate", f"The share is {SHARE}.")
         answer = ask(CHICAGO, question, as_persona=as_persona, audit=audit, model=model)
         assert (answer.text != WITHHELD, records(audit)[-1]["outcome"]) == (
-            shown,
-            "answered" if shown else "abstained",
+            answered,
+            "answered" if answered else "abstained",
         )
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The top vendor was paid about one point two million, ¹² dollars.",
+        f"The top vendor was paid {SHARE}.",
+        "The top vendor was paid a lot.",
+    ],
+    ids=["figures-in-words-and-numerals", "a-reference", "prose"],
+)
 def test_a_reply_with_no_cited_run_is_withheld_whatever_it_says(
-    as_persona: AsPersona, audit: Audit
+    as_persona: AsPersona, audit: Audit, text: str
 ) -> None:
-    """Figures in words or in numerals that are no decimal digit, with no run: not shown."""
-    model = Saying(
-        None, "The top vendor was paid about one point two million, \u00b9\u00b2 dollars."
-    )
+    model = Saying(None, text)
     answer = ask(CHICAGO, OUTSIDE, as_persona=as_persona, audit=audit, model=model)
     assert answer.text == WITHHELD
     assert records(audit)[-1]["outcome"] == "abstained"
@@ -296,56 +372,215 @@ def test_a_turn_stopped_at_the_cap_shows_its_own_message(
         assert (record["outcome"], record["reason"]) == ("stopped", "model-refusal-cap")
 
 
-@pytest.mark.parametrize("cause", ["an-unreadable-exponent", "a-check-that-raises"])
+@pytest.mark.parametrize(
+    "cause", ["an-unrendered-cell", "a-check-that-raises", "a-reply-that-is-no-string"]
+)
 def test_a_reply_the_check_cannot_read_is_withheld_and_recorded(
     as_persona: AsPersona, audit: Audit, monkeypatch: pytest.MonkeyPatch, cause: str
 ) -> None:
-    """A number whose value cannot be read is reported; a check that raises withholds the reply;
-    either way the turn's record is written."""
-    text = "It was 1e999999999999999999999."
-    (failure,) = trace(text, (cited(((0.5,),)),)).failures
-    assert (failure.number, failure.reason) == (
-        "1e999999999999999999999",
-        "its value cannot be read",
-    )
-    if cause == "a-check-that-raises":
+    """A cell the renderer does not write, a check that raises and a reply that is not a string
+    each withhold the reply, and the turn's record is written, abstained with its run."""
+    text: Any = f"The share is {SHARE}."
+    if cause == "an-unrendered-cell":
+
+        def unrendered(_: Any) -> str:
+            raise Unrendered("a cell the renderer does not write")
+
+        monkeypatch.setattr(agent.integrity, "rendered", unrendered)
+    elif cause == "a-check-that-raises":
 
         def raising(*_: Any) -> Any:
             raise RuntimeError("the check failed")
 
-        monkeypatch.setattr(agent.integrity, "trace", raising)
-        text = "The share is 0.5."
+        monkeypatch.setattr(agent.integrity, "render", raising)
+    else:
+        text = 0.04054054054054054
     model = Saying("duplicate-payment-rate", text)
     answer = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=model)
     assert answer.text == WITHHELD
     record = records(audit)[-1]
     assert (record["outcome"], len(record["runs"])) == ("abstained", 1)
+    assert recorded_answer(audit) == WITHHELD
 
 
-# Signs written otherwise than as an ASCII minus touching the digits: each review of the sign rule
-# found some of these, and none is read as a sign.
+@pytest.mark.parametrize("text", ["", "   \n "])
+def test_an_empty_reply_is_withheld(as_persona: AsPersona, audit: Audit, text: str) -> None:
+    assert shown(text, as_persona, audit) == WITHHELD
+
+
+def test_a_reply_of_prose_alone_is_shown(as_persona: AsPersona, audit: Audit) -> None:
+    """A stated limit: prose with no reference states no figure and is shown on a covering run."""
+    assert shown("The share is high.", as_persona, audit) == "The share is high."
+
+
+# The five forms a review of reading the model's own figures found: each either shows the cell's
+# own rendering or is withheld. The first of each pair is the review's own reproduction, where the
+# model writes the figure; the second puts a reference in the figure's place.
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The total is ‮52.21‬.",
+        "paid ‮1234‬",
+        f"The total is ‮{cell('e')}‬.",
+        f"The total is ⁧{cell('e')}⁩.",
+        f"The total is ‏{cell('e')}.",
+        f"The total is {cell('e')}؜.",
+    ],
+)
+def test_a_bidi_control_around_a_figure_is_withheld(
+    as_persona: AsPersona, audit: Audit, text: str
+) -> None:
+    """A bidi override or isolate, a direction mark or the Arabic letter mark beside a figure is
+    withheld: the text shown is the text recorded, so no shown text differs from a checked one."""
+    assert shown(text, as_persona, audit) == WITHHELD
+
+
+def test_the_text_shown_is_the_text_recorded(as_persona: AsPersona, audit: Audit) -> None:
+    """The reply's references rendered, with no brace left: what `ask` returns and what the
+    record seals are that same text."""
+    text = shown(f"The total is {cell('e')}, and the loss is {cell('f')}.", as_persona, audit)
+    assert text == "The total is 52.21, and the loss is -12.25."
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The share is О.ОƼ.",
+        f"paid ⲻ {cell('a')}",
+        f"paid −{cell('a')}",
+        f"paid － {cell('a')}",
+        "paid １２.２５",
+        "paid \U0001d7cf\U0001d7d0",
+        f"The share is {cell('a')}⁰.",
+    ],
+)
+def test_a_look_alike_of_a_digit_or_a_minus_is_withheld(
+    as_persona: AsPersona, audit: Audit, text: str
+) -> None:
+    """Cyrillic O and Latin tone five for 0.05, a Coptic letter or a Unicode minus before a
+    positive figure, fullwidth and mathematical digits, a superscript zero: each is withheld."""
+    assert shown(text, as_persona, audit) == WITHHELD
+
+
+def test_no_character_outside_ascii_passes_in_the_prose() -> None:
+    """Every code point outside ASCII, each Unicode digit, numeral and letter that folds to a digit
+    under NFKC among them, is reported where the prose holds it."""
+    citation = cited(((Decimal("12.25"),),))
+    chars = [chr(code) for code in range(0x80, sys.maxunicode + 1) if not 0xD800 <= code <= 0xDFFF]
+    digits = [
+        c
+        for c in chars
+        if unicodedata.category(c) in ("Nd", "No", "Nl")
+        or any(d.isdigit() for d in unicodedata.normalize("NFKC", c))
+    ]
+    assert len(digits) > 1000
+    for start in range(0, len(chars), 4096):
+        chunk = chars[start : start + 4096]
+        result = render(f"It is {{invented:1:c0}} {''.join(chunk)}", (citation,))
+        assert result.text is None
+        assert [f.number for f in result.failures] == chunk
+    assert rendering(f"It is {{invented:1:c0}} {''.join(digits)}", citation) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The change is mіnus 12.25",
+        "a lоss of 12.25",
+        "a net-loss of 12.25",
+        "down about 12.25",
+    ],
+)
+def test_a_sign_word_beside_a_figure_the_model_writes_is_withheld(
+    as_persona: AsPersona, audit: Audit, text: str
+) -> None:
+    assert shown(text, as_persona, audit) == WITHHELD
+
+
+@pytest.mark.parametrize("words", ["a net-loss of {}", "down about {}", "minus {}"])
+def test_a_sign_word_beside_a_reference_shows_the_cells_own_sign(
+    as_persona: AsPersona, audit: Audit, words: str
+) -> None:
+    """A stated limit: the sign word is prose and is shown as written; the figure beside it is the
+    cell's own, with no sign for the positive cell and a minus for the negative one."""
+    text = f"The change is {words.format(cell('a'))}, then {words.format(cell('f'))}."
+    expected = f"The change is {words.format('12.25')}, then {words.format('-12.25')}."
+    assert shown(text, as_persona, audit) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["spend was 12.25 in millions", "spend was 12.25 USD million", "in thousands: 12250"],
+)
+def test_a_scale_word_beside_a_figure_the_model_writes_is_withheld(
+    as_persona: AsPersona, audit: Audit, text: str
+) -> None:
+    assert shown(text, as_persona, audit) == WITHHELD
+
+
+def test_a_scale_word_beside_a_reference_shows_the_cells_own_figure(
+    as_persona: AsPersona, audit: Audit
+) -> None:
+    """A stated limit: the scale word is prose and shown as written, beside the cell's figure."""
+    text = f"spend was {cell('a')} in millions, in thousands: {cell('d')}"
+    assert shown(text, as_persona, audit) == "spend was 12.25 in millions, in thousands: 12250"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The spend was 1'000.",
+        "The spend was 1 000.",
+        "The spend was 1’000.",
+        "The spend was 1\xa0000.",
+        f"The spend was {cell('b')} {cell('c')}.",
+        f"The spend was {cell('b')}'{cell('c')}.",
+        f"The spend was {cell('b')}, {cell('d')}.",
+        f"The spend was {cell('b')},{cell('d')}.",
+        f"The spend was {cell('b')}.{cell('c')}.",
+        f"The spend was {cell('b')}{cell('c')}.",
+        f"The spend was {cell('b')}\n{cell('c')}.",
+        f"The spend was {cell('b')} = {cell('c')}.",
+    ],
+)
+def test_two_figures_with_no_letter_between_are_withheld(
+    as_persona: AsPersona, audit: Audit, text: str
+) -> None:
+    """A thousands group written by the model, or two references parted by nothing but space or
+    punctuation, could read as one figure: withheld."""
+    assert shown(text, as_persona, audit) == WITHHELD
+
+
+def test_two_references_parted_by_a_word_are_shown(as_persona: AsPersona, audit: Audit) -> None:
+    text = f"The spend was {cell('b')} and {cell('d')}, or {cell('c')}."
+    assert shown(text, as_persona, audit) == "The spend was 1 and 12250, or 0."
+
+
+# Signs written around a figure: every form the earlier reviews of the sign rule found.
 UNREAD = [
-    "\u2212{}",
-    "\u2010{}",
-    "\u2013{}",
-    "\u2014{}",
-    "\u02d7{}",
-    "\u2796{}",
-    "\u2e3a{}",
-    "\u2212\u2060{}",
+    "−{}",
+    "‐{}",
+    "–{}",
+    "—{}",
+    "˗{}",
+    "➖{}",
+    "⸺{}",
+    "−⁠{}",
     "{}-",
-    "{}\u2212",
+    "{}−",
     "({})",
     "( {} )",
     "( {}",
-    "(\u200b{})",
-    "(\u2212{})",
-    "\ufe59{}\ufe5a",
-    "\uff08{}\uff09",
+    "(​{})",
+    "(−{})",
+    "﹙{}﹚",
+    "（{}）",
     "-${}",
     "(${})",
     "($ {})",
-    "\u2212\u20ac{}",
+    "−€{}",
     "- {}",
     "-\xa0{}",
     "- USD {}",
@@ -382,37 +617,292 @@ UNREAD = [
     "{} percent",
     "{} per cent",
 ]
-# Forms that fold (NFKC, format characters dropped) to an ASCII minus touching the digits, so are
-# read as that minus.
-FOLDED_MINUS = ["\ufe63{}", "\uff0d{}", "-\u200b{}", "-\xad{}", "-\u2060{}", "-\ufeff{}"]
+FOLDED_MINUS = ["﹣{}", "－{}", "-​{}", "-\xad{}", "-⁠{}", "-﻿{}"]
+# The forms whose characters are all prose: a reference in their place is shown, the words read
+# as the stated limit says.
+IN_WORDS = {
+    "minus {}",
+    "negative {}",
+    "Negative: {}",
+    "down {}",
+    "down by {}",
+    "a loss of {}",
+    "a deficit of {}",
+    "{} CR",
+    "{} DR",
+    "{} negative",
+    "{} million",
+    "{} bn",
+    "{} percent",
+    "{} per cent",
+}
 
 
 @pytest.mark.parametrize("form", UNREAD + FOLDED_MINUS)
-def test_a_sign_flipped_figure_is_withheld(as_persona: AsPersona, audit: Audit, form: str) -> None:
-    """The cited positive share written with a sign the check does not read, or a minus it folds
-    to: withheld, not answered."""
-    share = share_of_chicago(as_persona, audit)
-    model = Saying("duplicate-payment-rate", f"The share is {form.format(repr(share))}.")
-    answer = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=model)
-    assert answer.text == WITHHELD
-    assert records(audit)[-1]["outcome"] == "abstained"
+def test_a_sign_form_around_a_figure_the_model_writes_is_withheld(
+    as_persona: AsPersona, audit: Audit, form: str
+) -> None:
+    assert shown(f"The figure is {form.format('12.25')}.", as_persona, audit) == WITHHELD
 
 
-@pytest.mark.parametrize("form", ["{}", "{},", '"{}"', "\u2018{}\u2019", "{}!"])
-def test_a_figure_written_plainly_is_shown(as_persona: AsPersona, audit: Audit, form: str) -> None:
-    """The cited share written plainly, in quotes or before closing punctuation, is shown and the
-    turn answered."""
-    share = share_of_chicago(as_persona, audit)
-    text = f"The share is {form.format(repr(share))}."
-    model = Saying("duplicate-payment-rate", text)
-    answer = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=model)
-    assert answer.text == text
-    assert records(audit)[-1]["outcome"] == "answered"
+@pytest.mark.parametrize("form", UNREAD + FOLDED_MINUS)
+def test_a_sign_form_around_a_reference_is_withheld_or_shows_the_cell(form: str) -> None:
+    """Each form with a reference in the figure's place: withheld when it holds a symbol, a
+    character outside ASCII or a character touching the reference; shown, with the cell's own
+    figure, only when it is words."""
+    citation = cited(((Decimal("12.25"),),))
+    result = render(f"The figure is {form.format('{invented:1:c0}')}.", (citation,))
+    if form in IN_WORDS:
+        assert result.text == f"The figure is {form.format('12.25')}."
+    else:
+        assert result.text is None
+
+
+# The rule, on hand-made citations
+
+
+def cited(
+    rows: tuple[tuple[Any, ...], ...],
+    *,
+    query: str = "invented",
+    columns: tuple[str, ...] | None = None,
+    fresh: datetime | None = WRITTEN,
+) -> Citation:
+    if columns is None:
+        columns = tuple(f"c{i}" for i in range(len(rows[0]))) if rows else ("c0",)
+    return Citation(query, "invented_metric", 3, "select 1", columns, rows, fresh)
+
+
+def rendering(text: str, *citations: Citation) -> str | None:
+    return render(text, citations).text
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [
+        (0.04054054054054054, "0.04054054054054054"),
+        (-12.25, "-12.25"),
+        (1e16, "10000000000000000"),
+        (1e-7, "0.0000001"),
+        (-0.0, "0.0"),
+        (0.0, "0.0"),
+        (Decimal("17947.690000"), "17947.690000"),
+        (Decimal("-0.00"), "0.00"),
+        (Decimal("1E+2"), "100"),
+        (Decimal("-12.25"), "-12.25"),
+        (2026, "2026"),
+        (-5, "-5"),
+        (0, "0"),
+        (None, "null"),
+        (True, "true"),
+        (False, "false"),
+        (date(2026, 10, 1), "2026-10-01"),
+        (datetime(2026, 10, 1), "2026-10-01T00:00:00"),
+        (time(3, 4, 5), "03:04:05"),
+        ("payments-over-25k", "payments-over-25k"),
+        ("12.25", "12.25"),
+    ],
+)
+def test_a_cell_is_rendered_in_one_fixed_format(value: Any, text: str) -> None:
+    """A number in positional notation with every digit it carries, a minus below zero and no sign
+    at zero, none rounded; a null, a bool, a date or time as a fixed word or its ISO text; a text
+    cell as its own text."""
+    assert rendered(value) == text
+    assert rendering("It is {invented:1:c0}.", cited(((value,),))) == f"It is {text}."
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        float("nan"),
+        float("inf"),
+        -float("inf"),
+        Decimal("NaN"),
+        Decimal("sNaN"),
+        Decimal("Infinity"),
+        Decimal("1E+1000000"),
+        Decimal("1E-1000000"),
+        5e-324,
+        10**63,
+        -(10**63),
+        "",
+        "‮12.25",
+        "-12·25",
+        "a {brace}",
+        "a\nline",
+        "x" * 201,
+        uuid.UUID(int=1),
+        b"12",
+        [1, 2],
+    ],
+)
+def test_a_cell_the_renderer_does_not_write_withholds_the_reply(value: Any) -> None:
+    with pytest.raises(Unrendered):
+        rendered(value)
+    result = render("It is {invented:1:c0}.", (cited(((value,),)),))
+    assert result.text is None
+    assert "not rendered" in result.failures[0].reason
+
+
+def test_the_longest_numbers_rendered() -> None:
+    assert rendered(10**63 - 1) == "9" * 63
+    assert rendered(-(10**63 - 1)) == "-" + "9" * 63
+    assert len(rendered(Decimal("1E+61"))) == 62
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "{invented:1:c0",
+        "invented:1:c0}",
+        "{invented:01:c0}",
+        "{invented:0:c0}",
+        "{invented:-1:c0}",
+        "{invented:+1:c0}",
+        "{invented:1.0:c0}",
+        "{Invented:1:c0}",
+        "{invented:1:C0}",
+        "{invented: 1:c0}",
+        "{ invented:1:c0}",
+        "{invented:1:c0 }",
+        "{invented::c0}",
+        "{invented:1}",
+        "{invented:1:c0:c0}",
+        "{{invented:1:c0}}",
+        "{invented:1:c0}}",
+        "{{invented:1:c0}",
+        "{invented:{invented:1:c0}:c0}",
+        "{invented:１:c0}",
+        "{invented:1:cа}",
+        "{invented:1234567890:c0}",
+    ],
+)
+def test_a_malformed_reference_is_withheld_and_nothing_of_it_rendered(text: str) -> None:
+    citation = cited(((Decimal("12.25"),),))
+    result = render(f"It is {text} now.", (citation,))
+    assert result.text is None
+    assert result.failures
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("-", ""),
+        ("(", ")"),
+        ("$", ""),
+        ("+", ""),
+        ("", "%"),
+        ('"', '"'),
+        ("'", "'"),
+        ("_", "_"),
+        ("*", "*"),
+        ("a", ""),
+        ("", "a"),
+        ("", "k"),
+        ("=", ""),
+        (":", ""),
+        ("", ".a"),
+        ("", ".."),
+        ("", ".-"),
+        ("", "-"),
+        ("", "'"),
+        ("\t", ""),
+        ("\r", ""),
+        ("", "\x08\x08"),
+        ("\x1b[7m", ""),
+        ("#", ""),
+        ("~", ""),
+        ("", "/"),
+        ("", "e"),
+    ],
+)
+def test_a_character_touching_a_reference_is_withheld(before: str, after: str) -> None:
+    citation = cited(((Decimal("12.25"),),))
+    assert rendering(f"It is {before}{{invented:1:c0}}{after} now", citation) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("{invented:1:c0}", "12.25"),
+        ("It is {invented:1:c0}", "It is 12.25"),
+        ("It is {invented:1:c0}.", "It is 12.25."),
+        ("It is {invented:1:c0}, it is.", "It is 12.25, it is."),
+        ("It is {invented:1:c0}!\nYes.", "It is 12.25!\nYes."),
+        ("It is:\n{invented:1:c0} now", "It is:\n12.25 now"),
+        ("c_zero = {invented:1:c0}; well-known", "c_zero = 12.25; well-known"),
+        ('"It is" {invented:1:c0}?', '"It is" 12.25?'),
+    ],
+)
+def test_a_reference_set_off_by_space_or_closing_punctuation_is_rendered(
+    text: str, expected: str
+) -> None:
+    assert rendering(text, cited(((Decimal("12.25"),),))) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["a - b", "a -b", "a- b", "-a", "a-", "a--b", "a-б", "1", "a\tb", "a#b", "a(b)", "a%"],
+)
+def test_prose_holds_a_hyphen_only_between_two_letters(text: str) -> None:
+    assert rendering(text, cited(((1,),))) is None
+    assert rendering("well-known and so-called", cited(((1,),))) == "well-known and so-called"
+
+
+def test_each_character_the_prose_may_not_hold_is_named_with_its_reason() -> None:
+    result = render("It is 7 ١ { now", (cited(((1,),)),))
+    assert [(f.number, f.reason) for f in result.failures] == [
+        ("7", "a digit outside a reference: the model writes no figure"),
+        ("١", "a character that is not ASCII (ARABIC-INDIC DIGIT ONE) outside a reference"),
+        ("{", "a brace that is not part of a whole reference"),
+    ]
+    (failure,) = render(0.5, (cited(((0.5,),)),)).failures
+    assert failure.reason == "the reply is not a string"
+
+
+def test_a_reference_names_one_run_of_this_turn_one_row_and_one_column() -> None:
+    """A query no run of the turn cites (another turn's, an uncited one), a query cited twice, a
+    row past the run's last, a column the run lacks or returns twice: each withheld."""
+    one = cited(((Decimal("12.25"), 1), (Decimal("3.5"), 2)))
+    other = cited(((Decimal("7"),),), query="other")
+    assert rendering("It is {invented:2:c1} and {other:1:c0}.", one, other) == "It is 2 and 7."
+    assert rendering("It is {another:1:c0}.", one, other) is None
+    assert rendering("It is {invented:1:c0}.", one, one) is None
+    assert rendering("It is {invented:3:c0}.", one) is None
+    assert rendering("It is {invented:1:c2}.", one) is None
+    twice = cited(((1, 2),), columns=("c0", "c0"))
+    assert rendering("It is {invented:1:c0}.", twice) is None
+    assert rendering("It is {invented:1:c0}.", cited((), columns=("c0",))) is None
+    assert rendering("It is {invented:1:c0}.") is None
+
+
+def test_check_needs_a_covering_run_with_a_freshness_for_each_reference() -> None:
+    """A reference to a run that does not cover the question, or to one whose citation carries no
+    freshness, is withheld; so is any reply on a turn with no covering run."""
+    queries = {
+        "invented": VerifiedQuery("invented", "Asked?", "m", 3, "select 1"),
+        "other": VerifiedQuery("other", "Another?", "m", 3, "select 1"),
+    }
+    covering = cited(((Decimal("12.25"),),))
+    other = cited(((Decimal("7"),),), query="other")
+    assert check("Asked?", "It is {invented:1:c0}.", (covering, other), queries).text == (
+        "It is 12.25."
+    )
+    result = check("Asked?", "It is {other:1:c0}.", (covering, other), queries)
+    assert (result.text, [f.reason for f in result.failures]) == (
+        None,
+        ["the run does not cover the question"],
+    )
+    stale = replace(covering, freshness=None)
+    result = check("Asked?", "It is {invented:1:c0}.", (stale,), queries)
+    assert [f.reason for f in result.failures] == ["the run's citation carries no freshness"]
+    assert check("Asked?", "It is high.", (other,), queries).text is None
+    assert check("Asked?", "It is high.", (), queries).text is None
 
 
 class TwoQueries:
-    """Plans the verified query of the question and the by-month one, then replies with a figure
-    the by-month run returned and the covering run did not."""
+    """Plans the verified query of the question and the by-month one, then replies with a
+    reference to a cell of the by-month run."""
 
     def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
         return (ToolCall("duplicate-payment-rate"), ToolCall("duplicate-payment-rate-by-month"))
@@ -421,18 +911,13 @@ class TwoQueries:
         calls = self.plan(turn)
         if len(turn.results) < len(calls):
             return calls[len(turn.results)]
-        covering, other = turn.results
-        assert isinstance(covering, Citation) and isinstance(other, Citation)
-        figures = [v for (_, v) in other.rows if isinstance(v, float) and (v,) not in covering.rows]
-        assert figures, "the by-month run returns no figure the covering run lacks"
-        return Reply(f"The share is {figures[0]!r}.")
+        return Reply("The share is {duplicate-payment-rate-by-month:2:duplicate_payment_rate}.")
 
 
 def test_a_figure_from_a_run_that_does_not_cover_the_question_is_withheld(
     as_persona: AsPersona, audit: Audit
 ) -> None:
-    """Both runs are cited, one covering the question; a figure only the other returned is
-    withheld."""
+    """Both runs are cited, one covering the question; a reference to the other is withheld."""
     answer = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=TwoQueries())
     assert [c.query for c in answer.citations] == [
         "duplicate-payment-rate",
@@ -450,14 +935,19 @@ def test_a_figure_from_a_run_that_does_not_cover_the_question_is_withheld(
 def test_a_number_with_no_cited_run_is_withheld(
     as_persona: AsPersona, audit: Audit, question: str, query: str | None
 ) -> None:
-    """A model that replies with figures where no run returned (it called no tool, or its query
-    failed on the persona's database) gets no number shown, and the turn is abstained."""
-    model = Saying(query, "The top vendor was paid 1,234,567.89 in 2025, 83% of the total.")
-    answer = ask(CHICAGO, question, as_persona=as_persona, audit=audit, model=model)
-    assert answer.citations == ()
-    assert answer.text == WITHHELD and not re.search(r"\d", answer.text)
-    record = records(audit)[-1]
-    assert (record["outcome"], record["runs"]) == ("abstained", [])
+    """A model that replies with figures, or a reference, where no run returned (it called no
+    tool, or its query failed on the persona's database) gets no number shown, and the turn is
+    abstained."""
+    for text in [
+        "The top vendor was paid 1,234,567.89 in 2025, 83% of the total.",
+        "The top vendor was paid {spend-against-award:1:spend}.",
+    ]:
+        model = Saying(query, text)
+        answer = ask(CHICAGO, question, as_persona=as_persona, audit=audit, model=model)
+        assert answer.citations == ()
+        assert answer.text == WITHHELD and not re.search(r"\d", answer.text)
+        record = records(audit)[-1]
+        assert (record["outcome"], record["runs"]) == ("abstained", [])
 
 
 def test_the_scripted_reply_to_a_failed_run_is_withheld(
@@ -471,153 +961,17 @@ def test_the_scripted_reply_to_a_failed_run_is_withheld(
     assert answer.text == WITHHELD
 
 
-def test_a_number_beside_a_cited_run_but_not_in_it_is_withheld(
-    as_persona: AsPersona, audit: Audit
+@pytest.mark.parametrize("text", ["About 0.5 of the rows repeat.", "It is 0.04054054054054054."])
+def test_a_figure_the_model_writes_itself_is_withheld(
+    as_persona: AsPersona, audit: Audit, text: str
 ) -> None:
-    model = Saying("duplicate-payment-rate", "About 0.5 of the rows repeat.")
+    """A figure no cell holds, and the covering cell's own figure, written by the model: the model
+    writes no figure, so each is withheld."""
+    model = Saying("duplicate-payment-rate", text)
     answer = ask(CHICAGO, QUESTION, as_persona=as_persona, audit=audit, model=model)
     assert len(answer.citations) == 1
     assert answer.text == WITHHELD
     assert records(audit)[-1]["outcome"] == "abstained"
-
-
-# The matching rule, on hand-made citations
-
-
-def cited(
-    rows: tuple[tuple[Any, ...], ...], *, version: int = 3, fresh: datetime | None = WRITTEN
-) -> Citation:
-    columns = tuple(f"c{i}" for i in range(len(rows[0]))) if rows else ()
-    return Citation("invented", "invented_metric", version, "select 1", columns, rows, fresh)
-
-
-def failed_numbers(text: str, *citations: Citation) -> list[str | None]:
-    return [f.number for f in trace(text, citations).failures]
-
-
-def test_each_written_form_of_a_number_is_compared_by_value() -> None:
-    citation = cited(((1234567.5, Decimal("17947.690000"), 2026, -12.25),))
-    text = "1,234,567.5 and 1234567.50 and 17947.69 and 2026 and -12.25 and 1.23456750e6"
-    assert failed_numbers(text, citation) == []
-    assert len(trace(text, (citation,)).traced) == 6
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "about 1.2 million",  # rounded
-        "12.25%",  # a percent of a share
-        "1234568",  # rounded to a whole number
-        "12.25",  # the sign dropped
-        "1,23",  # a comma that is no thousands separator
-        "42M",  # digits glued to a letter
-        "Q3",
-        "in 2024",  # a year in prose
-        "version 2",  # not a cited version
-    ],
-)
-def test_a_number_that_is_not_a_cell_as_written_is_reported(text: str) -> None:
-    citation = cited(((1234567.5, -12.25, 2026, "x"),))
-    assert failed_numbers(text, citation) != []
-
-
-def test_a_version_counts_only_after_the_word_and_only_when_cited() -> None:
-    citation = cited(((0.5,),), version=3)
-    assert failed_numbers("metric version 3: 0.5", citation) == []
-    assert failed_numbers("metric version 4: 0.5", citation) == ["4"]
-    assert failed_numbers("metric 3: 0.5", citation) == ["3"]
-    # The word must come right before the number, and be a word of its own.
-    assert failed_numbers("version 3, then 3", citation) == ["3"]
-    assert failed_numbers("subversion 3", citation) == ["3"]
-
-
-def test_an_ascii_minus_touching_the_digits_is_the_sign() -> None:
-    assert failed_numbers("it fell to -12.25", cited(((12.25,),))) == ["-12.25"]
-    assert failed_numbers("it fell to -12.25", cited(((-12.25,),))) == []
-    assert failed_numbers("it is 12.25", cited(((-12.25,),))) == ["12.25"]
-
-
-@pytest.mark.parametrize("form", UNREAD)
-def test_a_sign_the_check_does_not_read_is_reported_whichever_sign_the_cell_has(form: str) -> None:
-    """A dash other than the ASCII minus, a minus parted from the digits, a parenthesis, a
-    currency sign or code, Markdown, a suffix or a sign word: reported for either cell."""
-    for cell in (12.25, -12.25):
-        assert trace(form.format("12.25"), (cited(((cell,),)),)).failures, (form, cell)
-
-
-@pytest.mark.parametrize("form", FOLDED_MINUS)
-def test_a_minus_that_folds_to_ascii_is_read_as_the_sign(form: str) -> None:
-    assert trace(form.format("12.25"), (cited(((12.25,),)),)).failures
-    assert trace(form.format("12.25"), (cited(((-12.25,),)),)).failures == ()
-
-
-def test_fullwidth_digits_fold_to_the_number() -> None:
-    assert failed_numbers("\uff11\uff12.\uff12\uff15", cited(((12.25,),))) == []
-
-
-def test_a_hyphen_is_read_only_between_two_letters() -> None:
-    assert failed_numbers("the year-to-date share is 12.25", cited(((12.25,),))) == []
-    assert failed_numbers("x -y 12.25", cited(((12.25,),))) == ["-"]
-
-
-def test_a_range_is_reported_not_matched() -> None:
-    assert failed_numbers("10-12", cited(((10, 12),))) == ["-", "12"]
-
-
-def test_a_tuple_of_figures_is_reported_for_its_parentheses() -> None:
-    """The cost of reading only plain figures: a tuple's brackets are reported too."""
-    failed = failed_numbers("[(12.25,), (2026, 3)]", cited(((12.25, 2026, 3),)))
-    assert set(failed) == {"[", "(", ")", "]"}
-
-
-def test_thousands_are_read_only_in_groups_of_three() -> None:
-    assert failed_numbers("1,2345", cited(((1234, 5),))) == ["1", "2345"]
-
-
-@pytest.mark.parametrize("numeral", ["\u2075\u2070", "\u00bd", "\u2460", "\u216b"])
-def test_a_numeral_that_is_no_decimal_digit_is_reported(numeral: str) -> None:
-    assert set(numeral) <= set(failed_numbers(f"paid {numeral}", cited(((5.0,),))))
-
-
-def test_a_bool_cell_is_no_number() -> None:
-    assert failed_numbers("1 vendor", cited(((True,),))) == ["1"]
-
-
-def test_a_text_cell_is_set_aside_only_where_it_is_written_whole() -> None:
-    assert failed_numbers("Q1 and Q10", cited((("Q1",),))) == ["10"]
-    # Not as the whole or the fraction of a decimal number.
-    assert failed_numbers("the total was 12.25", cited((("12", 25),))) == ["12.25"]
-    assert failed_numbers("the total was 0.12", cited((("12", 0),))) == ["0.12"]
-    # A minus before a text cell's whole text is not dropped with it.
-    assert failed_numbers("the total was -12.25", cited((("12.25",),))) == ["-"]
-
-
-def test_a_cell_that_is_not_a_number_covers_only_its_own_text() -> None:
-    when = datetime(2026, 10, 1, 0, 0)  # noqa: DTZ001 - the engine's naive timestamp
-    citation = cited((("payments-over-25k", when, 0.0),))
-    assert failed_numbers(f"payments-over-25k {when} 0", citation) == []
-    # Its `repr` is not set aside, and its parentheses are reported.
-    assert "(" in failed_numbers(f"{when!r}", citation)
-    assert failed_numbers("payments-over-26k", citation) == ["-", "26"]
-    # The zeros of the time are the cell 0.0; the date is no cell's text.
-    assert failed_numbers("2026-10-02 00:00:00", citation) == ["-", "-", "2026", "10", "02"]
-
-
-def test_a_run_without_freshness_traces_no_number() -> None:
-    stale = cited(((0.5,),), fresh=None)
-    (failure,) = trace("0.5", (stale,)).failures
-    assert (failure.number, failure.query) == ("0.5", "invented")
-    assert "freshness" in failure.reason
-    assert failed_numbers("payments-over-25k", cited((("payments-over-25k",),), fresh=None)) == [
-        "-",
-        "25",
-    ]
-    assert failed_numbers("version 3", cited(((0.5,),), fresh=None)) == ["3"]
-
-
-def test_no_citation_traces_no_number() -> None:
-    assert failed_numbers("No verified query answers this question.") == []
-    assert failed_numbers("version 1, 0") == ["1", "0"]
 
 
 # The re-run, on a database of invented tables
@@ -658,8 +1012,6 @@ def test_the_invented_answer_reproduces(
 
 
 def change_run(runs: tuple[Logged, ...], **fields: Any) -> tuple[Logged, ...]:
-    from dataclasses import replace
-
     return (replace(runs[0], **fields),)
 
 
@@ -679,8 +1031,6 @@ def change_run(runs: tuple[Logged, ...], **fields: Any) -> tuple[Logged, ...]:
 def test_a_re_run_that_does_not_reproduce_is_reported(
     invented: tuple[Answer, tuple[Logged, ...], AsPersona], case: str, reason: str
 ) -> None:
-    from dataclasses import replace
-
     answer, runs, connect = invented
     (citation,) = answer.citations
     if case == "another-persona":
@@ -768,8 +1118,6 @@ def test_the_re_run_is_made_as_the_logged_persona(
 def test_runs_are_compared_with_citations_in_order(
     invented: tuple[Answer, tuple[Logged, ...], AsPersona],
 ) -> None:
-    from dataclasses import replace
-
     answer, runs, connect = invented
     (citation,) = answer.citations
     sql = "select x from t where x > 2"
@@ -787,13 +1135,15 @@ def test_runs_are_compared_with_citations_in_order(
 
 
 class Unplanned:
-    """Plans nothing, calls the verified query anyway, then replies with a figure."""
+    """Plans nothing, calls the verified query anyway, then replies with a reference."""
 
     def plan(self, turn: Turn) -> tuple[ToolCall, ...]:
         return ()
 
     def step(self, turn: Turn) -> ToolCall | Reply:
-        return Reply("The share is 0.5.") if turn.results else ToolCall("duplicate-payment-rate")
+        if turn.results:
+            return Reply(f"The share is {SHARE}.")
+        return ToolCall("duplicate-payment-rate")
 
 
 @pytest.mark.parametrize(
@@ -809,7 +1159,7 @@ def test_a_withheld_reply_keeps_the_refusal_the_turn_records(
 ) -> None:
     """A withheld reply whose call the policy denied is recorded refused for the policy; one whose
     call was unplanned, refused as unplanned."""
-    model: Model = Unplanned() if unplanned else Saying("duplicate-payment-rate", "It is 0.5.")
+    model: Model = Unplanned() if unplanned else Saying("duplicate-payment-rate", f"It is {SHARE}.")
     answer = ask(asker, QUESTION, as_persona=as_persona, audit=audit, model=model)
     assert answer.text == WITHHELD
     record = records(audit)[-1]

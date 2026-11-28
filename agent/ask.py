@@ -61,11 +61,14 @@ What `ask` checks, in this order:
     without the model, and `ask` replies with its fixed text `CAPPED`;
 - so a turn takes at most `MAX_STEPS` model steps (`MAX_TOOL_CALLS` + `MAX_REFUSALS` + 1): each
   step runs a query, is refused, or ends the turn;
-- once the loop has ended, a turn not stopped at either cap has its reply checked by
-  `agent.integrity.withheld`: when no cited query's verified question is the asked one, or
-  `agent.integrity.trace` reports a number of the reply, `agent.integrity.WITHHELD`, which holds
-  no digit, is shown and recorded in its place, and the turn is not `answered`; a turn stopped at
-  a query's cap, the tool-call cap or the refusal cap shows its own fixed message, unchecked;
+- once the loop has ended, a turn not stopped at either cap has its reply checked and rendered by
+  `agent.integrity.check`: the model writes no figure, only references to cited cells
+  (`{query:row:column}`), and what is shown and recorded is the reply with each reference replaced
+  by its cell's rendering, so the text a reader sees is the text recorded; when no cited query's
+  verified question is the asked one, or the reply fails any of that module's checks,
+  `agent.integrity.WITHHELD`, which holds no digit, is shown and recorded in its place, and the
+  turn is not `answered`; a turn stopped at a query's cap, the tool-call cap or the refusal cap
+  shows its own fixed message, unchecked;
 - once the turn has ended, its record is written (`AuditLog.append`, by default
   `agent.audit.FileLog`, which checks it against the schema and its seals before writing); when
   that raises, for any `Exception`, `ask` raises `AuditWriteFailed` and returns no `Answer`;
@@ -504,15 +507,13 @@ def ask(
             # Written outside the `except`, so an `AuditWriteFailed` carries no context.
             record(audit, persona, session, question, ("failed", stage), metrics, runs, None, turn)
             raise raised
-        # A reply no covering run backs is not shown (`agent/integrity.py`); a turn stopped at a
-        # cap shows its own fixed message.
-        withheld = (
-            stopped is None
-            and not capped
-            and integrity.withheld(question, text, citations, queries)
-        )
-        if withheld:
-            text = WITHHELD
+        # The reply is shown, and recorded, only as `agent/integrity.py` renders it from the cited
+        # cells; a turn stopped at a cap shows its own fixed message.
+        withheld = False
+        if stopped is None and not capped:
+            shown = integrity.check(question, text, citations, queries).text
+            withheld = shown is None
+            text = WITHHELD if shown is None else shown
         if stopped is not None:
             outcome: tuple[str, str | None] = ("stopped", stopped)
         elif citations and not withheld:

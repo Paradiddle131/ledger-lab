@@ -96,42 +96,48 @@ controls:
     layer: Answer integrity
     owner: metric-owner
     asserts: >-
-      What is checked (agent/integrity.py, applied by agent/ask.py when the model replies on a turn stopped at no cap): the reply is shown, and the turn recorded answered, only when a cited query's verified question equals the asked question after NFKC, casefolding and white-space collapsing, and each number of the reply traces to a run of such a query whose citation carries a freshness; otherwise a fixed text with no digit is shown and the turn is not recorded answered (it is recorded abstained, or refused for the policy or as unplanned when a call was), which includes a turn that cites no run, whatever its reply says.
-      Before reading, the reply is folded to Unicode NFKC form with its format characters (category Cf) removed, and each cited text, date or time cell written whole (folded, its first and last characters letters or digits, with no letter, digit or `_` on either side and no `.` or `,` joining it to a digit) is set aside as that cell's own. A number is ASCII digits with thousands commas in groups of three, one decimal part, one exponent and, as its only sign, an ASCII minus touching the digits with no letter, digit, `_` or `-` before it; it traces when its value equals a cited int, float or Decimal cell (not a bool), or when it follows the word "version" and equals the cited version.
-      Reported, so withheld: a number no cited cell equals; any character outside a number that is not white space, a cased letter (Unicode Lu, Ll, Lt), one of the characters . , ; : ! ? = ' " _ and the four curly quotes, or a - between two cased letters (so a dash or minus of any other kind, a parenthesis, a currency sign, a percent sign or Markdown anywhere in the reply); a number joined to a letter, digit or `_`, or written right after a `.`, `,` or `-`; a number right after a sign word of agent/integrity.py (SIGN_BEFORE: minus, negative, down, loss, deficit and others, or such a word then of, by or at) or right before one (SIGN_AFTER: CR, DR, negative and others); a number right before a scale or unit word (SCALE_AFTER: million, bn, k, percent, per, bps, times and others); a number whose value cannot be read; a numeral of Unicode category No or Nl; and an exception raised by the check.
+      What is checked (agent/integrity.py, applied by agent/ask.py when the model replies on a turn stopped at no cap): the model writes no figure; it writes a reference to a cited cell, {query:row:column}, and the text shown and recorded is its reply with each reference replaced by that cell's rendering, so the text a reader sees is the text the record seals.
+      The reply is shown, and the turn recorded answered, only when a cited query's verified question equals the asked question after NFKC, casefolding and white-space collapsing, the reply holds more than white space, and each reference names a query cited exactly once in the turn by a run that covers the question and carries a freshness, a row that run returned and a column it returned once; otherwise a fixed text with no digit is shown and recorded in its place and the turn is not recorded answered (it is recorded abstained, or refused for the policy or as unplanned when a call was), which includes a turn that cites no run, whatever its reply says.
+      Withheld too: outside its references, any character but an ASCII letter, a space, a line break, one of . , ; : ! ? ' " = _, or a - between two ASCII letters, so any digit, any character outside ASCII (each Unicode digit, numeral, letter that folds to a digit under NFKC, look-alike letter, format character and bidi control), every other ASCII symbol, a brace outside a whole reference and every other control character; a reference not written whole by the grammar, with anything but a space, a line break or the start right before it, or anything but the end, a space, a line break or one of . , ; : ! ? then one of those right after it; two references with no ASCII letter of the model's text between them; a cell the renderer does not write; and an exception raised by the check.
+      Each cell is rendered in one fixed format: a number positionally, every digit it carries kept and none rounded, with no thousands separator and no exponent, an ASCII minus below zero and no sign at zero, negative zero included; a NaN, an infinity or a number past 64 characters is not rendered; a null as null, a bool as true or false, a date or time as its ISO text, and a text cell as its own text when it is printable ASCII with no brace and at most 200 characters.
       Re-running the query a record logged, as the record's persona and only when its persona, SQL and bound values are the answer's and the cited query's, in the citations' order, must give the cited run's columns and rows, in any order, and the record's sealed result.
-      Stated limits: equality only, so rounded figures, percentages of a share, years or counts in prose that are no cell and the ends of a range are withheld; a figure written with a currency sign, in a tuple, in Markdown or beside any character outside the allowed set is withheld, so honest replies written that way are withheld too; a sign or direction written in words other than the sign words (fell by, a decrease of), and a scale written in words other than the scale words, are not read; a paraphrase of a verified question is withheld, so the agent answers only the verified questions' own wording; a number written in words is not read and passes on a reply not withheld for another reason; which row, column or metric the prose attributes a number to is not checked, so swapped figures pass; a cited text cell's own characters are set aside, so a sign inside a cell's text is not read; the re-run reads whatever database the connection-maker opens and is a verifier's call, not made by ask; a turn stopped at a query's cap, the tool-call cap or the refusal cap shows ask's own fixed message, which names the cap and is not checked; a turn at the refusal cap is not checked and is recorded answered when a planned call returned.
+      Stated limits: the words around a reference are prose that is not read, so a sign, direction or scale in words (minus, a net-loss of, down about, in millions, USD million) is shown beside the cell's own figure and can tell a reader a positive cell is a loss or a cell is in thousands; a figure written in words or in ASCII letters that look like digits is prose and shown; which row, column or metric the prose attributes a rendered figure to is not checked, so swapped references are shown; a text cell's own characters are not read, so a text cell holding digits or a sign shows them; a reply of prose with no reference is shown on a covering run; an honest reply that writes a figure itself, a currency or percent sign, Markdown, parentheses or a non-ASCII letter is withheld, and so is one naming a query cited twice in the turn; a paraphrase of a verified question is withheld, so the agent answers only the verified questions' own wording; the re-run reads whatever database the connection-maker opens and is a verifier's call, not made by ask; a turn stopped at a query's cap, the tool-call cap or the refusal cap shows ask's own fixed message, which names the cap and is not checked; a turn at the refusal cap is not checked and is recorded answered when a planned call returned.
     proven_by:
       - tests/agent/test_answer_integrity.py::test_logged_query_reproduces_the_answer
       - tests/agent/test_answer_integrity.py::test_a_perturbed_number_in_a_scripted_answer_is_caught
-      - tests/agent/test_answer_integrity.py::test_each_number_of_a_many_row_answer_is_caught_with_a_digit_appended
+      - tests/agent/test_answer_integrity.py::test_each_figure_of_a_many_row_answer_written_by_the_model_is_withheld
       - tests/agent/test_answer_integrity.py::test_a_changed_warehouse_is_caught_on_re_run
       - tests/agent/test_answer_integrity.py::test_a_question_outside_the_metrics_gets_an_abstention
       - tests/agent/test_answer_integrity.py::test_only_a_verified_question_as_worded_is_answered
       - tests/agent/test_answer_integrity.py::test_a_reply_with_no_cited_run_is_withheld_whatever_it_says
-      - tests/agent/test_answer_integrity.py::test_a_number_with_no_cited_run_is_withheld
-      - tests/agent/test_answer_integrity.py::test_a_number_beside_a_cited_run_but_not_in_it_is_withheld
-      - tests/agent/test_answer_integrity.py::test_a_sign_flipped_figure_is_withheld
-      - tests/agent/test_answer_integrity.py::test_a_sign_the_check_does_not_read_is_reported_whichever_sign_the_cell_has
-      - tests/agent/test_answer_integrity.py::test_a_minus_that_folds_to_ascii_is_read_as_the_sign
-      - tests/agent/test_answer_integrity.py::test_an_ascii_minus_touching_the_digits_is_the_sign
-      - tests/agent/test_answer_integrity.py::test_a_hyphen_is_read_only_between_two_letters
-      - tests/agent/test_answer_integrity.py::test_fullwidth_digits_fold_to_the_number
-      - tests/agent/test_answer_integrity.py::test_a_figure_written_plainly_is_shown
-      - tests/agent/test_answer_integrity.py::test_a_figure_from_a_run_that_does_not_cover_the_question_is_withheld
-      - tests/agent/test_answer_integrity.py::test_thousands_are_read_only_in_groups_of_three
-      - tests/agent/test_answer_integrity.py::test_a_text_cell_is_set_aside_only_where_it_is_written_whole
-      - tests/agent/test_answer_integrity.py::test_a_range_is_reported_not_matched
-      - tests/agent/test_answer_integrity.py::test_a_tuple_of_figures_is_reported_for_its_parentheses
-      - tests/agent/test_answer_integrity.py::test_a_numeral_that_is_no_decimal_digit_is_reported
+      - tests/agent/test_answer_integrity.py::test_a_turn_stopped_at_the_cap_shows_its_own_message
       - tests/agent/test_answer_integrity.py::test_a_reply_the_check_cannot_read_is_withheld_and_recorded
-      - tests/agent/test_answer_integrity.py::test_a_number_that_is_not_a_cell_as_written_is_reported
-      - tests/agent/test_answer_integrity.py::test_a_run_without_freshness_traces_no_number
+      - tests/agent/test_answer_integrity.py::test_an_empty_reply_is_withheld
+      - tests/agent/test_answer_integrity.py::test_a_bidi_control_around_a_figure_is_withheld
+      - tests/agent/test_answer_integrity.py::test_the_text_shown_is_the_text_recorded
+      - tests/agent/test_answer_integrity.py::test_a_look_alike_of_a_digit_or_a_minus_is_withheld
+      - tests/agent/test_answer_integrity.py::test_no_character_outside_ascii_passes_in_the_prose
+      - tests/agent/test_answer_integrity.py::test_a_sign_word_beside_a_figure_the_model_writes_is_withheld
+      - tests/agent/test_answer_integrity.py::test_a_sign_word_beside_a_reference_shows_the_cells_own_sign
+      - tests/agent/test_answer_integrity.py::test_a_scale_word_beside_a_figure_the_model_writes_is_withheld
+      - tests/agent/test_answer_integrity.py::test_a_scale_word_beside_a_reference_shows_the_cells_own_figure
+      - tests/agent/test_answer_integrity.py::test_two_figures_with_no_letter_between_are_withheld
+      - tests/agent/test_answer_integrity.py::test_a_sign_form_around_a_figure_the_model_writes_is_withheld
+      - tests/agent/test_answer_integrity.py::test_a_sign_form_around_a_reference_is_withheld_or_shows_the_cell
+      - tests/agent/test_answer_integrity.py::test_a_cell_is_rendered_in_one_fixed_format
+      - tests/agent/test_answer_integrity.py::test_a_cell_the_renderer_does_not_write_withholds_the_reply
+      - tests/agent/test_answer_integrity.py::test_a_malformed_reference_is_withheld_and_nothing_of_it_rendered
+      - tests/agent/test_answer_integrity.py::test_a_character_touching_a_reference_is_withheld
+      - tests/agent/test_answer_integrity.py::test_prose_holds_a_hyphen_only_between_two_letters
+      - tests/agent/test_answer_integrity.py::test_a_reference_names_one_run_of_this_turn_one_row_and_one_column
+      - tests/agent/test_answer_integrity.py::test_check_needs_a_covering_run_with_a_freshness_for_each_reference
+      - tests/agent/test_answer_integrity.py::test_a_figure_from_a_run_that_does_not_cover_the_question_is_withheld
+      - tests/agent/test_answer_integrity.py::test_a_number_with_no_cited_run_is_withheld
+      - tests/agent/test_answer_integrity.py::test_a_figure_the_model_writes_itself_is_withheld
       - tests/agent/test_answer_integrity.py::test_a_re_run_that_does_not_reproduce_is_reported
       - tests/agent/test_answer_integrity.py::test_a_run_logged_unlike_its_citation_is_not_re_run
       - tests/agent/test_answer_integrity.py::test_the_re_run_is_made_as_the_logged_persona
       - tests/agent/test_answer_integrity.py::test_runs_are_compared_with_citations_in_order
-      - tests/agent/test_answer_integrity.py::test_a_turn_stopped_at_the_cap_shows_its_own_message
       - tests/agent/test_answer_integrity.py::test_a_withheld_reply_keeps_the_refusal_the_turn_records
     status: implemented
   - id: scored-by-execution

@@ -48,6 +48,7 @@ from agent.audit import (
     sealed_result,
     verify_chain,
 )
+from agent.integrity import render
 from agent.model import Citation, Reply, ToolCall, Turn, model_from_config
 
 AsPersona = Callable[[str], duckdb.DuckDBPyConnection]
@@ -175,7 +176,10 @@ def rebuild(
     need(len(results) == len(record["runs"]), "the record lists a run the model does not call")
     metrics = list(dict.fromkeys((c.metric, c.version) for c in results))
     need(record["metrics"] == [{"name": n, "version": v} for n, v in metrics], "other metrics")
-    need(seal(opened["answer"][0], step.text) == record["answer"], "the answer does not match")
+    # The record holds the reply as `ask` showed it: each reference rendered from its cell.
+    shown = render(step.text, results).text
+    need(shown is not None, "the model's reply does not render from the re-run cells")
+    need(seal(opened["answer"][0], shown) == record["answer"], "the answer does not match")
     return rerun
 
 

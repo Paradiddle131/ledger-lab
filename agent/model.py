@@ -109,7 +109,10 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class Reply:
-    """The model's answer in words; it ends the turn."""
+    """The model's answer in words; it ends the turn. It writes no figure: each one is a reference
+    to a cell of a run the turn cites, `{query:row:column}`, which `ask` renders
+    (`agent/integrity.py`); a reply holding a digit or a character that is not ASCII outside a
+    reference is withheld."""
 
     text: str
 
@@ -154,7 +157,7 @@ class ModelNotConfigured(ValueError):
 class ScriptedModel:
     """Replays a fixed script: it plans the query the script maps the question to, if any; on the
     first step, that query, or a reply that no verified query answers it; once a tool has
-    answered, a reply built from the results."""
+    answered, a reply built from the results, its figures as references to the cited cells."""
 
     def __init__(self, script: Mapping[str, str]) -> None:
         self._script = dict(script)
@@ -173,31 +176,18 @@ class ScriptedModel:
 
 
 def _said(result: Citation | Refusal) -> str:
-    """A result as the scripted model writes it: each cell as `column = value`, the cells of a row
-    joined by `, ` and the rows by `; `, each figure written plainly (`agent/integrity.py`)."""
+    """A result as the scripted model writes it: each cell as `column = ` and a reference to it
+    (`{query:row:column}`, which `agent/integrity.py` renders), the cells of a row joined by `, `
+    and the rows by `; `; the model writes no figure of its own."""
     if isinstance(result, Citation):
         rows = "; ".join(
             ", ".join(
-                f"{column} = {_written(cell)}"
-                for column, cell in zip(result.columns, row, strict=True)
+                f"{column} = {{{result.query}:{number}:{column}}}" for column in result.columns
             )
-            for row in result.rows
+            for number in range(1, len(result.rows) + 1)
         )
-        return (
-            f"{result.metric} version {result.version}, by the verified query {result.query}: "
-            f"{rows or 'no rows'}"
-        )
+        return f"{result.metric}, by the verified query {result.query}: {rows or 'no rows'}"
     return f"The verified query {result.query} gave no answer: {result.reason}"
-
-
-def _written(cell: object) -> str:
-    """A cell as the scripted reply writes it: a float by its `repr`, a bool or a null as a word,
-    anything else by its `str`."""
-    if cell is None:
-        return "null"
-    if isinstance(cell, bool):
-        return "true" if cell else "false"
-    return repr(cell) if isinstance(cell, float) else str(cell)
 
 
 def model_from_config(environ: Mapping[str, str], queries: Mapping[str, VerifiedQuery]) -> Model:
