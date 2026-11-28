@@ -6,7 +6,8 @@ of it is judged here instead: this file parses it by the rules `tier.sh` states 
 PINNED (`ingest/individuals.py`, `ingest/chicago/table.py`, the payments mart, a Chicago sample,
 `access/personas.yaml`, `access/thresholds.py`, `models/models/marts/payments/payments_masked.sql`,
 `platform/gcp/warehouse.tf`, `platform/gcp/budget.tf`, `platform/fences.py`, `ingest/load.py`,
-`ingest/bucket.py`), several from each of its three areas.
+`ingest/bucket.py`, the Chicago intermediate payments, `agent/limits.py`), several from each of
+its three areas.
 
 Checked:
 - `REVIEW.md` parses: `parse` raises where `tier.sh` would warn and count every path as
@@ -74,6 +75,11 @@ PINNED = {
     "models/seeds/staging/chicago/chicago_payments_sample.csv": {"control-prober", "leak-hunter"},
     "ingest/load.py": {"control-prober", "guardrail-reviewer"},
     "ingest/bucket.py": {"control-prober", "guardrail-reviewer"},
+    "models/models/intermediate/chicago/int_chicago__payments.sql": {
+        "control-prober",
+        "leak-hunter",
+    },
+    "agent/limits.py": {"control-prober", "guardrail-reviewer"},
 }
 
 # Paths outside the three areas, which no `## Sensitive` item matches.
