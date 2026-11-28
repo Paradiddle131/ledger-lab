@@ -19,7 +19,7 @@ The owner approved the guardrail hold in an attended session on 2026-11-18 and s
 
 The paths that set a review tier: `REVIEW.md` at the repo root, read from the default branch by the `review` skill's `tier.sh`.
 When a slice or a feature works end to end, the wake that lands its last item also runs one review of the feature as a whole: the `review` skill's steps 3 and 4 at `focused` depth over the range from the merge-base of the feature's first PR to that last merge, with the lenses the range's paths plan and the verifier, its output posted as a comment on the last item's PR.
-A must-fix it confirms becomes one item, labelled `ready`, under the feature's epic; its nits stay on that comment.
+A must-fix it confirms becomes one item, labelled `ready`, under the feature's epic, and `slice` too when the feature is the slice; its nits stay on that comment.
 
 ## Digest
 
@@ -36,8 +36,12 @@ The rule it runs, which `tests/platform/test_next_item.py` proves on fixture tra
 1. The open issue titled `Roadmap`: its sub-issues are the epics, in order. The open issue titled starting `Thin slice` holds the slice's path: the rows of its "The path" table, in row order, each a step number then `#<n>`.
 2. Take the first pickable issue labelled `slice`, in path order.
 3. Else the first pickable other sub-issue labelled `slice`, off the path (such as a leftover that blocks a step), in epic order then sub-issue order.
-4. Else the first pickable other sub-issue, in epic order then sub-issue order, leaving out the leftovers issues.
-5. Else the first pickable issue labelled `leftover`, in epic order then sub-issue order: one `Review leftovers: <area>` issue is one item and one PR, its checkboxes the findings it fixes.
+4. Else, once the slice has no open item, the first pickable other sub-issue, in epic order then sub-issue order, leaving out the leftovers issues.
+5. Else, once the slice has no open item, the first pickable issue labelled `leftover`, in epic order then sub-issue order: one `Review leftovers: <area>` issue is one item and one PR, its checkboxes the findings it fixes.
+
+The slice has an open item while a step of its path or an issue labelled `slice` is open (an epic and the `Thin slice` issue itself aside).
+While it has one and none is pickable, the picker prints `none: the slice has open items and none is pickable; …` with the open ones, and the wake ends with that line in its handoff: it never turns to off-slice work or leftovers while the slice waits on the owner, the owner's machine or GCP.
+A fix the slice needs to move on (a blocker of a step, a must-fix a slice step's review confirms) gets `slice` when it is filed, so step 3 takes it; anything else found on the way is filed without `slice` and waits for the slice to finish.
 
 Pickable: labelled `ready`, carries none of `needs-gcp`, `needs-owner`, `blocked` or `owner-machine`, and is pickable by the skill's step 3 (open, no live claim, no open PR that closes it, every Blocked by in this repository and closed or with a held PR to stack on: one carrying `owner-merges` or `needs-local-verify`, never a speculative one).
 Only owner input steers: the `Roadmap`, the `Thin slice` issue and the Digest count only when an owner, member or collaborator opened them, and a PR only when such an author opened it from a branch of this repository.
