@@ -34,7 +34,7 @@ from gcp_project import lab_project_or_none
 
 from access.bigquery import AGENT_VARIABLE, MAX_BYTES_BILLED, PersonaQueryError, PersonaSession
 from agent.ask import AGENT, Audit, NoPersonaError, ask, load_context
-from agent.audit import FileLog, read_log
+from agent.audit import FileLog, read_log, seal
 from agent.bigquery import (
     LABEL_KEY,
     LABEL_VALUE,
@@ -48,8 +48,10 @@ from agent.bigquery import (
     prepare,
     relations,
 )
+from agent.integrity import WITHHELD
 from agent.limits import BYTES_CAP, load_limits
 from agent.model import Reply, ToolCall, Turn, VerifiedQuery, model_from_config
+from tests.agent.test_answer_integrity import Saying
 from tests.agent.test_cost import FEW_BYTES, READER, stopped_at_the_cap
 from tests.agent.test_cost import RUNAWAY as RUNAWAY_JOIN
 from tests.agent.test_cost import Calls as Counted
@@ -170,9 +172,10 @@ def records(audit: Audit) -> list[dict[str, Any]]:
 
 def asked(fake: Fake, audit: Audit, per_turn: int, *calls: str, persona: str = CHICAGO) -> Any:
     limits = replace(load_limits(), bytes_billed_per_turn=per_turn)
+    # The first query's own question, so its run covers the question (`agent/integrity.py`).
     return ask(
         persona,
-        QUESTION,
+        TOTALS["total-1"].question,
         as_persona=fake.connect(),
         audit=audit,
         model=Calls(*calls),
@@ -214,6 +217,39 @@ def test_every_job_carries_the_bytes_left_of_the_turn_and_the_turns_labels(
         ("bigquery", CHICAGO, f"{PROJECT}:EU.job_{n}") for n in (2, 3, 4)
     ]
     assert record["outcome"] == "answered"
+
+
+@pytest.mark.parametrize(
+    ("text", "shown"),
+    [("The total is {total-1:1:total}.", False), ("The total is known.", True)],
+    ids=["a-reference", "prose"],
+)
+def test_on_bigquery_the_text_shown_is_the_text_recorded_and_a_figure_needs_a_freshness(
+    fake: Fake, audit: Audit, text: str, shown: bool
+) -> None:
+    """A BigQuery citation carries no freshness, so a reply referencing its cell is withheld; a
+    reply of prose is shown; either way the text shown is the text the record seals."""
+    model = Saying("total-1", text)
+    question = TOTALS["total-1"].question
+    limits = replace(load_limits(), bytes_billed_per_turn=MAX_BYTES_BILLED + 15 * MIB)
+    answer = ask(
+        CHICAGO,
+        question,
+        as_persona=fake.connect(),
+        audit=audit,
+        model=model,
+        queries=TOTALS,
+        limits=limits,
+    )
+    assert answer.refusals == ()
+    (citation,) = answer.citations
+    assert citation.freshness is None
+    record = records(audit)[-1]
+    assert isinstance(audit.log, FileLog)
+    salt, value = json.loads((audit.log.kept / f"{record['seq']}.json").read_text())["answer"]
+    assert seal(salt, value) == record["answer"] and value == answer.text
+    expected = (text, "answered") if shown else (WITHHELD, "abstained")
+    assert (answer.text, record["outcome"]) == expected
 
 
 def test_a_job_refused_at_the_cap_stops_the_turn_and_is_sent_once(fake: Fake, audit: Audit) -> None:

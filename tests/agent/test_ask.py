@@ -210,7 +210,11 @@ def test_an_answer_cites_the_metric_its_version_the_sql_and_the_freshness(
     # The persona's database file's time, set above, is the time the citation carries.
     assert citation.freshness == WRITTEN
     assert answer.refusals == ()
-    assert QUERY in answer.text and "version 1" in answer.text
+    # The figure is the cell, rendered by `ask` from the reference the model wrote.
+    ((share,),) = citation.rows
+    assert answer.text.endswith(
+        f"by the verified query {QUERY}: duplicate_payment_rate = {share!r}"
+    )
 
 
 def test_a_persona_the_policy_denies_opens_no_connection(

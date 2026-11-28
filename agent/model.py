@@ -109,7 +109,10 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class Reply:
-    """The model's answer in words; it ends the turn."""
+    """The model's answer in words; it ends the turn. It writes no digit: each figure is a
+    reference to a cell of a run the turn cites, `{query:row:column}`, which `ask` renders
+    (`agent/integrity.py`); a reply holding a digit or a character that is not ASCII outside a
+    reference is withheld, and a figure in words or most look-alike letters is not caught there."""
 
     text: str
 
@@ -154,7 +157,7 @@ class ModelNotConfigured(ValueError):
 class ScriptedModel:
     """Replays a fixed script: it plans the query the script maps the question to, if any; on the
     first step, that query, or a reply that no verified query answers it; once a tool has
-    answered, a reply built from the results."""
+    answered, a reply built from the results, its figures as references to the cited cells."""
 
     def __init__(self, script: Mapping[str, str]) -> None:
         self._script = dict(script)
@@ -173,11 +176,17 @@ class ScriptedModel:
 
 
 def _said(result: Citation | Refusal) -> str:
+    """A result as the scripted model writes it: each cell as `column = ` and a reference to it
+    (`{query:row:column}`, which `agent/integrity.py` renders), the cells of a row joined by `, `
+    and the rows by `; `; the scripted model writes no figure of its own."""
     if isinstance(result, Citation):
-        return (
-            f"{result.metric} (version {result.version}), by the verified query {result.query}: "
-            f"{', '.join(result.columns)} = {list(result.rows)}"
+        rows = "; ".join(
+            ", ".join(
+                f"{column} = {{{result.query}:{number}:{column}}}" for column in result.columns
+            )
+            for number in range(1, len(result.rows) + 1)
         )
+        return f"{result.metric}, by the verified query {result.query}: {rows or 'no rows'}"
     return f"The verified query {result.query} gave no answer: {result.reason}"
 
 
