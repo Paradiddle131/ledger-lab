@@ -497,6 +497,8 @@ def test_a_word_of_digit_shaped_letters_with_a_point_or_beside_a_reference_is_wi
         'The share is O"OS.',
         "The spend was lO:OO.",
         f"The spend was {cell('b')} lO'OOO.",
+        f"The spend was {cell('b')} , OOO",
+        f"The share is {cell('b')} . OS",
         "The spend was forty-two thousand.",
         f"The share is {cell('a')}, and the spend was OO-OO.",
     ],

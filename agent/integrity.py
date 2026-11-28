@@ -32,7 +32,9 @@ What `check` requires; the reply is withheld when any of these fails:
 - a prose word (a run between white space) is tested only when, with the characters of `PROSE` at
   its two ends removed, each character left is a letter of `DIGIT_SHAPED` (`O o l I S Z B`) or a
   `.` or `,`; a tested word is withheld when it holds a `.` or `,` between two of its letters
-  (`O.OS`) or is the word right before or after a reference (`{..} OOO`);
+  (`O.OS`) or is the word right before or after a reference (`{..} OOO`); a word with nothing left
+  once its end marks are removed (`,`) is not tested but is still a word, so a tested word with
+  such a standalone mark between it and a reference (`{..} , OOO`) is not beside the reference;
 - between two references the model's text holds at least one ASCII letter, so no two rendered
   cells read as one figure (`1 000`, `1,250`, `12.25`);
 - each reference names a query cited exactly once in this turn, by a run that covers the question
@@ -248,7 +250,9 @@ def _look_alike_words(text: str) -> list[Failure]:
     """The prose words withheld as look-alikes; see the module's docstring. A word is a run between
     white space; it is tested when, with the characters of `PROSE` at its two ends removed, each
     character left is a letter of `DIGIT_SHAPED` or a `.` or `,`, and withheld when it then holds a
-    `.` or `,` between two letters or is the word right before or after a reference."""
+    `.` or `,` between two letters or is the word right before or after a reference. A word with
+    nothing left once its end marks are removed is not tested but still counts as a word, so it
+    parts a tested word from a reference (`{..} , OOO` is shown)."""
     marked = REFERENCE.sub("\0", text)
     words = marked.split()
     failures: list[Failure] = []
