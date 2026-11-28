@@ -1,6 +1,6 @@
-"""Answer integrity (`agent/integrity.py`): the model writes no figure, `ask` renders each one from
-a cell of a run the turn cites, the logged query is re-run as the asking persona, and a reply that
-cannot be shown that way is withheld and recorded as withheld.
+"""Answer integrity (`agent/integrity.py`): the model writes no digit, `ask` renders each figure
+from a cell of a run the turn cites, the logged query is re-run as the asking persona, and a reply
+that cannot be shown that way is withheld and recorded as withheld.
 
 The asks run on the scripted model (`agent/model.py`) or a hand-written one, through the
 `as_persona` fixture (`tests/conftest.py`), so every query runs on a database compiled for the
@@ -456,12 +456,56 @@ def test_the_text_shown_is_the_text_recorded(as_persona: AsPersona, audit: Audit
         f"The share is {cell('a')}⁰.",
     ],
 )
-def test_a_look_alike_of_a_digit_or_a_minus_is_withheld(
+def test_a_non_ascii_look_alike_of_a_digit_or_a_minus_is_withheld(
     as_persona: AsPersona, audit: Audit, text: str
 ) -> None:
     """Cyrillic O and Latin tone five for 0.05, a Coptic letter or a Unicode minus before a
     positive figure, fullwidth and mathematical digits, a superscript zero: each is withheld."""
     assert shown(text, as_persona, audit) == WITHHELD
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The share is O.OS.",
+        "The share is lO,ZS now.",
+        f"The spend was {cell('b')} OOO OOO.",
+        f"The spend was {cell('a')} and before that lO.ZS",
+        f"The spend was {cell('b')}. OOO",
+        f"It was SOS {cell('a')}.",
+    ],
+)
+def test_a_word_of_digit_shaped_letters_with_a_point_or_beside_a_reference_is_withheld(
+    as_persona: AsPersona, audit: Audit, text: str
+) -> None:
+    """A word made only of O, o, l, I, S, Z or B is withheld when it holds a `.` or `,` between two
+    of its letters, or is the word right before or after a reference."""
+    assert shown(text, as_persona, audit) == WITHHELD
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The spend was lOO thousand.",
+        "It is OOO.",
+        "The spend was forty-two thousand.",
+        f"The share is {cell('a')}, and the spend was OO-OO.",
+    ],
+)
+def test_a_number_word_or_a_look_alike_not_beside_a_reference_and_with_no_point_is_shown(
+    as_persona: AsPersona, audit: Audit, text: str
+) -> None:
+    """Stated limits: number words are not read, and a word of digit-shaped letters holding no `.`
+    or `,` between its letters and not beside a reference is prose, so each of these is shown."""
+    assert shown(text, as_persona, audit) == text.replace(cell("a"), "12.25")
+
+
+def test_an_honest_word_of_digit_shaped_letters_beside_a_reference_is_withheld(
+    as_persona: AsPersona, audit: Audit
+) -> None:
+    """A stated limit on the safe side: the pronoun I beside a reference is withheld."""
+    assert shown(f"It is {cell('a')}, I think.", as_persona, audit) == WITHHELD
+    assert shown(f"I think it is {cell('a')}.", as_persona, audit) == "I think it is 12.25."
 
 
 def test_no_character_outside_ascii_passes_in_the_prose() -> None:

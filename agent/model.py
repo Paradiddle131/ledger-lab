@@ -109,10 +109,10 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class Reply:
-    """The model's answer in words; it ends the turn. It writes no figure: each one is a reference
-    to a cell of a run the turn cites, `{query:row:column}`, which `ask` renders
+    """The model's answer in words; it ends the turn. It writes no digit: each figure is a
+    reference to a cell of a run the turn cites, `{query:row:column}`, which `ask` renders
     (`agent/integrity.py`); a reply holding a digit or a character that is not ASCII outside a
-    reference is withheld."""
+    reference is withheld, and a figure in words or most look-alike letters is not caught there."""
 
     text: str
 
@@ -178,7 +178,7 @@ class ScriptedModel:
 def _said(result: Citation | Refusal) -> str:
     """A result as the scripted model writes it: each cell as `column = ` and a reference to it
     (`{query:row:column}`, which `agent/integrity.py` renders), the cells of a row joined by `, `
-    and the rows by `; `; the model writes no figure of its own."""
+    and the rows by `; `; the scripted model writes no figure of its own."""
     if isinstance(result, Citation):
         rows = "; ".join(
             ", ".join(

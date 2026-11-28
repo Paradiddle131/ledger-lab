@@ -69,7 +69,7 @@ What `ask` checks, in this order:
 - so a turn takes at most `MAX_STEPS` model steps (`MAX_TOOL_CALLS` + `MAX_REFUSALS` + 1): each
   step runs a query, is refused, or ends the turn;
 - once the loop has ended, a turn not stopped at either cap has its reply checked and rendered by
-  `agent.integrity.check`: the model writes no figure, only references to cited cells
+  `agent.integrity.check`: the model writes no digit, only references to cited cells
   (`{query:row:column}`), and what is shown and recorded is the reply with each reference replaced
   by its cell's rendering, so the text a reader sees is the text recorded; when no cited query's
   verified question is the asked one, or the reply fails any of that module's checks,

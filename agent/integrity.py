@@ -1,6 +1,6 @@
-"""Answer integrity: the model writes no figure; `ask` renders each one from a cell of a run the
-turn cites, and shows the reply only when the verified question it answers and the runs it cites
-back it; and whether the query a turn's audit record logged reproduces those runs.
+"""Answer integrity: the model writes no digit; `ask` renders each figure in digits from a cell
+of a run the turn cites, and shows the reply only when the verified question it answers and the
+runs it cites back it; and whether the query a turn's audit record logged reproduces those runs.
 
 The reply's form: the model writes prose and, where a figure goes, a reference to a cited cell,
 `{query:row:column}`: the verified query's id, the row's number counted from 1 in the run's order,
@@ -27,8 +27,11 @@ What `check` requires; the reply is withheld when any of these fails:
   reported where they are;
 - each reference is written whole by the grammar `REFERENCE`, with a space, a line break or the
   start of the reply right before it, and right after it the end of the reply, a space, a line
-  break, or one of `. , ; : ! ?` followed by one of those; so no character the model writes touches
-  a rendered figure;
+  break, or one of `. , ; : ! ?` followed by one of those; so no character but one closing mark
+  before a space, a line break or the end touches a rendered figure;
+- no prose word (a run between white space, the characters of `PROSE` at its ends left out) is
+  made only of the letters of `DIGIT_SHAPED` (`O o l I S Z B`) and either holds a `.` or `,` between
+  two of its letters (`O.OS`) or is the word right before or after a reference (`{..} OOO`);
 - between two references the model's text holds at least one ASCII letter, so no two rendered
   cells read as one figure (`1 000`, `1,250`, `12.25`);
 - each reference names a query cited exactly once in this turn, by a run that covers the question
@@ -46,8 +49,8 @@ How `rendered` writes a cell, the one format a figure is shown in:
   is written with no sign;
 - a number past `LONGEST` positional characters, a NaN and an infinity are not rendered;
 - a null as `null`, a bool as `true` or `false`, a date, a datetime or a time as its `isoformat()`;
-- a text cell as its own text, when it is printable ASCII with no brace and at most `LONGEST_TEXT`
-  characters; any other text, and a cell of any other type, is not rendered.
+- a text cell as its own text, when it is non-empty printable ASCII with no brace and at most
+  `LONGEST_TEXT` characters; any other text, and a cell of any other type, is not rendered.
 
 What `reproduce` checks, per run, in order: the record logs one run per citation, in the same
 order; the run was logged as the answer's persona; its SQL and values are the cited query's SQL
@@ -62,8 +65,12 @@ Stated limits:
   written in words (`minus`, `a net-loss of`, `down about`, `in millions`, `USD million`) beside a
   rendered figure is shown as written, so a reader can be told a positive cell is a loss or a cell
   is in thousands; the figure itself is always the cell's own, with the cell's own sign;
-- a figure written in words (`forty-two`) or in ASCII letters that look like digits (`O.OS`, `lOO`)
-  is prose to the check and is shown;
+- a figure written in words (`forty-two thousand`) is prose to the check and is shown: no word list
+  is read;
+- a word of ASCII letters shaped like digits is withheld only in the two forms above, so one with no
+  `.` or `,` inside that is not beside a reference (`lOO thousand`, `It is OOO.`) is shown, and so
+  is a look-alike using any other ASCII letter (`g` for 9) or a hyphen (`OO-OO`); an honest word of
+  those letters beside a reference (`{..}, I think`) is withheld;
 - which row, column or metric the prose attributes a rendered figure to is not checked: two
   references swapped in the prose are shown as written;
 - a text cell is rendered as its own text and its characters are not read, so a text cell holding
@@ -117,6 +124,8 @@ PROSE = frozenset(".,;:!?'\"=_")
 CLOSING = frozenset(".,;:!?")
 SPACES = frozenset(" \n")
 LETTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+# The ASCII letters shaped like a digit (0 1 5 2 8): a prose word of these alone may read as one.
+DIGIT_SHAPED = frozenset("OolISZB")
 # The most characters a rendered number, or a rendered text cell, may take.
 LONGEST = 64
 LONGEST_TEXT = 200
@@ -234,6 +243,25 @@ def _prose(char: str) -> str | None:
     return "a character the prose may not hold outside a reference"
 
 
+def _look_alike_words(text: str) -> list[Failure]:
+    """The prose words made only of `DIGIT_SHAPED` letters that hold a `.` or `,` between two of
+    their letters (`O.OS`), or that are the word right before or after a reference with only white
+    space and a closing mark between (`{..} OOO`); a word is a run of characters between white
+    space, with the characters of `PROSE` at either end left out."""
+    marked = REFERENCE.sub("\0", text)
+    words = marked.split()
+    failures: list[Failure] = []
+    for index, word in enumerate(words):
+        core = word.strip("".join(PROSE))
+        if not core or "\0" in word or not set(core) <= DIGIT_SHAPED | {".", ","}:
+            continue
+        beside = any("\0" in words[i] for i in (index - 1, index + 1) if 0 <= i < len(words))
+        if beside or "." in core or "," in core:
+            reason = "a word of letters shaped like digits holding . or , or beside a reference"
+            failures.append(Failure(core, None, reason))
+    return failures
+
+
 def render(text: Any, citations: Sequence[Citation]) -> Rendered:
     """`text` with each reference replaced by the rendering of the cell of `citations` it names,
     or None with the failures; covering and freshness are `check`'s, not read here."""
@@ -256,6 +284,7 @@ def render(text: Any, citations: Sequence[Citation]) -> Rendered:
             continue
         if (reason := _prose(char)) is not None:
             failures.append(Failure(char, None, reason))
+    failures += _look_alike_words(text)
     references: list[Reference] = []
     for number, match in enumerate(matches):
         start, end = match.span()
