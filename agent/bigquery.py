@@ -53,8 +53,6 @@ Stated limits:
   is not seen;
 - the SQL is sqlglot's rendering of the DuckDB text in BigQuery's dialect: a verified query whose
   meaning differs between the two engines is not detected here, only by its answer;
-- a query over an aggregation threshold view is refused by BigQuery unless it is written
-  `SELECT WITH AGGREGATION_THRESHOLD`, which no verified query is;
 - a citation's freshness is None: the mode reads no table's modification time;
 - the agent account's own declared rights are not narrowed here: `platform/gcp/warehouse.tf` grants
   it the builder role, which reads every table, on each dataset the models build, though none on
