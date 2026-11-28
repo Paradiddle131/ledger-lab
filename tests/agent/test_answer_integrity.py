@@ -488,6 +488,10 @@ def test_a_word_of_digit_shaped_letters_with_a_point_or_beside_a_reference_is_wi
     [
         "The spend was lOO thousand.",
         "It is OOO.",
+        "The share is .OS.",
+        "The share is .S now.",
+        "The share is O.O'S.",
+        "The spend was lO'OOO.",
         "The spend was forty-two thousand.",
         f"The share is {cell('a')}, and the spend was OO-OO.",
     ],
@@ -496,7 +500,8 @@ def test_a_number_word_or_a_look_alike_not_beside_a_reference_and_with_no_point_
     as_persona: AsPersona, audit: Audit, text: str
 ) -> None:
     """Stated limits: number words are not read, and a word of digit-shaped letters holding no `.`
-    or `,` between its letters and not beside a reference is prose, so each of these is shown."""
+    or `,` between two of its letters (a point at either end is left out, and a `'` inside skips
+    the word) and not beside a reference is prose, so each of these is shown."""
     assert shown(text, as_persona, audit) == text.replace(cell("a"), "12.25")
 
 
