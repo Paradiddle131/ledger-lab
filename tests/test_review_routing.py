@@ -3,14 +3,14 @@
 The review skill's `tier.sh` reads `REVIEW.md` from the default branch, so a change's own edit
 of it is judged here instead: this file parses it by the rules `tier.sh` states (`parse` and
 `glob_re` below, the one copy of them in this repository) and pins the lenses of the paths in
-PINNED (`ingest/load.py`, `ingest/bucket.py`, `access/personas.yaml`, `platform/cost_check.py`,
-`agent/policy/tools.cedar`, `agent/policy/tools.py`, `agent/policy/tools.cedarschema`,
-`semantics/verified_queries.yaml`,
-`semantics/context.json`).
+PINNED (`ingest/individuals.py`, `access/personas.yaml`, `access/thresholds.py`,
+`models/models/marts/payments/payments_masked.sql`, `platform/gcp/warehouse.tf`,
+`platform/gcp/budget.tf`, `platform/fences.py`), one or more from each of its three areas.
 
 Checked:
 - `REVIEW.md` parses: `parse` raises where `tier.sh` would warn and count every path as
   sensitive, and the test fails with the reason;
+- no `## Sensitive` glob matches a path in LEFT_OUT;
 - each path in PINNED gets exactly its pinned lenses: the union of the `; lenses:` of every
   `## Sensitive` item with a glob that matches it, as `tier.sh` computes it; so a pinned path's
   glob changed to match nothing, its item's lenses clause dropped, or a lens removed from it,
@@ -57,21 +57,26 @@ GIT = shutil.which("git") or "git"
 BASH = shutil.which("bash") or "bash"
 
 PINNED = {
-    "ingest/load.py": {"control-prober", "guardrail-reviewer", "leak-hunter"},
-    "ingest/bucket.py": {"control-prober", "guardrail-reviewer", "leak-hunter"},
-    "access/personas.yaml": {
-        "claims-auditor",
+    "ingest/individuals.py": {"control-prober", "leak-hunter"},
+    "access/personas.yaml": {"control-prober", "guardrail-reviewer", "leak-hunter"},
+    "access/thresholds.py": {"control-prober", "guardrail-reviewer", "leak-hunter"},
+    "models/models/marts/payments/payments_masked.sql": {
         "control-prober",
         "guardrail-reviewer",
         "leak-hunter",
     },
-    "platform/cost_check.py": {"control-prober", "guardrail-reviewer"},
-    "agent/policy/tools.cedar": {"claims-auditor", "control-prober", "guardrail-reviewer"},
-    "agent/policy/tools.py": {"claims-auditor", "control-prober", "guardrail-reviewer"},
-    "agent/policy/tools.cedarschema": {"claims-auditor", "control-prober", "guardrail-reviewer"},
-    "semantics/verified_queries.yaml": {"claims-auditor", "control-prober", "guardrail-reviewer"},
-    "semantics/context.json": {"claims-auditor", "control-prober", "guardrail-reviewer"},
+    "platform/gcp/warehouse.tf": {"control-prober", "guardrail-reviewer", "leak-hunter"},
+    "platform/gcp/budget.tf": {"control-prober", "guardrail-reviewer"},
+    "platform/fences.py": {"control-prober", "guardrail-reviewer"},
 }
+
+# Paths outside the three areas, which no `## Sensitive` item matches.
+LEFT_OUT = (
+    "ingest/load.py",
+    "platform/cost_check.py",
+    "agent/policy/tools.py",
+    "tests/conftest.py",
+)
 
 
 # Short REVIEW.md texts, each one that tier.sh's parser refuses.
@@ -184,6 +189,11 @@ def test_review_md_parses_by_the_tier_scripts_rules() -> None:
 @pytest.mark.parametrize("path", sorted(PINNED))
 def test_review_md_gives_a_pinned_path_its_lenses(path: str) -> None:
     assert sorted(lenses_for(path, review_items())) == sorted(PINNED[path])
+
+
+@pytest.mark.parametrize("path", LEFT_OUT)
+def test_review_md_leaves_a_path_outside_its_areas_off_the_sensitive_list(path: str) -> None:
+    assert not any(glob_re(g).match(path) for globs, _ in review_items() for g in globs)
 
 
 @pytest.mark.parametrize("text", REFUSED)

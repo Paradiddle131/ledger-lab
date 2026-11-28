@@ -18,6 +18,8 @@ The owner approved the guardrail hold in an attended session on 2026-11-18 and s
 ## Review
 
 The paths that set a review tier: `REVIEW.md` at the repo root, read from the default branch by the `review` skill's `tier.sh`.
+When a slice or a feature works end to end, the wake that lands its last item also runs one review of the feature as a whole: the `review` skill's steps 3 and 4 at `focused` depth over the range from the merge-base of the feature's first PR to that last merge, with the lenses the range's paths plan and the verifier, its output posted as a comment on the last item's PR.
+A must-fix it confirms becomes one item, labelled `ready`, under the feature's epic; its nits stay on that comment.
 
 ## Digest
 
@@ -34,8 +36,8 @@ The rule it runs, which `tests/platform/test_next_item.py` proves on fixture tra
 1. The open issue titled `Roadmap`: its sub-issues are the epics, in order. The open issue titled starting `Thin slice` holds the slice's path: the rows of its "The path" table, in row order, each a step number then `#<n>`.
 2. Take the first pickable issue labelled `slice`, in path order.
 3. Else the first pickable other sub-issue labelled `slice`, off the path (such as a leftover that blocks a step), in epic order then sub-issue order.
-4. Else the first pickable issue labelled `leftover`, in epic order then sub-issue order: one `Review leftovers: <area>` issue is one item and one PR, its checkboxes the findings it fixes.
-5. Else the first pickable other sub-issue, in epic order then sub-issue order.
+4. Else the first pickable other sub-issue, in epic order then sub-issue order, leaving out the leftovers issues.
+5. Else the first pickable issue labelled `leftover`, in epic order then sub-issue order: one `Review leftovers: <area>` issue is one item and one PR, its checkboxes the findings it fixes.
 
 Pickable: labelled `ready`, carries none of `needs-gcp`, `needs-owner`, `blocked` or `owner-machine`, and is pickable by the skill's step 3 (open, no live claim, no open PR that closes it, every Blocked by in this repository and closed or with a held PR to stack on: one carrying `owner-merges` or `needs-local-verify`, never a speculative one).
 Only owner input steers: the `Roadmap`, the `Thin slice` issue and the Digest count only when an owner, member or collaborator opened them, and a PR only when such an author opened it from a branch of this repository.
@@ -43,11 +45,11 @@ Never picked: an epic (`epic`) and the `Thin slice` issue itself.
 A Digest `Owner lane` other than `none` stops the picker (`none: …`): pick by the skill's step 3 by hand.
 
 Labels: `ready` is the skill's `agent:ready`; `blocked` stands for its `blocked: *` (the reason is the last comment); `research` with `ready` is its `agent:research`; `agent:claimed` is applied by the scripts as the skill says.
-`slice` marks a step of the slice's path, in the order that path gives, or an issue a step waits on, such as a leftover that blocks it (taken after the path's steps; the picker warns that it is off the path); `leftover` marks an area's `Review leftovers: <area>` issue; `owner-machine` runs in the session on the owner's computer (live persona identity, work off the cloud proxy, or the owner's own hand step), so wakes skip it.
+`slice` marks a step of the slice's path, in the order that path gives, or an issue a step waits on, such as a leftover that blocks it (taken after the path's steps; the picker warns that it is off the path); `leftover` marks an area's `Review leftovers: <area>` issue already open, and no new one is opened; `owner-machine` runs in the session on the owner's computer (live persona identity, work off the cloud proxy, or the owner's own hand step), so wakes skip it.
 An open PR for an `owner-machine` item carries `needs-local-verify` on the PR itself, put there by whoever opens the PR or labels its issue: the skill's step 2 treats it as held, so wakes leave it even with work to do, `merge.sh` holds on it, and a session on the owner's computer takes it by the skill's § Local resume, removing the label once the item's live runs pass on its head.
 Area labels: `data`, `access`, `semantics`, `agent`, `workflow`, `operations`, `platform`; kind labels: `epic`, `decision`, `research`, `question`, `control`.
 
-**Review leftovers:** a finding the item did not fix (the skill's step 8) goes as a checkbox comment on the open `Review leftovers: <area>` issue of the item's area (its area label, the epic's where it has several), never as a new issue; with none open, the wake opens it with `$AP/scripts/file_issue.sh --epic <the area's epic>`, labelled `leftover`, `ready` and the area's label, its findings as checkboxes.
+**Review nits:** a review's nits stay on the PR's `🤖 Review` record; they are not filed as issues, nor as checkboxes on a `Review leftovers: <area>` issue (this narrows the skill's step 9).
 
 **An item that turns out to need GCP or the owner:** commit nothing half-done; swap `ready` and `agent:claimed` for `needs-gcp` (the step calls GCP while `LEDGER_LAB_GCP_PROJECT` is unset or blank or a `GCP_PROJECT` is non-empty, or while the Digest says `Mode: offline`, or this lab's own project is missing) or `needs-owner` (a decision packet as the last comment); say why on the issue; `git stash -u`; take the next.
 

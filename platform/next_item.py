@@ -7,8 +7,9 @@ that chose it, or no item and the reason. The order:
    body of the open issue titled starting `Thin slice`;
 3. else the first pickable other sub-issue labelled `slice` (one off the path, such as a leftover
    that blocks a step), in epic order then sub-issue order;
-4. else the first pickable issue labelled `leftover`, in epic order then sub-issue order;
-5. else the first pickable other sub-issue, in epic order then sub-issue order.
+4. else the first pickable other sub-issue not labelled `leftover`, in epic order then sub-issue
+   order;
+5. else the first pickable issue labelled `leftover`, in epic order then sub-issue order.
 The epics are the sub-issues of the open issue titled `Roadmap`, in order. An epic (label `epic`)
 and the slice issue itself are never picked.
 
@@ -73,8 +74,8 @@ GH_TIMEOUT_S = 60
 RULE_NAMED = "named by the prompt"
 RULE_SLICE = "the first pickable slice item in path order"
 RULE_SLICE_OFF_PATH = "no step of the path pickable: the first pickable slice item off the path"
-RULE_LEFTOVER = "no slice item pickable: the first pickable leftovers issue in epic order"
-RULE_EPIC = "no slice item or leftovers issue pickable: the first pickable sub-issue in epic order"
+RULE_EPIC = "no slice item pickable: the first pickable other sub-issue in epic order"
+RULE_LEFTOVER = "no slice item or other sub-issue pickable: the first pickable leftovers issue"
 
 _CLAIM = re.compile(r"(?:🤖 )?(?:claimed|still on it) ([0-9T:Z-]+) [0-9a-f]+")
 _HANDOFF = re.compile(r"(?:🤖 |## )?handoff", re.IGNORECASE)
@@ -418,8 +419,8 @@ def pick(tracker: Tracker, now: datetime, named: int | None = None) -> Pick:
     chosen = (
         first(path, lambda issue: SLICE in issue.labels, RULE_SLICE)
         or first(_sub_issues(tracker), lambda issue: SLICE in issue.labels, RULE_SLICE_OFF_PATH)
+        or first(_sub_issues(tracker), lambda issue: LEFTOVER not in issue.labels, RULE_EPIC)
         or first(_sub_issues(tracker), lambda issue: LEFTOVER in issue.labels, RULE_LEFTOVER)
-        or first(_sub_issues(tracker), lambda _: True, RULE_EPIC)
     )
     if chosen:
         return chosen
