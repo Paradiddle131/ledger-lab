@@ -9,18 +9,18 @@ one row access policy per reader (a tag's clear readers on the clear copy, its m
 the masked copy, the publisher on both), a tagged column of the clear copy refused to an identity
 that is not its clear reader, the purpose views and the aggregate views reading their sources as
 the persona querying them (authorized), each dataset readable and listable by the identities
-`platform/gcp` grants it to and refused (403) to every other, an aggregation threshold view
-answering only `SELECT WITH AGGREGATION_THRESHOLD`, with each group of fewer distinct privacy
-units than the threshold dropped. Its SQL is BigQuery's, turned into DuckDB's by sqlglot, with a
-fingerprint of its own for FARM_FINGERPRINT. Like BigQuery it refuses a query over its bytes
-cap, here one naming more than `CAP_COLUMNS` distinct columns of the payments, and pages an answer
-of more than `PAGE_ROWS` rows; the engine's answer budget is lowered so its distinct values come
-in several parts.
+`platform/gcp` grants it to and refused (403) to every other, each aggregate view its generated
+statement, grouped at its grain with the minimum in a HAVING. Its SQL is BigQuery's, turned into
+DuckDB's by sqlglot, with a fingerprint of its own for FARM_FINGERPRINT. Like BigQuery it refuses
+a query over its bytes cap, here one naming more than `CAP_COLUMNS` distinct columns of the
+payments, and pages an answer of more than `PAGE_ROWS` rows; the engine's answer budget is
+lowered so its distinct values come in several parts.
 
 `STUB_FAULT` plants one fault: `leak` gives the Chicago accountant's policy on the masked copy the
 UK entity's rows too; `unmasked` stores the clear person key in the masked copy it reads;
 `stray-view` adds a view of its own to the group close dataset; `changed` adds one to an amount of
-the clear copy as the payables clerk reads it; `no-threshold` drops the aggregation threshold.
+the clear copy as the payables clerk reads it; `no-minimum` serves the payments aggregate view
+with its HAVING's minimum at zero, its stored query still the generated one.
 `STUB_PROVEN` is the local engine's tally over the same build, which the BigQuery run must then
 reach. `STUB_LOG` is where it writes how many reads of each kind it served.
 """
@@ -61,7 +61,6 @@ PROJECT = os.environ["LEDGER_LAB_GCP_PROJECT"]
 FAULT = os.environ.get("STUB_FAULT", "")
 CAP_COLUMNS = 10
 PAGE_ROWS = 60
-THRESHOLD_PREFIX = "SELECT WITH AGGREGATION_THRESHOLD "
 TAGGED = {"vendor_name", "document_number", "vendor_person_key"}
 SERVED: Counter[str] = Counter()
 
@@ -149,10 +148,15 @@ class Warehouse:
         self.views: dict[tuple[str, str], str] = {}
         for view in PURPOSE_VIEWS:
             self.views[(view.dataset, view.name)] = view.select(PROJECT)
+        # What each view runs, where a fault plants another query under the stored one.
+        self.served: dict[tuple[str, str], str] = {}
         for aggregate in AGGREGATE_VIEWS:
-            self.views[(aggregate.dataset, aggregate.name)] = engine.generated_query(
-                aggregate, PROJECT
-            )
+            generated = engine.generated_query(aggregate, PROJECT)
+            self.views[(aggregate.dataset, aggregate.name)] = generated
+            if FAULT == "no-minimum" and aggregate.count == "count_distinct":
+                kept = f" >= {aggregate.minimum}"
+                assert generated.endswith(kept), generated
+                self.served[(aggregate.dataset, aggregate.name)] = generated[: -len(kept)] + " >= 0"
         if FAULT == "stray-view":
             self.views[("group_close", "notes")] = (
                 f"select entity_id from `{PROJECT}.group_totals.group_totals`"  # noqa: S608
@@ -205,6 +209,7 @@ class Warehouse:
                 )
             for (at, table), query in self.views.items():
                 if at == dataset:
+                    query = self.served.get((at, table), query)
                     self.db.execute(
                         f"create view {name}.{dataset}.{table} as {resolved(query, who, True)}"
                     )
@@ -234,19 +239,15 @@ class Warehouse:
         return answer
 
     def query(self, who: str, sql: str) -> dict[str, Any]:
-        tree = sqlglot.parse_one(sql.replace(THRESHOLD_PREFIX, "SELECT ", 1), read="bigquery")
+        tree = sqlglot.parse_one(sql, read="bigquery")
         named = {c.name for c in tree.find_all(exp.Column)}
         # Only the payments are large enough for a query of them to reach the cap.
         large = re.search(r"\.payments(_masked)?`", sql) is not None
         if large and len(named) > CAP_COLUMNS:
             SERVED["over the cap"] += 1
             raise Refused(400, "bytesBilledLimitExceeded")
-        threshold = next(
-            (v for v in AGGREGATE_VIEWS if f"{v.dataset}.{v.name}`" in sql and v.count != "max"),
-            None,
-        )
-        if threshold is not None and not sql.startswith(THRESHOLD_PREFIX):
-            raise Refused(400, "invalidQuery")
+        if any(f"`{PROJECT}.{v.dataset}.{v.name}`" in sql for v in AGGREGATE_VIEWS):
+            SERVED["aggregate views"] += 1
         if f"`{PROJECT}.payments.payments`" in sql or any(
             f"`{PROJECT}.{v.dataset}.{v.name}`" in sql
             for v in PURPOSE_VIEWS
@@ -255,18 +256,10 @@ class Warehouse:
             clear = clear_readers(COLUMNS, "payments", "payments") or frozenset()
             if named & TAGGED and who not in clear:
                 raise Refused(403, "accessDenied")
-        text = sql
-        if threshold is not None:
-            SERVED["aggregation threshold"] += 1
-            minimum = 0 if FAULT == "no-threshold" else threshold.minimum
-            text = (
-                sql.replace(THRESHOLD_PREFIX, "SELECT ", 1)
-                + f" HAVING COUNT(DISTINCT {threshold.units_of}) >= {minimum}"
-            )
         if "MOD(FARM_FINGERPRINT(" in sql:
             SERVED["distinct in parts"] += 1
         try:
-            cursor = self.db.execute(resolved(text, who, False))
+            cursor = self.db.execute(resolved(sql, who, False))
         except duckdb.CatalogException:
             raise Refused(403, "accessDenied") from None
         found = cursor.fetchall()
