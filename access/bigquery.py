@@ -15,20 +15,23 @@ carries; the persona queries run off that proxy, on the owner's machine, and eac
 `SESSION_USER()` to show whose identity BigQuery saw.
 
 A query goes to the `jobs.query` REST method as standard SQL, uncached, under a byte cap fixed in
-code that no setting raises (a persona's, or the publish's in `access/row_policies.py`), and runs
-where the tables it reads are; its answer gives each cell as text with its type, in one page or
+code that no setting raises (a persona's, or the publish's in `access/row_policies.py`), which a
+caller may lower for one query and never raise (the own agent's turn, `agent/bigquery.py`), and
+runs where the tables it reads are; it may bind named parameters and set job labels. Its answer
+gives each cell as text with its type, the bytes billed and the job's reference, in one page or
 not at all, and a query refused as over the cap can be read again in parts of its columns
-(`in_parts`). A dataset's listing and a table's metadata (`tables.list`, `tables.get`) are free
-metadata reads with the same token. A refusal reports BigQuery's HTTP status and reason, and a
-failed mint `gcloud`'s exit status, or that it timed out or could not run, never their messages
-or the command, which name the project and the accounts.
+(`in_parts`). A dataset's listing, a table's metadata and a job's labels read back by its creator
+(`tables.list`, `tables.get`, `jobs.get`) are free metadata reads with the same token. A refusal
+reports BigQuery's HTTP status and reason, and a failed mint `gcloud`'s exit status, or that it
+timed out or could not run, never their messages or the command, which name the project and the
+accounts.
 """
 
 import re
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
 
@@ -118,10 +121,37 @@ class Answer:
     # Each cell's type as the answer's schema names it (`STRING`, `INTEGER`, `NUMERIC` and the
     # like), empty when the answer carries no schema.
     types: tuple[str, ...] = ()
+    # The bytes the job billed (`totalBytesBilled`), None when the answer does not say.
+    bytes_billed: int | None = None
+    # The job's reference as the answer gives it (`projectId`, `location`, `jobId`), empty when
+    # no job was created.
+    job: Mapping[str, str] = field(default_factory=dict)
+    # Each cell's column name as the answer's schema names it, empty when it carries no schema.
+    columns: tuple[str, ...] = ()
+
+
+def query_parameters(parameters: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Named query parameters as `jobs.query` takes them: a string as `STRING`, an integer as
+    `INT64`; any other value is refused, since `agent.audit.bind` binds no other kind."""
+    given = []
+    for name, value in parameters.items():
+        if isinstance(value, str):
+            kind = "STRING"
+        elif isinstance(value, int) and not isinstance(value, bool):
+            kind = "INT64"
+        else:
+            raise PersonaQueryError(f"a parameter of a type the query does not bind: {name}")
+        given.append(
+            {"name": name, "parameterType": {"type": kind}, "parameterValue": {"value": str(value)}}
+        )
+    return given
 
 
 # BigQuery's reason for a query refused by its bytes-billed cap, which it refuses before running.
 OVER_CAP = "bytesBilledLimitExceeded"
+# The reason this module gives an answer BigQuery had not finished within the wait; not one of
+# BigQuery's, since the call itself succeeded.
+UNFINISHED = "jobIncomplete"
 # The most tables one dataset's listing may return; a listing that runs past it is refused.
 LISTED = 1000
 
@@ -165,14 +195,44 @@ class PersonaSession:
         self._headers = httpx.Headers({"Authorization": f"Bearer {token}"})
         self._client = client
 
-    def query(self, sql: str) -> Answer:
-        body = {
+    def query(
+        self,
+        sql: str,
+        *,
+        parameters: Mapping[str, Any] | None = None,
+        labels: Mapping[str, str] | None = None,
+        max_bytes_billed: int | None = None,
+        timeout_ms: int | None = None,
+    ) -> Answer:
+        """Run `sql` under the session's byte cap, or under `max_bytes_billed` where given, which
+        may lower that cap and never raise it. `parameters` are bound by name (`@<name>`);
+        `labels` are set on the job, which is then always created (`JOB_CREATION_REQUIRED`), since
+        a query BigQuery answers without a job carries no label; `timeout_ms` bounds both the wait
+        and the job (`jobTimeoutMs`, which BigQuery documents it tries, and may fail, to hold)."""
+        cap = self._max_bytes_billed if max_bytes_billed is None else max_bytes_billed
+        if (
+            isinstance(cap, bool)
+            or not isinstance(cap, int)
+            or not 0 < cap <= self._max_bytes_billed
+        ):
+            raise PersonaQueryError(
+                "a query's byte cap must be above zero and within the session's"
+            )
+        body: dict[str, Any] = {
             "query": sql,
             "useLegacySql": False,
             "useQueryCache": False,
-            "maximumBytesBilled": str(self._max_bytes_billed),
-            "timeoutMs": QUERY_TIMEOUT_MS,
+            "maximumBytesBilled": str(cap),
+            "timeoutMs": QUERY_TIMEOUT_MS if timeout_ms is None else timeout_ms,
         }
+        if timeout_ms is not None:
+            body["jobTimeoutMs"] = str(timeout_ms)
+        if parameters:
+            body["parameterMode"] = "NAMED"
+            body["queryParameters"] = query_parameters(parameters)
+        if labels is not None:
+            body["labels"] = dict(labels)
+            body["jobCreationMode"] = "JOB_CREATION_REQUIRED"
         response = self._client.post(self._url, json=body, headers=self._headers)
         if response.status_code != httpx.codes.OK:
             reason = _reason(response)
@@ -183,13 +243,25 @@ class PersonaSession:
             )
         answer = response.json()
         if not answer.get("jobComplete"):
-            raise PersonaQueryError("the query did not finish within its timeout")
+            raise PersonaQueryError(
+                "the query did not finish within its timeout", reason=UNFINISHED
+            )
         if answer.get("pageToken"):
             raise PersonaQueryError("the answer runs past one page, more than a persona test reads")
         rows = [tuple(cell.get("v") for cell in row["f"]) for row in answer.get("rows", [])]
         fields = answer.get("schema", {}).get("fields", [])
         types = tuple(str(f.get("type", "")) for f in fields)
-        return Answer(rows, int(answer.get("totalBytesProcessed", "0")), types)
+        billed = answer.get("totalBytesBilled")
+        reference = answer.get("jobReference")
+        job = (
+            {k: str(v) for k, v in reference.items() if k in ("projectId", "location", "jobId")}
+            if isinstance(reference, dict)
+            else {}
+        )
+        processed = int(answer.get("totalBytesProcessed", "0"))
+        names = tuple(str(f.get("name", "")) for f in fields)
+        billed_bytes = None if billed is None else int(billed)
+        return Answer(rows, processed, types, billed_bytes, job, names)
 
     def _get(self, path: str) -> dict[str, Any]:
         """A metadata read (`tables.list`, `tables.get`): free, and refused as a query is."""
@@ -206,6 +278,15 @@ class PersonaSession:
         if not isinstance(answer, dict):
             raise PersonaQueryError("BigQuery answered the metadata read in an unexpected shape")
         return answer
+
+    def job_labels(self, job: str, location: str) -> dict[str, str]:
+        """The labels of a job this identity ran (`jobs.get`, which a job's creator may call with
+        `bigquery.jobs.create` alone), a free metadata read."""
+        answer = self._get(f"/jobs/{quote(job, safe='')}?location={quote(location, safe='')}")
+        labels = (answer.get("configuration") or {}).get("labels") or {}
+        if not isinstance(labels, dict):
+            raise PersonaQueryError("the job's labels have an unexpected shape")
+        return {str(k): str(v) for k, v in labels.items()}
 
     def tables(self, dataset: str) -> list[tuple[str, str]]:
         """Each table, view or other kind of table a dataset holds, by name with its kind, as
